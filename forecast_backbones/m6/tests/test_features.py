@@ -3,6 +3,8 @@ import pandas as pd
 import pytest
 from forecast_backbones.m6.features import (window_timestamps, solar_geometry,
                                             clock_pseudo_geometry, StationMeta)
+from forecast_backbones.m6.features import (k_nwp_signal, spread_signal, disagree_signal,
+                                            recent_kt_std_signal, variability_bins)
 
 EPOCH = int(pd.Timestamp("2025-06-15 10:00:00").value // 10**9)   # 北京墙钟 10:00
 
@@ -37,3 +39,29 @@ def test_station_meta(tmp_path):
     assert sm.has_coords(1001) and not sm.has_coords(1002)
     assert sm.name(1001) == "A" and sm.name(9999) == "9999"
     assert sm.get(1001)["cap_mw"] == 500.0 and sm.get(7) is None
+
+def test_k_nwp_signal_uses_day_steps_only():
+    clear = np.array([[0.0, 100.0, 800.0, 0.0]])
+    pred = np.array([[50.0, 50.0, 400.0, 9.0]])
+    assert np.isclose(k_nwp_signal(pred, clear), (0.5 + 0.5) / 2)
+    assert np.isnan(k_nwp_signal(pred, np.zeros_like(clear)))[0]
+
+def test_spread_and_disagree():
+    clear = np.array([[800.0, 800.0]])
+    members = np.array([[[400.0, 400.0], [800.0, 800.0]]])         # [B=1, M=2, H=2]
+    assert np.isclose(spread_signal(members, clear)[0], 200.0 / 800.0)
+    assert np.isclose(disagree_signal(np.array([[400.0, 400.0]]), np.array([[800.0, 800.0]]), clear)[0], 0.5)
+
+def test_recent_kt_std():
+    p_clear = np.full((1, 4), 100.0)
+    steady = np.full((1, 4), 50.0); jumpy = np.array([[10.0, 90.0, 10.0, 90.0]])
+    assert recent_kt_std_signal(steady, p_clear, last_steps=4)[0] < recent_kt_std_signal(jumpy, p_clear, last_steps=4)[0]
+
+def test_variability_bins_with_edges_and_nan():
+    s = np.array([0.1, 0.5, 0.9, np.nan])
+    assert variability_bins(s, edges=[0.35, 0.75]).tolist() == [0, 1, 2, 1]
+
+def test_variability_bins_quantile_fallback():
+    s = np.linspace(0, 1, 30)
+    b = variability_bins(s, edges=None, n_bins=3)
+    assert set(b.tolist()) == {0, 1, 2} and b[0] == 0 and b[-1] == 2

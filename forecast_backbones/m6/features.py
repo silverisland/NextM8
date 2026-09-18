@@ -77,3 +77,46 @@ class StationMeta:
     def name(self, station_id) -> str:
         r = self.get(station_id)
         return str(r["station"]) if r is not None and isinstance(r["station"], str) else str(int(station_id))
+
+
+def _day_mean(values: np.ndarray, ghi_clear: np.ndarray, min_clear: float) -> np.ndarray:
+    """按行对白天步取均值；无白天步 → NaN。"""
+    day = ghi_clear > min_clear
+    num = np.where(day, values, 0.0).sum(axis=1)
+    cnt = day.sum(axis=1)
+    return np.where(cnt > 0, num / np.maximum(cnt, 1), np.nan)
+
+
+def k_nwp_signal(ghi_pred, ghi_clear_future, min_clear: float = 50.0) -> np.ndarray:
+    ghi_pred = np.asarray(ghi_pred, float); gc = np.asarray(ghi_clear_future, float)
+    k = np.where(gc > min_clear, ghi_pred / np.maximum(gc, 1e-6), 0.0)
+    return _day_mean(k, gc, min_clear)
+
+
+def spread_signal(members_pred, ghi_clear_future, min_clear: float = 50.0) -> np.ndarray:
+    m = np.asarray(members_pred, float); gc = np.asarray(ghi_clear_future, float)
+    sd = m.std(axis=1)                                          # [B,H]
+    return _day_mean(sd / np.maximum(gc, 1e-6), gc, min_clear)
+
+
+def disagree_signal(ghi_a, ghi_b, ghi_clear_future, min_clear: float = 50.0) -> np.ndarray:
+    a = np.asarray(ghi_a, float); b = np.asarray(ghi_b, float); gc = np.asarray(ghi_clear_future, float)
+    return _day_mean(np.abs(a - b) / np.maximum(gc, 1e-6), gc, min_clear)
+
+
+def recent_kt_std_signal(power_hist, p_clear_hist, last_steps: int = 192) -> np.ndarray:
+    p = np.asarray(power_hist, float)[:, -last_steps:]; pc = np.asarray(p_clear_hist, float)[:, -last_steps:]
+    day = pc > 0
+    kt = np.where(day, p / np.maximum(pc, 1e-6), np.nan)
+    with np.errstate(all="ignore"):
+        return np.nanstd(kt, axis=1)
+
+
+def variability_bins(signal, edges=None, n_bins: int = 3) -> np.ndarray:
+    s = np.asarray(signal, float)
+    if edges is None:
+        qs = np.nanquantile(s, np.linspace(0, 1, n_bins + 1)[1:-1]) if np.isfinite(s).any() else []
+        edges = list(np.atleast_1d(qs))
+    b = np.digitize(s, np.asarray(edges, float))          # NaN 落到最后一档，下一行改写成中档
+    mid = len(edges) // 2
+    return np.where(np.isfinite(s), b, mid).astype(int)
