@@ -120,3 +120,81 @@ def variability_bins(signal, edges=None, n_bins: int = 3) -> np.ndarray:
     b = np.digitize(s, np.asarray(edges, float))          # NaN 落到最后一档，下一行改写成中档
     mid = n_bins // 2
     return np.where(np.isfinite(s), b, mid).astype(int)
+
+
+try:
+    from .masks import night_from_elevation
+except ImportError:
+    from masks import night_from_elevation
+
+
+def _to_np(v) -> np.ndarray:
+    if hasattr(v, "detach"):
+        v = v.detach().cpu().numpy()
+    return np.asarray(v)
+
+
+def _scalar_per_row(v) -> np.ndarray:
+    a = _to_np(v).astype(float)
+    return a[:, 0] if a.ndim == 2 else a.reshape(-1)
+
+
+@dataclass
+class RowContext:
+    station_id: np.ndarray
+    cap: np.ndarray
+    ts: np.ndarray
+    elev_deg: np.ndarray
+    ghi_clear: np.ndarray
+    p_clear: np.ndarray
+    night_future: np.ndarray
+    k_steps: np.ndarray
+    var_signal: np.ndarray
+    var_bin: np.ndarray
+    degraded: np.ndarray
+
+
+def build_row_context(batch_dict: dict, cfg: dict, station_meta: StationMeta) -> RowContext:
+    ds = cfg["dataset"]; t3 = cfg["timesfm3"]; L = int(t3["context_len"]); H = int(t3["pred_len"])
+    ts_epoch = _to_np(batch_dict[ds["ts_col"]]).astype(np.int64).reshape(-1)
+    B = ts_epoch.shape[0]
+    sid = _to_np(batch_dict[ds["station_id_col"]]).astype(int).reshape(-1) if ds["station_id_col"] in batch_dict \
+        else np.zeros(B, int)
+    if ds["cap_col"] in batch_dict:
+        cap = _scalar_per_row(batch_dict[ds["cap_col"]])
+    else:
+        cap = np.array([(station_meta.get(s) or {}).get("cap_mw", np.nan) for s in sid], float)
+    ts = window_timestamps(ts_epoch, L, H, int(ds["step_min"]))
+    elev = np.empty((B, L + H)); ghi = np.empty((B, L + H)); degraded = np.zeros(B, bool)
+    for s in np.unique(sid):
+        rows = np.flatnonzero(sid == s)
+        if station_meta.has_coords(s):
+            m = station_meta.get(s)
+            e, g = solar_geometry(ts[rows], m["lat"], m["lon"], m["alt_m"], ds["tz"])
+        else:
+            e, g = clock_pseudo_geometry(ts[rows]); degraded[rows] = True
+        elev[rows] = e; ghi[rows] = g
+    p_clear = np.where(degraded[:, None], np.where(ghi > 0, cap[:, None], 0.0), ghi / 1000.0 * cap[:, None])
+    night_future = night_from_elevation(elev[:, L:])
+    # 多变度信号
+    vcfg = cfg["variability"]; fcfg = cfg["features"]
+    ghi_pred_col = fcfg["past_future"][0][1]
+    ghi_pred = _to_np(batch_dict[ghi_pred_col]).astype(float)[:, :H] if ghi_pred_col in batch_dict else np.zeros((B, H))
+    gc_fut = ghi[:, L:]
+    k_steps = np.where(gc_fut > 50.0, ghi_pred / np.maximum(gc_fut, 1e-6), 0.0)
+    kind = vcfg["signal"]
+    if kind == "nwp_spread" and fcfg["nwp_members"]["enabled"]:
+        suf = fcfg["nwp_members"]["future_suffix"]
+        members = np.stack([_to_np(batch_dict[c + suf]).astype(float)[:, :H] for c in fcfg["nwp_members"]["cols"]], axis=1)
+        sig = spread_signal(members, gc_fut)
+    elif kind == "src_disagree" and len(fcfg["past_future"]) >= 3 and fcfg["past_future"][2][1] in batch_dict:
+        sig = disagree_signal(ghi_pred, _to_np(batch_dict[fcfg["past_future"][2][1]]).astype(float)[:, :H], gc_fut)
+    elif kind == "recent_kt_std":
+        hist = _to_np(batch_dict[ds["pv_col"]]).astype(float)[:, -L:]
+        sig = recent_kt_std_signal(hist, p_clear[:, :L])
+    else:
+        sig = k_nwp_signal(ghi_pred, gc_fut)
+    edges = vcfg.get("k_nwp_edges") if kind == "k_nwp" else None
+    vbin = variability_bins(sig, edges=edges, n_bins=int(vcfg["bins"]))
+    return RowContext(station_id=sid, cap=cap, ts=ts, elev_deg=elev, ghi_clear=ghi, p_clear=p_clear,
+                      night_future=night_future, k_steps=k_steps, var_signal=sig, var_bin=vbin, degraded=degraded)
