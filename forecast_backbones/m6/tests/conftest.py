@@ -63,22 +63,38 @@ def make_synthetic_frame(n_days=3, stations=(1001, 1002), issue_every_min=15, se
 
 
 class FakeEvaluator:
-    """TimesFM3Evaluator 替身：中位数 = 0.1 × 第一对协变量末 H 段；分位 = 中位数 × [0.6..1.4]。"""
+    """TimesFM3Evaluator 替身：中位数 = 0.1×第一协变量末 H 段 + 1e-6×context 均值 + 1e-6×其余协变量末 H 段之和
+    （依赖 contexts 与全部协变量槽位，不只依赖第一个，用于测试侧的未来真值泄漏侦测）；
+    分位 = 中位数 × [0.6..1.4]。self.calls：每次 predict_batch 调用记一条，值为该次收到的全部数组
+    （contexts + past_future_covariates 各元素 + past_only_covariates 各元素），供测试做投毒溯源
+    （检查任何一个数组是否含 labels 里的未来真值）。"""
     FACTORS = np.linspace(0.6, 1.4, 9)
 
     def __init__(self, with_quantiles=True):
         self.with_quantiles = with_quantiles
-        self.calls = 0
+        self.calls = []
 
     def predict_batch(self, contexts, horizon, past_future_covariates=None, past_only_covariates=None,
                       return_quantiles=True, **kw):
-        self.calls += 1
+        contexts = list(contexts)
+        pf = list(past_future_covariates) if past_future_covariates is not None else None
+        po = list(past_only_covariates) if past_only_covariates is not None else None
+        recorded = [np.array(a, copy=True) for a in contexts]
+        if pf is not None:
+            recorded += [np.array(a, copy=True) for a in pf]
+        if po is not None:
+            recorded += [np.array(a, copy=True) for a in po]
+        self.calls.append(recorded)
         outs = []
         for i, ctx in enumerate(contexts):
-            if past_future_covariates is not None:
-                med = 0.1 * np.asarray(past_future_covariates[i])[0, -horizon:]
+            ctx_arr = np.asarray(ctx, dtype=np.float64)
+            if pf is not None:
+                pf_i = np.asarray(pf[i], dtype=np.float64)
+                med = 0.1 * pf_i[0, -horizon:] + 1e-6 * ctx_arr.mean()
+                if pf_i.shape[0] > 1:
+                    med = med + 1e-6 * pf_i[1:, -horizon:].sum(axis=0)
             else:
-                med = np.tile(np.asarray(ctx).reshape(-1)[-96:], 2)[:horizon]
+                med = np.tile(ctx_arr.reshape(-1)[-96:], 2)[:horizon] + 1e-6 * ctx_arr.mean()
             med = np.maximum(med, 0.0).astype(np.float32)
             q = (med[:, None] * self.FACTORS[None, :]).astype(np.float32) if (self.with_quantiles and return_quantiles) else None
             outs.append(types.SimpleNamespace(ts_id=i, forecast=med, quantiles=q))

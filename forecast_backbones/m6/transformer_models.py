@@ -6,7 +6,14 @@
 .logits [B,pred_len] = 提交曲线（默认按 decision.point 选 p*/p*_L1，已夜间归零与物理钳位），
 分位等辅助输出进 .aux。labels 给定时 .loss = pinball（本路径无梯度，仅报告）。
 配置：load_config(model_config) 与 DEFAULT_CFG 深合并；run/model/dataset/timesfm3 四段与 m5 同名兼容。
-⚠️ 推理输入不读 observe_power_future。"""
+⚠️ 推理输入不读 observe_power_future。
+
+校准装载（calibration.enabled=True 时）：
+  - table_path 指向的文件不存在 → warnings.warn 并本次不校准（calibrator=None，aux["quantiles_cal"]
+    走未校准路径，等价于 calibration.enabled=False 时的输出）；
+  - 文件存在但同名 `<table_path>.json` sidecar 缺失，或 sidecar 记录的拟合期配置（levels/model_levels/
+    normalization/elev_edges/lead_edges/use_variability/n_min_factor）与本次 cfg 不一致 → `Calibrator.load`
+    抛 ValueError，直接从 `__init__` 冒出（需要重新 fit，不吞掉该错误）。"""
 from __future__ import annotations
 
 import sys
@@ -201,8 +208,12 @@ class TransformersAdaptedM6Model(nn.Module):
             q_cal = q_raw.astype(float); levels = tuple(MODEL_LEVELS)
         q_cal = enforce_monotone(q_cal)
         ph = self.cfg["decision"]["physics"]
-        night = ctx.night_future if ph["night_zero"] else np.zeros_like(ctx.night_future)
-        q_cal = physics_clip(q_cal, night, ctx.p_clear[:, L:], ctx.cap[:, None],
+        # night_physics 只喂给 physics_clip（提交曲线的展示/钳位用），受 decision.physics.night_zero 开关控制；
+        # night_loss 恒等于真实夜间（ctx.night_future），不受该开关影响，专供训练损失掩码使用——
+        # 两者不得共用同一个变量，否则 night_zero=False 会静默把夜间步纳入损失。
+        night_physics = ctx.night_future if ph["night_zero"] else np.zeros_like(ctx.night_future)
+        night_loss = ctx.night_future
+        q_cal = physics_clip(q_cal, night_physics, ctx.p_clear[:, L:], ctx.cap[:, None],
                              float(ph["clear_sky_cap_ratio"]), bool(ph["capacity_cap"]))
         pt = self.cfg["decision"]["point"]
         point = select_point(q_cal, levels, ctx.cap, pt["default"], pt.get("by_step") or (),
@@ -216,13 +227,14 @@ class TransformersAdaptedM6Model(nn.Module):
             "levels_cal": list(levels),
             "p_star": torch.as_tensor(pstar, dtype=torch.float32, device=dev),
             "median": torch.as_tensor(median, dtype=torch.float32, device=dev),
-            "night": night, "elev_deg": ctx.elev_deg[:, L:], "p_clear": ctx.p_clear[:, L:],
+            "night": night_physics, "night_loss": night_loss,
+            "elev_deg": ctx.elev_deg[:, L:], "p_clear": ctx.p_clear[:, L:],
             "var_bin": ctx.var_bin, "var_signal": ctx.var_signal, "station_id": ctx.station_id,
             "cap": ctx.cap, "degraded": ctx.degraded,
         }
         loss = None
         if labels is not None:
-            loss = self._loss_from_labels(aux["quantiles"], labels, night)
+            loss = self._loss_from_labels(aux["quantiles"], labels, night_loss)
         return TransformersAdaptedModelOutput(loss=loss, logits=logits, predictions=logits, aux=aux)
 
     def _loss_from_labels(self, q_raw_t: torch.Tensor, labels, night: np.ndarray) -> torch.Tensor:
@@ -234,4 +246,4 @@ class TransformersAdaptedM6Model(nn.Module):
         return pinball_loss(q_raw_t, y, MODEL_LEVELS, torch.as_tensor(m, device=q_raw_t.device))
 
     def compute_loss(self, outputs, labels, num_items_in_batch=None) -> torch.Tensor:
-        return self._loss_from_labels(outputs.aux["quantiles"], labels, outputs.aux["night"])
+        return self._loss_from_labels(outputs.aux["quantiles"], labels, outputs.aux["night_loss"])
