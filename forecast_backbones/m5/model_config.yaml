@@ -1,0 +1,22 @@
+run:
+  model_name: m5
+model: {}
+dataset:
+  pv_col: observe_power
+timesfm3:
+  checkpoint: /data/tangqingang/timesfm-3.0-pytorch
+  context_len: 672
+  pred_len: 192
+  eager_init: true
+  device: auto
+  past_future_cols:
+    - [general_ghi,general_ghi_predict]
+    - [general_temp,general_temp_predict]
+  past_only_cols: []
+  per_core_batch_size: 64
+  return_quantiles: true
+  predict_quantile: null
+  nan_policy: interp
+  make_positive: true
+  use_znorm: false
+  use_symmetric_averaging: true 
