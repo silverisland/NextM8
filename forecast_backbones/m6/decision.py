@@ -100,11 +100,12 @@ def _point_by_method(q, levels, cap_bt, method: str, shrink_factor: float, floor
 
 def select_point(q, levels, cap, default: str, by_step=(), shrink_factor: float = 1.0,
                  floor_ratio: float = 0.2, step: float = 0.005) -> np.ndarray:
-    """q [B,T,K] → [B,T]。by_step: [{'steps':[lo,hi), 'method':...}]，先匹配者胜；其余用 default。"""
+    """q [B,T,K] → [B,T]。by_step: [{'steps':[lo,hi), 'method':...}]，先匹配者胜；其余用 default。
+    default 只在 by_step 规则未覆盖的步上计算（不对全部 T 都跑一遍再被覆盖丢弃）。"""
     q = np.asarray(q, float)
     B, T, _ = q.shape
     cap_bt = np.broadcast_to(np.asarray(cap, float).reshape(B, 1), (B, T))
-    out = _point_by_method(q, levels, cap_bt, default, shrink_factor, floor_ratio, step)
+    out = np.empty((B, T), float)
     assigned = np.zeros(T, bool)
     for rule in by_step or ():
         lo, hi = int(rule["steps"][0]), int(rule["steps"][1])
@@ -115,4 +116,8 @@ def select_point(q, levels, cap, default: str, by_step=(), shrink_factor: float 
         out[:, sl] = _point_by_method(q[:, sl], levels, cap_bt[:, sl], rule["method"],
                                       shrink_factor, floor_ratio, step)
         assigned[sl] = True
+    remaining = np.flatnonzero(~assigned)
+    if remaining.size:
+        out[:, remaining] = _point_by_method(q[:, remaining], levels, cap_bt[:, remaining], default,
+                                             shrink_factor, floor_ratio, step)
     return out

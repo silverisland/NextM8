@@ -114,12 +114,17 @@ def fit_shrink_from_result(result_df: pd.DataFrame, cfg: dict) -> float:
 
 
 def _stack_q(result_df: pd.DataFrame) -> np.ndarray:
-    return np.stack([np.stack([np.asarray(row[c], float) for c in quantile_cols(MODEL_LEVELS)], axis=-1)
-                     for _, row in result_df.iterrows()])                       # [N,192,9]
+    """[N,192,9]，向量化装配（不用 iterrows()）：每个分位列先各自 stack 成 [N,192]，再沿新尾轴叠成 [N,192,9]。"""
+    cols = quantile_cols(MODEL_LEVELS)
+    per_col = [np.stack(result_df[c].to_numpy()) for c in cols]                 # 每列 [N,192]
+    return np.stack(per_col, axis=-1)                                          # [N,192,9]
 
 
-def recompute_points(result_df: pd.DataFrame, cfg: dict, calibrator, variant: str, shrink: float = 1.0) -> pd.DataFrame:
-    q = _stack_q(result_df); N, H, _ = q.shape
+def _recompute_points_chunk(result_df: pd.DataFrame, cfg: dict, calibrator, variant: str,
+                            shrink: float, q: np.ndarray | None) -> pd.DataFrame:
+    if q is None:
+        q = _stack_q(result_df)
+    N, H, _ = q.shape
     night = np.stack(result_df["night"].to_numpy()).astype(bool)
     p_clear = np.stack(result_df["p_clear"].to_numpy()).astype(float)
     cap = result_df["cap"].to_numpy(float)
@@ -150,6 +155,23 @@ def recompute_points(result_df: pd.DataFrame, cfg: dict, calibrator, variant: st
     return out
 
 
+def recompute_points(result_df: pd.DataFrame, cfg: dict, calibrator, variant: str, shrink: float = 1.0,
+                     chunk_rows: int = 256, q: np.ndarray | None = None) -> pd.DataFrame:
+    """按 chunk_rows 行分块处理 result_df 再 pd.concat（限制单次峰值内存），输出与不分块时逐位相同。
+    q：可选的预先 _stack_q 好的 [N,192,9] 数组（ladder_report 用它把 _stack_q 提到打分轮次循环外，
+    避免同一 result_df 在每个 rung 都被重新堆叠一次）；按同样的行区间切片喂给每个分块。"""
+    N = len(result_df)
+    if N <= chunk_rows:
+        return _recompute_points_chunk(result_df, cfg, calibrator, variant, shrink, q)
+    parts = []
+    for start in range(0, N, chunk_rows):
+        end = min(start + chunk_rows, N)
+        chunk = result_df.iloc[start:end]
+        q_chunk = q[start:end] if q is not None else None
+        parts.append(_recompute_points_chunk(chunk, cfg, calibrator, variant, shrink, q_chunk))
+    return pd.concat(parts)
+
+
 def _nrmse_short_pct(df: pd.DataFrame, cfg: dict) -> float:
     lo, hi = cfg["data"]["scored_steps"]["short"]
     se, n = 0.0, 0
@@ -163,11 +185,13 @@ def _nrmse_short_pct(df: pd.DataFrame, cfg: dict) -> float:
 LADDER = ("raw_median", "global_shrink", "physics_median", "calibrated_pstar")
 
 
-def ladder_report(result_df: pd.DataFrame, gccap: dict, cfg: dict, calibrator, shrink: float) -> pd.DataFrame:
+def ladder_report(result_df: pd.DataFrame, gccap: dict, cfg: dict, calibrator, shrink: float,
+                  chunk_rows: int = 256) -> pd.DataFrame:
     nm = NanwangMetric()
+    q = _stack_q(result_df)                    # 提到打分轮次循环外：4 个 rung 共用同一份堆叠结果
     rows = []
     for v in LADDER:
-        df = recompute_points(result_df, cfg, calibrator, v, shrink)
+        df = recompute_points(result_df, cfg, calibrator, v, shrink, chunk_rows=chunk_rows, q=q)
         sd = nm.short_d1_daily(df, gccap); ud = nm.ultra_short_daily(df, gccap)
         rows.append({"variant": v,
                      "nanwang_short_D+1": float(sd["accuracy_pct"].mean()) if len(sd) else float("nan"),
@@ -242,6 +266,9 @@ def backfill_and_report(config_path, parquet_path, cal_start, cal_end, val_start
     print(rep.to_string(index=False))
     print(f"\n拟合 f* = {f:.4f}（写入 decision.point.shrink_factor 后，还须把 decision.point.default"
           f" 或某条 by_step 规则的 method 设为 'global_shrink' 才会生效——p_star/p_star_l1 不读它）")
+    degraded_frac = float(res_val["degraded"].mean()) if len(res_val) else 0.0
+    stations_scored = sorted(gccap.keys())
+    print(f"退化站占比 degraded_frac={degraded_frac:.4f}；参与打分的站（{len(stations_scored)}）: {stations_scored}")
     return rep
 
 

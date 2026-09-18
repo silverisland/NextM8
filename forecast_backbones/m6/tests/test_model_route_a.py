@@ -59,13 +59,35 @@ def test_by_step_routing_and_median_mode(tmp_path):
     day = ~out.aux["night"]
     assert np.allclose(out.logits.numpy()[day], out.aux["median"].numpy()[day])
 
-def test_degraded_station_still_runs(tmp_path):
+def test_degraded_station_still_runs(tmp_path, recwarn):
     p = write_station_meta(tmp_path, drop_coords_for=(1002,))
     cfg = {"timesfm3": {"eager_init": False}, "dataset": {"station_meta": str(p)}, "calibration": {"enabled": False}}
     m = TransformersAdaptedM6Model(cfg); m._backbone = FakeEvaluator(); m._backbone_device = "cpu"
     df = make_synthetic_frame(n_days=1, issue_every_min=360, stations=(1002,))
     bd, _ = _batch(df, [0]); out = m(bd)
     assert out.aux["degraded"].tolist() == [True] and np.isfinite(out.logits.numpy()).all()
+
+
+# ---------------------------------------------------------------- C1: station_meta 相对路径回退
+
+def test_load_station_meta_relative_path_falls_back_to_package_file(tmp_path, monkeypatch):
+    """dataset.station_meta 给的是相对路径、相对当前工作目录解析不到 → 回退到包内默认
+    forecast_backbones/m6/station_meta.csv（而不是整批站都退化），并 warn 说明回退了。"""
+    from forecast_backbones.m6.features import StationMeta
+    monkeypatch.chdir(tmp_path)
+    with pytest.warns(UserWarning, match="station_meta"):
+        sm = TransformersAdaptedM6Model._load_station_meta("some/relative/nonexistent/station_meta.csv")
+    assert isinstance(sm, StationMeta)
+    assert sm.has_coords(1001)                      # 包内默认文件里的示例站
+    assert sm.get(1001)["cap_mw"] == 500.0
+
+
+def test_load_station_meta_fully_absent_still_degrades_with_warning(tmp_path, monkeypatch):
+    """绝对路径且不存在（不去尝试相对路径回退）→ 保留既有行为：全部站按缺坐标退化，并 warn。"""
+    missing = tmp_path / "no_such_dir" / "station_meta.csv"
+    with pytest.warns(UserWarning, match="station_meta"):
+        sm = TransformersAdaptedM6Model._load_station_meta(str(missing))
+    assert not sm.has_coords(1001)
 
 def test_does_not_read_future_truth(tmp_path):
     df = make_synthetic_frame(n_days=1, issue_every_min=360)

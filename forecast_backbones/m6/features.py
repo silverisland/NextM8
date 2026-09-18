@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pvlib
+
+# 已经就哪些站发过“缺坐标退化几何”警告——跨调用去重，同一进程内每个站只提示一次。
+_DEGRADED_WARNED: set[int] = set()
 
 
 def window_timestamps(ts_win_epoch_s, context_len: int, pred_len: int, step_min: int = 15) -> np.ndarray:
@@ -164,6 +168,10 @@ def build_row_context(batch_dict: dict, cfg: dict, station_meta: StationMeta) ->
         cap = _scalar_per_row(batch_dict[ds["cap_col"]])
     else:
         cap = np.array([(station_meta.get(s) or {}).get("cap_mw", np.nan) for s in sid], float)
+    bad_cap = ~np.isfinite(cap)
+    if bad_cap.any():
+        bad_ids = sorted(int(s) for s in np.unique(sid[bad_cap]))
+        raise ValueError(f"cap 非有限（station_meta 与 {ds['cap_col']!r} 均无有效值）：station_id={bad_ids}")
     ts = window_timestamps(ts_epoch, L, H, int(ds["step_min"]))
     elev = np.empty((B, L + H)); ghi = np.empty((B, L + H)); degraded = np.zeros(B, bool)
     for s in np.unique(sid):
@@ -174,6 +182,16 @@ def build_row_context(batch_dict: dict, cfg: dict, station_meta: StationMeta) ->
         else:
             e, g = clock_pseudo_geometry(ts[rows]); degraded[rows] = True
         elev[rows] = e; ghi[rows] = g
+    if degraded.any():
+        degraded_ids = sorted(int(s) for s in np.unique(sid[degraded]))
+        new_ids = [s for s in degraded_ids if s not in _DEGRADED_WARNED]
+        if new_ids:
+            warnings.warn(
+                f"station(s) without coordinates in station_meta fell back to clock_pseudo_geometry "
+                f"(degraded geometry) for station_id={new_ids}: p_clear = nameplate capacity, "
+                f"elev = ±10, and calibration elevation strata collapse for these stations"
+            )
+            _DEGRADED_WARNED.update(new_ids)
     p_clear = np.where(degraded[:, None], np.where(ghi > 0, cap[:, None], 0.0), ghi / 1000.0 * cap[:, None])
     night_future = night_from_elevation(elev[:, L:])
     # 多变度信号

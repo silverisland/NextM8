@@ -55,6 +55,56 @@ def test_recompute_points_variants_shape(tmp_path):
     assert (out.iloc[0]["observe_power_predict"][night] == 0).all()
 
 
+# ---------------------------------------------------------------- C2: 分块不改变数值
+
+def test_recompute_points_chunking_matches_unchunked(tmp_path):
+    """chunk_rows=7（真的会分好几块）与 chunk_rows=10**9（等价于不分块）在同一份数据上必须逐位相同。"""
+    m, res = _run(tmp_path, n_days=3)
+    assert len(res) > 7                      # 确保 chunk_rows=7 真的触发多块，不是退化成单块
+    out_small = recompute_points(res, m.cfg, None, "physics_median", chunk_rows=7)
+    out_big = recompute_points(res, m.cfg, None, "physics_median", chunk_rows=10**9)
+    pts_small = np.stack(out_small["observe_power_predict"].to_numpy())
+    pts_big = np.stack(out_big["observe_power_predict"].to_numpy())
+    assert np.array_equal(pts_small, pts_big)
+
+
+# ---------------------------------------------------------------- I1: 阶梯 ↔ 部署模型的口径不变量
+
+def test_ladder_calibrated_pstar_matches_deployed_model_with_calibration(tmp_path):
+    """不变量：阶梯的 calibrated_pstar 档与打开校准的部署模型 forward 必须算出同一个点——
+    calibrate → enforce_monotone → physics_clip → select_point，同一套 levels/cap 口径。
+    用小 chunk_rows（5）跑阶梯这一侧，同时覆盖 C2 分块路径不改变数值这条。"""
+    from .test_model_route_a import _batch
+    df = make_synthetic_frame(n_days=3, issue_every_min=15, seed=0)
+    sm_path = str(write_station_meta(tmp_path))
+    m_off = TransformersAdaptedM6Model({"timesfm3": {"eager_init": False}, "dataset": {"station_meta": sm_path},
+                                        "calibration": {"enabled": False}, "eval": {"batch_size": 64}})
+    m_off._backbone = FakeEvaluator(); m_off._backbone_device = "cpu"
+    ds = UnifiedDataset(df, timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"], for_hf_trainer=True)
+    res = evaluate_model(m_off, ds, functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True), m_off.cfg)
+
+    day = res["timestamp_win"].dt.normalize()
+    cal_res, val_res = res[day < day.max()], res[day == day.max()]
+    calib = fit_calibrator_from_result(cal_res, m_off.cfg)
+    f = fit_shrink_from_result(cal_res, m_off.cfg)
+    cal_path = tmp_path / "calibration.parquet"
+    calib.save(cal_path)
+
+    ladder_out = recompute_points(val_res, m_off.cfg, calib, "calibrated_pstar", f, chunk_rows=5)
+    ladder_points = np.stack(ladder_out["observe_power_predict"].to_numpy())
+
+    m_on = TransformersAdaptedM6Model({"timesfm3": {"eager_init": False}, "dataset": {"station_meta": sm_path},
+                                       "calibration": {"enabled": True, "table_path": str(cal_path)},
+                                       "decision": {"point": {"shrink_factor": f}}})
+    m_on._backbone = FakeEvaluator(); m_on._backbone_device = "cpu"
+
+    val_idx = np.flatnonzero((df["timestamp_win"].dt.normalize() == day.max()).to_numpy())
+    bd, _ = _batch(df, val_idx)
+    deployed_points = m_on(bd).logits.numpy()
+
+    assert np.allclose(ladder_points, deployed_points, rtol=1e-5, atol=1e-4)
+
+
 # ---------------------------------------------------------------- fix #1: calibration.window_days
 
 def test_clip_calibration_window_excludes_rows_older_than_window():

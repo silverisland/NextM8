@@ -22,6 +22,12 @@
 raw_median / global_shrink / physics_median 三档用的是中位数（不受下面第 (b) 条 tail 偏置影响），只有
 calibrated_pstar 用 p*。
 
+阶梯的 calibrated_pstar 档与打开校准部署的模型 forward 输出数值上是等价的：两者走同一顺序
+calibrate → enforce_monotone → physics_clip → select_point，同一套 levels 与 cap 口径
+（`tests/test_ladder.py::test_ladder_calibrated_pstar_matches_deployed_model_with_calibration`）。
+不是 bit-identical——是 numerically equal（≤1e-5；evaluate_model 落盘时把 p_clear/elev_deg
+存成 float32，这一步截断带来的误差量级就是 1e-5）。
+
 测试：`python -m pytest forecast_backbones/m6/tests -q`（不需要 timesfm3；真实底座的冒烟测试见
 `tests/test_real_backbone.py`，本机缺 timesfm3 与本地权重时自动跳过，不影响本目录当前测试全绿；
 训练机上安装了 timesfm3 且权重路径存在时才会真正运行）。

@@ -80,6 +80,12 @@ class TransformersAdaptedM6Model(nn.Module):
     def _load_station_meta(path) -> StationMeta:
         p = Path(path)
         if not p.exists():
+            if not p.is_absolute():
+                fallback = Path(__file__).parent / "station_meta.csv"
+                if fallback.exists():
+                    warnings.warn(f"station_meta {p} 不存在（相对路径，相对当前工作目录解析失败）："
+                                  f"回退到包内默认文件 {fallback}")
+                    return StationMeta.from_csv(fallback)
             warnings.warn(f"station_meta {p} 不存在：全部站按缺坐标退化")
             import pandas as pd
             return StationMeta(pd.DataFrame(columns=list(StationMeta.COLS)))
