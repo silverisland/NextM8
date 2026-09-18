@@ -118,5 +118,5 @@ def variability_bins(signal, edges=None, n_bins: int = 3) -> np.ndarray:
         qs = np.nanquantile(s, np.linspace(0, 1, n_bins + 1)[1:-1]) if np.isfinite(s).any() else []
         edges = list(np.atleast_1d(qs))
     b = np.digitize(s, np.asarray(edges, float))          # NaN 落到最后一档，下一行改写成中档
-    mid = len(edges) // 2
+    mid = n_bins // 2
     return np.where(np.isfinite(s), b, mid).astype(int)

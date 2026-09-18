@@ -65,3 +65,8 @@ def test_variability_bins_quantile_fallback():
     s = np.linspace(0, 1, 30)
     b = variability_bins(s, edges=None, n_bins=3)
     assert set(b.tolist()) == {0, 1, 2} and b[0] == 0 and b[-1] == 2
+
+def test_variability_bins_all_nan_falls_back_to_middle_bin():
+    s = np.array([np.nan, np.nan, np.nan])
+    b = variability_bins(s, edges=None, n_bins=3)
+    assert b.tolist() == [1, 1, 1]
