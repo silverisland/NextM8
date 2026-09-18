@@ -47,6 +47,44 @@ def test_global_shrink_factor_closed_form():
     assert np.isclose(f, np.sum(y * p / d**2) / np.sum(p**2 / d**2))
     assert f < 1.0
 
+def test_global_shrink_factor_drops_nan_cap_points():
+    y = np.array([10.0, 20.0, 30.0]); p = np.array([9.0, 19.0, 29.0]); cap = np.array([100.0, np.nan, 100.0])
+    got = global_shrink_factor(y, p, cap)
+    clean = global_shrink_factor(np.array([10.0, 30.0]), np.array([9.0, 29.0]), 100.0)
+    assert np.isclose(got, clean)
+
+def test_global_shrink_factor_all_nan_cap_raises():
+    y = np.array([10.0, 20.0]); p = np.array([9.0, 19.0]); cap = np.array([np.nan, np.nan])
+    with pytest.raises(ValueError):
+        global_shrink_factor(y, p, cap)
+
+def test_global_shrink_factor_per_row_cap_matches_manual_aggregation():
+    # 逐点 cap 数组（Tasks 9/11 用法：cap[:, None] 广播到每行不同容量）应等价于逐行标量 cap 手工累加
+    y = np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]])
+    p = np.array([[9.0, 21.0, 28.0], [39.0, 52.0, 63.0]])
+    cap_per_row = np.array([100.0, 150.0])
+    cap_full = np.broadcast_to(cap_per_row[:, None], y.shape)
+    got = global_shrink_factor(y, p, cap_full)
+    num = 0.0; den = 0.0
+    for i in range(2):
+        d = np.maximum(y[i], 0.2 * cap_per_row[i])
+        num += np.sum(y[i] * p[i] / d ** 2)
+        den += np.sum(p[i] ** 2 / d ** 2)
+    assert np.isclose(got, num / den)
+
+def test_p_star_accepts_per_row_cap_array():
+    # cap[:, None] 广播到 [B,T,K]（Tasks 9/11 用法）应等价于逐行用标量 cap 分别调用
+    B, T, K = 2, 4, 9
+    base = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0])
+    q = np.tile(base[None, None, :], (B, T, 1))
+    cap = np.array([100.0, 200.0])
+    got = p_star(q, MODEL_LEVELS, cap[:, None])
+    assert got.shape == (B, T)
+    row0 = p_star(q[0:1], MODEL_LEVELS, cap[0])
+    row1 = p_star(q[1:2], MODEL_LEVELS, cap[1])
+    assert np.allclose(got[0], row0[0])
+    assert np.allclose(got[1], row1[0])
+
 def test_enforce_monotone_and_physics_clip():
     q = np.array([[[30.0, 10.0, 20.0]]])                   # [B=1,T=1,K=3]
     assert enforce_monotone(q).tolist() == [[[10.0, 20.0, 30.0]]]
@@ -54,6 +92,16 @@ def test_enforce_monotone_and_physics_clip():
     assert physics_clip(q, night, pc, cap).tolist() == [[[0.0, 0.0, 0.0]]]
     day = np.array([[False]])
     assert physics_clip(np.array([[[70.0, 80.0, 200.0]]]), day, pc, cap).tolist() == [[[52.5, 52.5, 52.5]]]
+
+def test_physics_clip_handles_nonfinite_p_clear():
+    # p_clear 缺测（NaN）的白天步退化为只用装机容量钳位，不产生 NaN
+    q = np.array([[[1500.0], [2000.0], [999.0]]])          # [B=1,T=3,K=1]
+    night = np.array([[False, False, False]])
+    p_clear = np.array([[np.nan, 500.0, 0.0]])
+    cap = np.array([[1000.0]])
+    out = physics_clip(q, night, p_clear, cap)
+    assert not np.isnan(out).any()
+    assert np.allclose(out[0, :, 0], [1000.0, 525.0, 0.0])   # clip-to-cap / clip-to-1.05·p_clear / 0
 
 def test_select_point_routes_by_step():
     B, T, K = 1, 200, 9

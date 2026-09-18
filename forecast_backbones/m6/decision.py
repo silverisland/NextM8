@@ -51,10 +51,13 @@ def p_star_l1(q, levels, cap, floor_ratio: float = 0.2, step: float = 0.005) -> 
 
 
 def global_shrink_factor(y, p, cap, floor_ratio: float = 0.2) -> float:
-    """f* = Σ y p / d² / Σ p² / d²，d = max(y, 0.2C)。cap 标量或与 y 同长的逐点数组；只用两边有限的点。"""
+    """f* = Σ y p / d² / Σ p² / d²，d = max(y, 0.2C)。cap 标量或与 y 同长的逐点数组；只用 y/p/cap 三者都有限的点。
+    可用点为空时抛 ValueError；den<=0（如全部预测为 0）时退化返回 1.0（无收缩信息）。"""
     y = np.asarray(y, float).reshape(-1); p = np.asarray(p, float).reshape(-1)
     capv = np.broadcast_to(np.asarray(cap, float).reshape(-1) if np.ndim(cap) else np.asarray(cap, float), y.shape)
-    ok = np.isfinite(y) & np.isfinite(p)
+    ok = np.isfinite(y) & np.isfinite(p) & np.isfinite(capv)
+    if not ok.any():
+        raise ValueError("global_shrink_factor: no usable points")
     d = np.maximum(y[ok], floor_ratio * capv[ok])
     den = np.sum(p[ok] ** 2 / d ** 2)
     return float(np.sum(y[ok] * p[ok] / d ** 2) / den) if den > 0 else 1.0
@@ -65,10 +68,16 @@ def enforce_monotone(q) -> np.ndarray:
 
 
 def physics_clip(q, night, p_clear, cap, clear_sky_cap_ratio: float = 1.05, capacity_cap: bool = True) -> np.ndarray:
+    """白天 clip 到 min(clear_sky_cap_ratio·p_clear, cap)，夜间归零。
+    p_clear 非有限值（缺测/NaN）时该步退化为只用装机容量 cap 钳位（不受 capacity_cap 开关影响），
+    不设晴空上界，避免 NaN 传播到预报；p_clear<=0 的白天步维持现状：upper=0 → 预报被钳成 0（无辐照即无出力）。"""
     q = np.asarray(q, float).copy()
-    upper = clear_sky_cap_ratio * np.asarray(p_clear, float)
+    pc = np.asarray(p_clear, float)
+    capv = np.broadcast_to(np.asarray(cap, float), pc.shape)
+    upper = clear_sky_cap_ratio * pc
     if capacity_cap:
-        upper = np.minimum(upper, np.broadcast_to(np.asarray(cap, float), upper.shape))
+        upper = np.minimum(upper, capv)
+    upper = np.where(np.isfinite(pc), upper, capv)
     q = np.minimum(q, upper[..., None])
     q = np.maximum(q, 0.0)
     q[np.asarray(night, bool)] = 0.0
