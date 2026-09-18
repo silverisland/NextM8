@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
 try:
@@ -34,11 +35,11 @@ except ImportError:
 try:
     from .calibration import Calibrator, CalibrationConfig, result_to_long
     from .decision import (enforce_monotone, physics_clip, select_point, level_value, global_shrink_factor)
-    from .config import load_config
+    from .config import load_config, deep_merge
 except ImportError:
     from calibration import Calibrator, CalibrationConfig, result_to_long
     from decision import enforce_monotone, physics_clip, select_point, level_value, global_shrink_factor
-    from config import load_config
+    from config import load_config, deep_merge
 
 
 def _np(x):
@@ -95,6 +96,10 @@ def fit_calibrator_from_result(result_df: pd.DataFrame, cfg: dict) -> Calibrator
 
 
 def fit_shrink_from_result(result_df: pd.DataFrame, cfg: dict) -> float:
+    """短期打分窗上的 f*：先按 night 掩夜间（与旧实现一致），再交给 decision.global_shrink_factor
+    统一做 isfinite(y)&isfinite(p)&isfinite(cap) 掩码——不能只掩 y：median 里单点 NaN（如某步分位
+    退化）若不经 isfinite(p) 过滤会直接把 f* 整体 NaN 掉。result_df 为空、或全部点被过滤剩 0 个时
+    （无收缩信息），返回 1.0（不收缩），不抛错。"""
     lo, hi = cfg["data"]["scored_steps"]["short"]
     ys, ps, caps = [], [], []
     for r in result_df.itertuples(index=False):
@@ -102,10 +107,10 @@ def fit_shrink_from_result(result_df: pd.DataFrame, cfg: dict) -> float:
         night = np.asarray(r.night, bool)[lo:hi]
         ok = np.isfinite(y) & ~night
         ys.append(y[ok]); ps.append(p[ok]); caps.append(np.full(ok.sum(), float(r.cap)))
+    if not ys or sum(a.size for a in ys) == 0:
+        return 1.0
     y = np.concatenate(ys); p = np.concatenate(ps); cap = np.concatenate(caps)
-    d = np.maximum(y, float(cfg["decision"]["point"]["floor_ratio"]) * cap)
-    den = np.sum(p ** 2 / d ** 2)
-    return float(np.sum(y * p / d ** 2) / den) if den > 0 else 1.0
+    return global_shrink_factor(y, p, cap, float(cfg["decision"]["point"]["floor_ratio"]))
 
 
 def _stack_q(result_df: pd.DataFrame) -> np.ndarray:
@@ -172,14 +177,47 @@ def ladder_report(result_df: pd.DataFrame, gccap: dict, cfg: dict, calibrator, s
     return pd.DataFrame(rows)
 
 
+def _clip_calibration_window(res_cal: pd.DataFrame, cal_end, window_days: int) -> pd.DataFrame:
+    """按 calibration.window_days 把 res_cal 收窄到滚动窗口 [cal_end - window_days, cal_end)（上界已由
+    filter_by_time(cal_start, cal_end) 保证，这里只再加下界）。窗口内一行都没有时抛 ValueError 报出区间，
+    而不是静默在过长的 cal 段全量上拟合。"""
+    lo = pd.Timestamp(cal_end) - pd.Timedelta(days=int(window_days))
+    hi = pd.Timestamp(cal_end)
+    out = res_cal[res_cal["timestamp_win"] >= lo]
+    if out.empty:
+        raise ValueError(f"calibration.window_days={window_days} 对应的窗口 [{lo}, {hi}) 内没有样本"
+                         f"（res_cal 覆盖的 timestamp_win 范围: "
+                         f"{res_cal['timestamp_win'].min() if len(res_cal) else None} .. "
+                         f"{res_cal['timestamp_win'].max() if len(res_cal) else None}）")
+    return out
+
+
+def _raw_override(config_path) -> dict:
+    """把 config_path（yaml 路径 / dict / None）解析成尚未与 DEFAULT_CFG 合并、未插值的 override dict。
+    只用于 out_dir 覆盖时重建 cfg：不能直接改已插值 cfg 的 run.out_dir 后再调一次 interpolate ——
+    ${run.out_dir} 占位符字面量在第一次 interpolate 时已被替换掉的字符串里不会再出现，二次插值是空操作，
+    calibration.table_path / eval.report_dir 仍会停在旧 out_dir 下。必须回到合并前（占位符还在）的
+    dict，把新 out_dir 合进去，再整体走一遍 load_config 的 deep_merge+interpolate。"""
+    if config_path is None:
+        return {}
+    if isinstance(config_path, dict):
+        return config_path
+    return yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+
+
 def backfill_and_report(config_path, parquet_path, cal_start, cal_end, val_start, val_end, out_dir=None) -> pd.DataFrame:
-    """零样本回填 cal+val → 在 cal 上拟合校准与 f* → 在 val 上出阶梯报表。
+    """零样本回填 cal+val → 在 cal 上按 calibration.window_days 收窄的滚动窗口拟合校准与 f* →
+    在 val 上出阶梯报表。cal_end 不得晚于 val_start（否则拒绝：校准/验证段重叠即时间泄漏）。
     STATE 产物（calibration.parquet + sidecar / decision_state.json / result_cal.parquet /
-    result_val.parquet）落 run.out_dir（或 out_dir 覆盖）；REPORT 产物（ladder.csv）落
-    cfg['eval']['report_dir']（已插值为 <out_dir>/reports）。calibration.parquet 的存盘路径
-    取 cfg['calibration']['table_path']，与模型 calibration.enabled=True 时的加载路径一致。"""
+    result_val.parquet）与 REPORT 产物（ladder.csv，落 cfg['eval']['report_dir']）都从同一份
+    cfg 派生路径；给了 out_dir 时会先把它合进 run.out_dir 再重新整体插值，五个产物一起跟着挪，
+    不会出现 STATE 跟着 out_dir 走、REPORT/calibration.table_path 仍停在旧 out_dir 的分裂。"""
+    if pd.Timestamp(cal_end) > pd.Timestamp(val_start):
+        raise ValueError(f"cal_end={cal_end!r} 晚于 val_start={val_start!r}：校准段与验证段重叠会造成时间泄漏")
+    if out_dir is not None:
+        config_path = deep_merge(_raw_override(config_path), {"run": {"out_dir": str(out_dir)}})
     cfg = load_config(config_path)
-    out = Path(out_dir or cfg["run"]["out_dir"]); out.mkdir(parents=True, exist_ok=True)
+    out = Path(cfg["run"]["out_dir"]); out.mkdir(parents=True, exist_ok=True)
     report_dir = Path(cfg["eval"]["report_dir"]); report_dir.mkdir(parents=True, exist_ok=True)
     try:
         from .transformer_models import TransformersAdaptedM6Model
@@ -192,6 +230,7 @@ def backfill_and_report(config_path, parquet_path, cal_start, cal_end, val_start
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     res_cal = evaluate_model(model, ds_all.filter_by_time(cal_start, cal_end), collate, cfg)
     res_val = evaluate_model(model, ds_all.filter_by_time(val_start, val_end), collate, cfg)
+    res_cal = _clip_calibration_window(res_cal, cal_end, cfg["calibration"]["window_days"])
     calib = fit_calibrator_from_result(res_cal, cfg); calib.save(cfg["calibration"]["table_path"])
     f = fit_shrink_from_result(res_cal, cfg)
     gccap = {model.station_meta.name(s): float(c) for s, c in
@@ -200,7 +239,9 @@ def backfill_and_report(config_path, parquet_path, cal_start, cal_end, val_start
     rep.to_csv(report_dir / "ladder.csv", index=False)
     res_cal.to_parquet(out / "result_cal.parquet", index=False); res_val.to_parquet(out / "result_val.parquet", index=False)
     (out / "decision_state.json").write_text(json.dumps({"shrink_factor": f}, indent=2), encoding="utf-8")
-    print(rep.to_string(index=False)); print(f"\n拟合 f* = {f:.4f}（写入 decision.point.shrink_factor 可启用 global_shrink）")
+    print(rep.to_string(index=False))
+    print(f"\n拟合 f* = {f:.4f}（写入 decision.point.shrink_factor 后，还须把 decision.point.default"
+          f" 或某条 by_step 规则的 method 设为 'global_shrink' 才会生效——p_star/p_star_l1 不读它）")
     return rep
 
 

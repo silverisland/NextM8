@@ -3,9 +3,12 @@
 路线 A（本目录当前状态，零样本、无训练）：
 
     # 1. 填站坐标：forecast_backbones/m6/station_meta.csv（station_id 与 parquet 一致）
-    # 2. 回填 + 校准 + 阶梯报表（cal 段在 val 段之前，各 ≥ 30 天）
+    # 2. 回填 + 校准 + 阶梯报表：cal 段不得晚于 val 段起点（否则报时间泄漏错误拒绝）；实际参与拟合的
+    #    只是 cal 段末尾 calibration.window_days（默认 45）天的滚动窗口——--cal-start/--cal-end 之间
+    #    可以给更长的范围（决定评估/落盘覆盖的区间），拟合窗口会自动收窄到最后 45 天。
+    #    parquet 路径含通配符时给引号，避免被 shell 展开：
     python -m forecast_backbones.m6.transformer_trainer \
-        --config forecast_backbones/m6/model_config.yaml --parquet data/clean/*.parquet \
+        --config forecast_backbones/m6/model_config.yaml --parquet 'data/clean/*.parquet' \
         --cal-start 2025-06-01 --cal-end 2025-07-16 --val-start 2025-07-16 --val-end 2025-09-01
     # 产物：
     #   REPORT（人读）  runs/m6_baseline/reports/ladder.csv
@@ -19,7 +22,8 @@
 raw_median / global_shrink / physics_median 三档用的是中位数（不受下面第 (b) 条 tail 偏置影响），只有
 calibrated_pstar 用 p*。
 
-测试：`python -m pytest forecast_backbones/m6/tests -q`（不需要 timesfm3；`test_real_backbone.py` 自动跳过）。
+测试：`python -m pytest forecast_backbones/m6/tests -q`（不需要 timesfm3；真实底座的冒烟测试由后续
+任务补充 `tests/test_real_backbone.py`，到时缺 timesfm3 会自动跳过，不影响本目录当前测试全绿）。
 
 ## 备注
 

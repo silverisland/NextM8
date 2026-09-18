@@ -70,7 +70,8 @@ decision:
     floor_ratio: 0.2
     tau_grid_step: 0.005
     tail: flat
-    shrink_factor: null                # global_shrink 用；backfill 报表会打印拟合值
+    shrink_factor: null                # 仅当 default 或某条 by_step 规则的 method=global_shrink 时生效
+                                        # （p_star/p_star_l1 不读它）；backfill 报表会打印拟合值
 eval:
   metrics: [nanwang_short_D+1, nanwang_ultra_short, nrmse, crps, coverage, pit]
   buckets: [variability, solar_elevation, station, lead]
