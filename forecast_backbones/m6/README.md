@@ -18,6 +18,8 @@
     #                                     decision_state.json, result_cal.parquet, result_val.parquet}
     # 3. 之后正常推理：model_config.yaml 的 calibration.table_path 指向上一步的 calibration.parquet，
     #    registry 用 model_name=m6 构建即可，logits 即提交曲线。
+    # 注意：--out 覆盖 run.out_dir 时，只有形如 ${run.out_dir}/... 的字面量才会跟着重新插值；
+    #       calibration.table_path 若被改写成一个不含 ${run.out_dir} 的字面量路径，不会跟着 --out 走。
 
 阶梯：raw_median → global_shrink（f*）→ physics_median → calibrated_pstar（短期 p* / 超短期 p*_L1）。
 先看 ladder.csv 里 calibrated_pstar 与 raw_median 的差：<0.3 点说明当前 σ 已很小，LoRA 收益有限。

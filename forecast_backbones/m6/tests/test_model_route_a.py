@@ -47,6 +47,16 @@ def test_forward_contract_without_calibration(tmp_path):
     assert (out.logits.numpy()[day] <= med[day] + 1e-6).all()           # p* / p*_L1 不高于中位数
     assert out.loss is None
 
+def test_forward_raises_when_backbone_returns_wrong_quantile_count(tmp_path):
+    """Minor：底座若返回了 != len(MODEL_LEVELS) 档分位，raise ValueError（报出实际形状），
+    而不是让下游 select_point/calibrator 用错位的 levels 元组悄悄算出错误的点。"""
+    df = make_synthetic_frame(n_days=1, issue_every_min=360)
+    m = _model(tmp_path)
+    m._backbone.FACTORS = np.linspace(0.6, 1.4, 5)          # 只有 5 档，非 len(MODEL_LEVELS)=9
+    bd, _ = _batch(df, [0])
+    with pytest.raises(ValueError, match="5"):
+        m(bd)
+
 def test_forward_loss_when_labels_given(tmp_path):
     df = make_synthetic_frame(n_days=1, issue_every_min=360)
     m = _model(tmp_path); bd, labels = _batch(df, [0, 1])

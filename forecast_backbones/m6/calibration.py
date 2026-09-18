@@ -41,6 +41,12 @@ class CalibrationConfig:
     use_variability: bool = True
     n_min_factor: float = 10.0
 
+    def __post_init__(self):
+        if list(self.levels) != sorted(self.levels):
+            raise ValueError(f"CalibrationConfig.levels 必须升序：{self.levels}")
+        if list(self.model_levels) != sorted(self.model_levels):
+            raise ValueError(f"CalibrationConfig.model_levels 必须升序：{self.model_levels}")
+
     @classmethod
     def from_cfg(cls, cfg: dict) -> "CalibrationConfig":
         c = cfg["calibration"]; s = c["strata"]

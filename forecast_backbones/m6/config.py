@@ -18,7 +18,7 @@ DEFAULT_CFG: dict = {
         "station_id_col": "station_id",
         "cap_col": "cap_power_on",
         "station_meta": "forecast_backbones/m6/station_meta.csv",
-        "info_csv": "info.csv",
+        "info_csv": "info.csv",                    # 路线 A 不读
         "tz": "Asia/Shanghai",
         "step_min": 15,
     },
@@ -50,17 +50,17 @@ DEFAULT_CFG: dict = {
             "add_spread": True,
         },
         "past_only": [],
-        "target_transform": "none",
+        "target_transform": "none",                # 路线 A 不读
     },
     "variability": {"signal": "k_nwp", "bins": 3, "k_nwp_edges": [0.35, 0.75],
                     "nwp_spread_edges": None, "src_disagree_edges": None, "recent_kt_std_edges": None,
                     "ghi_col": "general_ghi_predict"},
     "data": {
-        "issue_times_eval": "all",
-        "issue_times_train": "all",
+        "issue_times_eval": "all",                 # 路线 A 不读
+        "issue_times_train": "all",                # 路线 A 不读
         "scored_steps": {"short": [55, 151], "ultra": [0, 16]},
     },
-    "finetune": {
+    "finetune": {                                   # 整段路线 A 不读——计划 2（LoRA 微调）打开
         "enabled": False,
         "inference_path": "evaluator",
         "lora": {"rank": 8, "alpha": 16, "dropout": 0.05,
@@ -89,8 +89,8 @@ DEFAULT_CFG: dict = {
         "fit_steps": [[0, 16], [55, 151]],
         "window_days": 45,
         "n_min_factor": 10,
-        "fallback": "hierarchical",
-        "aci": {"enabled": False, "gamma": 0.01},
+        "fallback": "hierarchical",                 # 路线 A 不读
+        "aci": {"enabled": False, "gamma": 0.01},   # 路线 A 不读
     },
     "decision": {
         "physics": {"night_zero": True, "clear_sky_cap_ratio": 1.05, "capacity_cap": True},
@@ -104,12 +104,12 @@ DEFAULT_CFG: dict = {
             "shrink_factor": None,
         },
     },
-    "stacking": {"enabled": False, "members": ["m1", "m2", "m3", "m4", "m6"],
-                 "method": "nnls_bins", "bins": ["variability", "lead"], "window_days": 45,
+    "stacking": {"enabled": False, "members": ["m1", "m2", "m3", "m4", "m6"],           # 整段路线 A 不读
+                 "method": "nnls_bins", "bins": ["variability", "lead"], "window_days": 45,  # ——计划 3
                  "gate_min_gain_over_m6": "seed_std"},
     "eval": {
-        "metrics": ["nanwang_short_D+1", "nanwang_ultra_short", "nrmse", "crps", "coverage", "pit"],
-        "buckets": ["variability", "solar_elevation", "station", "lead"],
+        "metrics": ["nanwang_short_D+1", "nanwang_ultra_short", "nrmse", "crps", "coverage", "pit"],  # 路线 A 不读
+        "buckets": ["variability", "solar_elevation", "station", "lead"],              # 路线 A 不读
         "report_dir": "${run.out_dir}/reports",
         "batch_size": 64,
     },

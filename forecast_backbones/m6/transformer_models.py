@@ -207,7 +207,11 @@ class TransformersAdaptedM6Model(nn.Module):
             qs.append(q)
         if any(getattr(o, "quantiles", None) is None for o in outs):
             warnings.warn("底座未返回分位数：p* 退化为点预测")
-        return np.stack(qs).astype(np.float32)
+        q_raw = np.stack(qs).astype(np.float32)
+        if q_raw.shape[-1] != len(MODEL_LEVELS):
+            raise ValueError(f"底座返回了 {q_raw.shape[-1]} 个分位，期望 {len(MODEL_LEVELS)} 个"
+                             f"（MODEL_LEVELS）；q_raw.shape={q_raw.shape}")
+        return q_raw
 
     # ------------------------------------------------------------------ forward
     def forward(self, batch_dict: dict, labels=None) -> TransformersAdaptedModelOutput:

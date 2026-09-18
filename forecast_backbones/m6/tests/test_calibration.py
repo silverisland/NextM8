@@ -138,3 +138,15 @@ def test_unknown_station_falls_back_to_global():
     assert abs(delta_g) > 1e-9                                 # 全体层校准非零（非静默直通）
     expected50 = q_raw[:, list(MODEL_LEVELS).index(0.5)] + delta_g * np.maximum(t.p_clear.to_numpy(), 1e-6)
     assert np.any(np.isclose(qc, expected50[:, None]), axis=1).all()   # τ=0.5 的校准值确实出现在输出行中
+
+
+# ---------------------------------------------------------------- Minor: levels/model_levels 必须升序
+
+def test_calibration_config_rejects_unsorted_levels():
+    with pytest.raises(ValueError, match="levels"):
+        _cfg(levels=(0.5, 0.1, 0.9))
+
+
+def test_calibration_config_rejects_unsorted_model_levels():
+    with pytest.raises(ValueError, match="model_levels"):
+        _cfg(model_levels=(0.5, 0.1, 0.9))
