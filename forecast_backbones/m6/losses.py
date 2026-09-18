@@ -11,7 +11,7 @@ def pinball_loss(q: torch.Tensor, y: torch.Tensor, levels: Sequence[float], mask
     lv = torch.as_tensor(list(levels), dtype=q.dtype, device=q.device)          # [K]
     e = y.unsqueeze(-1) - q                                                      # [B,T,K]
     loss = torch.maximum(lv * e, (lv - 1.0) * e)
-    m = mask.to(q.dtype).unsqueeze(-1)
+    m = mask.to(dtype=q.dtype, device=q.device).unsqueeze(-1)
     return (loss * m).sum() / (m.sum() * lv.numel()).clamp_min(1.0)
 
 
@@ -20,5 +20,5 @@ def nanwang_r2_loss(p: torch.Tensor, y: torch.Tensor, cap, mask: torch.Tensor, f
     cap_t = torch.as_tensor(cap, dtype=p.dtype, device=p.device)
     den = torch.maximum(y, floor_ratio * cap_t)
     r = (y - p) / den
-    m = mask.to(p.dtype)
+    m = mask.to(dtype=p.dtype, device=p.device)
     return ((r ** 2) * m).sum() / m.sum().clamp_min(1.0)

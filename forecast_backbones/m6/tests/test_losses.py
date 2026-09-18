@@ -24,3 +24,22 @@ def test_nanwang_r2_matches_reference():
     d = np.maximum(y.numpy(), 20.0)
     ref = np.mean(((y.numpy() - p.numpy()) / d) ** 2)
     assert abs(nanwang_r2_loss(p, y, cap, m).item() - ref) < 1e-6
+
+def test_pinball_all_zero_mask_zero_and_finite_grad():
+    y = torch.full((2, 5), 3.0)
+    q = torch.zeros(2, 5, 9, requires_grad=True)
+    m = torch.zeros(2, 5)
+    loss = pinball_loss(q, y, MODEL_LEVELS, m)
+    assert loss.item() == 0.0
+    loss.backward()
+    assert torch.isfinite(q.grad).all()
+
+def test_nanwang_r2_all_zero_mask_zero_and_finite_grad():
+    y = torch.full((2, 4), 3.0)
+    p = torch.zeros(2, 4, requires_grad=True)
+    cap = torch.tensor([[100.0], [100.0]])
+    m = torch.zeros(2, 4)
+    loss = nanwang_r2_loss(p, y, cap, m)
+    assert loss.item() == 0.0
+    loss.backward()
+    assert torch.isfinite(p.grad).all()
