@@ -69,6 +69,24 @@ def test_recompute_points_chunking_matches_unchunked(tmp_path):
     assert np.array_equal(pts_small, pts_big)
 
 
+def test_recompute_points_chunked_calibration_stats_match_unchunked(tmp_path):
+    """calibrated_pstar 分块跑完后 calibrator.last_stats 必须是全集口径，且与不分块单次 apply() 的统计一致。"""
+    m, res = _run(tmp_path, n_days=3)
+    assert len(res) > 5
+    calib = fit_calibrator_from_result(res, m.cfg)
+    recompute_points(res, m.cfg, calib, "calibrated_pstar", chunk_rows=10**9)
+    whole = calib.last_stats
+    recompute_points(res, m.cfg, calib, "calibrated_pstar", chunk_rows=5)
+    chunked = calib.last_stats
+    assert chunked["n"] == whole["n"] == len(res) * 192
+    assert chunked["uncalibrated_cells"] == whole["uncalibrated_cells"]
+    assert chunked["uncalibrated_frac"] == pytest.approx(whole["uncalibrated_frac"])
+    assert set(chunked["per_tau_uncalibrated_frac"]) == set(whole["per_tau_uncalibrated_frac"])
+    for k, v in whole["per_tau_uncalibrated_frac"].items():
+        assert chunked["per_tau_uncalibrated_frac"][k] == pytest.approx(v)
+    assert calib.last_levels is None            # 分块路径不跨块拼接逐格层号
+
+
 # ---------------------------------------------------------------- I2: decision.point.tail 只认 flat
 
 def test_recompute_points_raises_when_tail_not_flat(tmp_path):

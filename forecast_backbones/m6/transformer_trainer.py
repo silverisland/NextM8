@@ -167,12 +167,34 @@ def recompute_points(result_df: pd.DataFrame, cfg: dict, calibrator, variant: st
     if N <= chunk_rows:
         return _recompute_points_chunk(result_df, cfg, calibrator, variant, shrink, q)
     parts = []
+    track = variant == "calibrated_pstar" and calibrator is not None
+    n_seen, uncal_counts = 0, None                      # 跨分块累加 apply() 的未校准格计数（不拼接 last_levels）
     for start in range(0, N, chunk_rows):
         end = min(start + chunk_rows, N)
         chunk = result_df.iloc[start:end]
         q_chunk = q[start:end] if q is not None else None
         parts.append(_recompute_points_chunk(chunk, cfg, calibrator, variant, shrink, q_chunk))
+        if track:
+            uncal = calibrator.last_levels == -1                 # [n_chunk*H, L]
+            uncal_counts = uncal.sum(axis=0) if uncal_counts is None else uncal_counts + uncal.sum(axis=0)
+            n_seen += int(uncal.shape[0])
+    if track:
+        calibrator.last_levels = None                    # 只保留全集聚合统计；逐格层号不跨分块保存（内存）
+        calibrator.last_stats = _aggregate_calibration_stats(calibrator, n_seen, uncal_counts)
     return pd.concat(parts)
+
+
+def _aggregate_calibration_stats(calibrator, n_seen: int, uncal_counts: np.ndarray | None) -> dict:
+    """把分块 apply() 的未校准格计数汇成与 Calibrator.apply 单次调用同构的 last_stats（全集口径）。"""
+    taus = [float(t) for t in calibrator.cfg.levels]
+    L = len(taus)
+    counts = np.zeros(L, float) if uncal_counts is None else np.asarray(uncal_counts, float)
+    return {
+        "n": int(n_seen),
+        "uncalibrated_cells": int(counts.sum()),
+        "uncalibrated_frac": float(counts.sum() / (n_seen * L)) if n_seen * L > 0 else 0.0,
+        "per_tau_uncalibrated_frac": {t: (float(counts[j] / n_seen) if n_seen > 0 else 0.0) for j, t in enumerate(taus)},
+    }
 
 
 def _nrmse_short_pct(df: pd.DataFrame, cfg: dict) -> float:
@@ -206,17 +228,14 @@ def ladder_report(result_df: pd.DataFrame, gccap: dict, cfg: dict, calibrator, s
 
 def _diagnostics_block(res_cal: pd.DataFrame, res_val: pd.DataFrame, calibrator, gccap: dict,
                        shrink: float, cfg: dict) -> dict:
-    """I4：ladder.csv 旁 diagnostics.json 的内容。calibrator.last_stats 用完整 val 集合单独重跑一次
-    apply() 得到——不能直接拿 ladder_report 里 calibrated_pstar 那次调用后的 calibrator.last_stats，
-    因为 recompute_points 现在按 chunk_rows 分块调用 apply()，last_stats 只会剩最后一块的统计。"""
-    q = _stack_q(res_val); N, H, _ = q.shape
+    """I4：ladder.csv 旁 diagnostics.json 的内容。calibrator_last_stats 取 calibrator.last_stats——
+    recompute_points 的 calibrated_pstar 变体分块调用 apply() 后会把各块的未校准格计数汇成全集口径写回
+    calibrator.last_stats，所以 ladder_report 跑完后直接读即可，不再对整个 val 集单独重跑一次不分块的
+    apply()（那会重新引入 C2 修掉的整集内存峰值）。若调用时 last_stats 尚未填充（没先跑 ladder_report），
+    则按分块方式跑一遍 calibrated_pstar 来填充。"""
     var_bin_hist = {int(b): 0 for b in range(int(cfg["variability"]["bins"]))}
-    if calibrator is not None and N > 0:
-        lead = np.tile(np.arange(H), N)
-        elev = np.stack(res_val["elev_deg"].to_numpy()).astype(float)
-        p_clear = np.stack(res_val["p_clear"].to_numpy()).astype(float)
-        calibrator.apply(q.reshape(N * H, -1), np.repeat(res_val["station_id"].to_numpy(int), H),
-                         elev.reshape(-1), np.repeat(res_val["var_bin"].to_numpy(int), H), lead, p_clear.reshape(-1))
+    if calibrator is not None and len(res_val) > 0 and calibrator.last_stats is None:
+        recompute_points(res_val, cfg, calibrator, "calibrated_pstar", shrink)
     for b, n in res_val["var_bin"].value_counts().items():
         var_bin_hist[int(b)] = var_bin_hist.get(int(b), 0) + int(n)
     return {
