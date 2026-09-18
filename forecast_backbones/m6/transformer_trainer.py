@@ -160,6 +160,9 @@ def recompute_points(result_df: pd.DataFrame, cfg: dict, calibrator, variant: st
     """按 chunk_rows 行分块处理 result_df 再 pd.concat（限制单次峰值内存），输出与不分块时逐位相同。
     q：可选的预先 _stack_q 好的 [N,192,9] 数组（ladder_report 用它把 _stack_q 提到打分轮次循环外，
     避免同一 result_df 在每个 rung 都被重新堆叠一次）；按同样的行区间切片喂给每个分块。"""
+    tail = cfg["decision"]["point"].get("tail", "flat")
+    if tail != "flat":
+        raise ValueError(f"decision.point.tail: only 'flat' is implemented (got {tail!r})")
     N = len(result_df)
     if N <= chunk_rows:
         return _recompute_points_chunk(result_df, cfg, calibrator, variant, shrink, q)
@@ -199,6 +202,32 @@ def ladder_report(result_df: pd.DataFrame, gccap: dict, cfg: dict, calibrator, s
                      "nrmse_short_pct": _nrmse_short_pct(df, cfg),
                      "n_days": int(sd["date"].nunique()) if len(sd) else 0})
     return pd.DataFrame(rows)
+
+
+def _diagnostics_block(res_cal: pd.DataFrame, res_val: pd.DataFrame, calibrator, gccap: dict,
+                       shrink: float, cfg: dict) -> dict:
+    """I4：ladder.csv 旁 diagnostics.json 的内容。calibrator.last_stats 用完整 val 集合单独重跑一次
+    apply() 得到——不能直接拿 ladder_report 里 calibrated_pstar 那次调用后的 calibrator.last_stats，
+    因为 recompute_points 现在按 chunk_rows 分块调用 apply()，last_stats 只会剩最后一块的统计。"""
+    q = _stack_q(res_val); N, H, _ = q.shape
+    var_bin_hist = {int(b): 0 for b in range(int(cfg["variability"]["bins"]))}
+    if calibrator is not None and N > 0:
+        lead = np.tile(np.arange(H), N)
+        elev = np.stack(res_val["elev_deg"].to_numpy()).astype(float)
+        p_clear = np.stack(res_val["p_clear"].to_numpy()).astype(float)
+        calibrator.apply(q.reshape(N * H, -1), np.repeat(res_val["station_id"].to_numpy(int), H),
+                         elev.reshape(-1), np.repeat(res_val["var_bin"].to_numpy(int), H), lead, p_clear.reshape(-1))
+    for b, n in res_val["var_bin"].value_counts().items():
+        var_bin_hist[int(b)] = var_bin_hist.get(int(b), 0) + int(n)
+    return {
+        "calibrator_last_stats": calibrator.last_stats if calibrator is not None else None,
+        "degraded_frac": float(res_val["degraded"].mean()) if len(res_val) else 0.0,
+        "n_rows_val": int(len(res_val)),
+        "n_rows_cal": int(len(res_cal)),
+        "var_bin_hist": var_bin_hist,
+        "stations_scored": sorted(gccap.keys()),
+        "shrink_factor": float(shrink),
+    }
 
 
 def _clip_calibration_window(res_cal: pd.DataFrame, cal_end, window_days: int) -> pd.DataFrame:
@@ -266,9 +295,9 @@ def backfill_and_report(config_path, parquet_path, cal_start, cal_end, val_start
     print(rep.to_string(index=False))
     print(f"\n拟合 f* = {f:.4f}（写入 decision.point.shrink_factor 后，还须把 decision.point.default"
           f" 或某条 by_step 规则的 method 设为 'global_shrink' 才会生效——p_star/p_star_l1 不读它）")
-    degraded_frac = float(res_val["degraded"].mean()) if len(res_val) else 0.0
-    stations_scored = sorted(gccap.keys())
-    print(f"退化站占比 degraded_frac={degraded_frac:.4f}；参与打分的站（{len(stations_scored)}）: {stations_scored}")
+    diagnostics = _diagnostics_block(res_cal, res_val, calib, gccap, f, cfg)
+    (report_dir / "diagnostics.json").write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
+    print(f"\ndiagnostics: {json.dumps(diagnostics, indent=2)}")
     return rep
 
 

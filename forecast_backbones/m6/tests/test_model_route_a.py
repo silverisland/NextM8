@@ -1,10 +1,12 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 from forecast_backbones.m6.config import load_config
 from forecast_backbones.m6.transformer_models import TransformersAdaptedM6Model
-from forecast_backbones.m6.decision import MODEL_LEVELS, CAL_LEVELS, p_star, p_star_l1
+from forecast_backbones.m6.decision import MODEL_LEVELS, CAL_LEVELS, p_star, p_star_l1, level_value
 from forecast_backbones.m6.calibration import Calibrator, CalibrationConfig, quantile_cols
 from .conftest import FakeEvaluator, make_synthetic_frame, write_station_meta
 
@@ -58,6 +60,33 @@ def test_by_step_routing_and_median_mode(tmp_path):
     bd, _ = _batch(df, [0]); out = m(bd)
     day = ~out.aux["night"]
     assert np.allclose(out.logits.numpy()[day], out.aux["median"].numpy()[day])
+
+def test_covariates_warns_once_for_missing_past_future_pair(tmp_path):
+    """I5.1：配置里的 past_future 对，若 batch_dict 缺列，只提示一次（模块级去重），文本点名该对；
+    喂给底座的协变量数比"该对存在"时少（只有 1 个有效对 + 2 个派生特征 = 3 个通道）。"""
+    import forecast_backbones.m6.transformer_models as tm
+    tm._WARNED_MISSING_PAIRS.clear()
+    df = make_synthetic_frame(n_days=1, issue_every_min=360)
+    m = _model(tmp_path, features={"past_future": [["general_ghi", "general_ghi_predict"],
+                                                    ["bogus_hist", "bogus_fut"]]})
+    bd, _ = _batch(df, [0])
+
+    with pytest.warns(UserWarning, match="bogus_hist"):
+        m(bd)
+    calls = m._backbone.calls[-1]
+    assert calls[1].shape[0] == 3                    # 1 个有效 past_future 对 + elev + p_clear
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                # 第二次调用若又 warn，在这里会被抛成异常，测试失败
+        m(bd)
+
+
+def test_forward_raises_when_tail_not_flat(tmp_path):
+    df = make_synthetic_frame(n_days=1, issue_every_min=360)
+    m = _model(tmp_path, decision={"point": {"tail": "extrapolate"}})
+    bd, _ = _batch(df, [0])
+    with pytest.raises(ValueError, match="tail"):
+        m(bd)
 
 def test_degraded_station_still_runs(tmp_path, recwarn):
     p = write_station_meta(tmp_path, drop_coords_for=(1002,))
@@ -172,6 +201,12 @@ def test_calibration_enabled_missing_table_warns_and_falls_back(tmp_path):
     m_off._backbone = FakeEvaluator(); m_off._backbone_device = "cpu"
     out_on = m_on(bd); out_off = m_off(bd)
     assert torch.equal(out_on.aux["quantiles_cal"], out_off.aux["quantiles_cal"])
+    # I3: 缺表回退——decision.point.default/by_step 里配置成 p_star/p_star_l1 的方法全部换成 median，
+    # 提交点等于 level_value(q, 0.5)（已经过 physics_clip，与 aux["quantiles_cal"] 一致）。
+    expected = level_value(out_on.aux["quantiles_cal"].numpy(), out_on.aux["levels_cal"], 0.5)
+    assert np.allclose(out_on.logits.numpy(), expected)
+    assert m_on.cfg["decision"]["point"]["default"] == "p_star"                  # cfg 本身未被改写
+    assert [r["method"] for r in m_on.cfg["decision"]["point"]["by_step"]] == ["p_star_l1", "p_star"]
 
 def test_calibration_enabled_cfg_mismatch_raises_from_init(tmp_path):
     fit_cfg = CalibrationConfig(levels=CAL_LEVELS, model_levels=MODEL_LEVELS, normalization="clear_sky",

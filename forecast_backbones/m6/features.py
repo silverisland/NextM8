@@ -128,8 +128,10 @@ def variability_bins(signal, edges=None, n_bins: int = 3) -> np.ndarray:
 
 try:
     from .masks import night_from_elevation
+    from ._arrays import interp_nan
 except ImportError:
     from masks import night_from_elevation
+    from _arrays import interp_nan
 
 
 def _to_np(v) -> np.ndarray:
@@ -139,8 +141,12 @@ def _to_np(v) -> np.ndarray:
 
 
 def _scalar_per_row(v) -> np.ndarray:
+    """多列（逐时刻）形式先按 _col 同款 NaN 插值再取第 0 列；本就是逐行标量的形式不插值
+    （单点没有邻居可插，NaN 会被上游的 cap 非有限性检查捕获）。"""
     a = _to_np(v).astype(float)
-    return a[:, 0] if a.ndim == 2 else a.reshape(-1)
+    if a.ndim == 2:
+        return interp_nan(a)[:, 0]
+    return a.reshape(-1)
 
 
 @dataclass
@@ -196,8 +202,10 @@ def build_row_context(batch_dict: dict, cfg: dict, station_meta: StationMeta) ->
     night_future = night_from_elevation(elev[:, L:])
     # 多变度信号
     vcfg = cfg["variability"]; fcfg = cfg["features"]
-    ghi_pred_col = fcfg["past_future"][0][1]
-    ghi_pred = _to_np(batch_dict[ghi_pred_col]).astype(float)[:, :H] if ghi_pred_col in batch_dict else np.zeros((B, H))
+    ghi_pred_col = vcfg["ghi_col"]
+    if ghi_pred_col not in batch_dict:
+        raise ValueError(f"variability.ghi_col={ghi_pred_col!r} 不在 batch_dict 里（无零值兜底）")
+    ghi_pred = interp_nan(_to_np(batch_dict[ghi_pred_col]).astype(float))[:, :H]
     gc_fut = ghi[:, L:]
     k_steps = np.where(gc_fut > 50.0, ghi_pred / np.maximum(gc_fut, 1e-6), 0.0)
     kind = vcfg["signal"]
@@ -212,7 +220,7 @@ def build_row_context(batch_dict: dict, cfg: dict, station_meta: StationMeta) ->
             raise ValueError("variability.signal=src_disagree requires a third features.past_future column present in batch_dict")
         sig = disagree_signal(ghi_pred, _to_np(batch_dict[fcfg["past_future"][2][1]]).astype(float)[:, :H], gc_fut)
     elif kind == "recent_kt_std":
-        hist = _to_np(batch_dict[ds["pv_col"]]).astype(float)[:, -L:]
+        hist = interp_nan(_to_np(batch_dict[ds["pv_col"]]).astype(float))[:, -L:]
         sig = recent_kt_std_signal(hist, p_clear[:, :L])
     elif kind == "k_nwp":
         sig = k_nwp_signal(ghi_pred, gc_fut)

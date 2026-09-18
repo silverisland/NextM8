@@ -38,6 +38,7 @@ try:
     from .decision import enforce_monotone, physics_clip, select_point, level_value, p_star, MODEL_LEVELS
     from .calibration import Calibrator, CalibrationConfig
     from .losses import pinball_loss
+    from ._arrays import interp_nan
 except ImportError:
     from config import load_config
     from features import StationMeta, build_row_context
@@ -45,6 +46,11 @@ except ImportError:
     from decision import enforce_monotone, physics_clip, select_point, level_value, p_star, MODEL_LEVELS
     from calibration import Calibrator, CalibrationConfig
     from losses import pinball_loss
+    from _arrays import interp_nan
+
+# 已经就哪些 past_future 协变量对发过"batch_dict 缺列"警告——跨调用去重，同一进程内每对只提示一次
+# （与 m5 的 self._warned_pairs 语义相同，这里用模块级集合而不是实例级）。
+_WARNED_MISSING_PAIRS: set[tuple[str, str]] = set()
 
 
 class TransformersAdaptedM6Model(nn.Module):
@@ -63,13 +69,19 @@ class TransformersAdaptedM6Model(nn.Module):
         self.station_meta = self._load_station_meta(ds["station_meta"])
         self.shrink_factor = float(self.cfg["decision"]["point"].get("shrink_factor") or 1.0)
         self.calibrator: Optional[Calibrator] = None
+        self._calibration_table_missing = False
         c = self.cfg["calibration"]
         if c["enabled"]:
             p = Path(c["table_path"])
             if p.exists():
                 self.calibrator = Calibrator.load(p, CalibrationConfig.from_cfg(self.cfg))
             else:
-                warnings.warn(f"calibration.enabled 但 {p} 不存在 → 本次不校准（p* 用原始分位）")
+                self._calibration_table_missing = True
+                warnings.warn(
+                    f"calibration.enabled 但 {p} 不存在 → 本次不校准：p* 将在未校准的 9 个原生 "
+                    f"MODEL_LEVELS 上计算，该分位集合系统性偏高（README 备注）；decision.point.default "
+                    f"与 by_step 里配置成 p_star/p_star_l1 的方法本次已回退为 median（cfg 本身不改）"
+                )
         self._backbone = None; self._backbone_device = None
         self.device_pref = t3.get("device", "auto")
         if bool(t3.get("eager_init", True)):
@@ -94,6 +106,19 @@ class TransformersAdaptedM6Model(nn.Module):
     def set_calibrator(self, cal: Optional[Calibrator]):
         self.calibrator = cal
 
+    def _effective_point_methods(self) -> tuple[str, list]:
+        """decision.point.default / by_step 的“生效版”：cfg 本身永不改写。仅当本次因校准表缺失而
+        退化未校准（_calibration_table_missing 且当前确实没有 calibrator——set_calibrator 补上后
+        不再回退）时，把配置成 p_star/p_star_l1 的方法换成 median：未校准的 9 档 MODEL_LEVELS 上跑
+        p*/p*_L1 系统性偏高，此时不如直接用中位数。calibration.enabled=False（主动关闭校准，非
+        缺表）时不受影响，仍按配置跑 p_star/p_star_l1。"""
+        pt = self.cfg["decision"]["point"]
+        default, by_step = pt["default"], list(pt.get("by_step") or ())
+        if not (self._calibration_table_missing and self.calibrator is None):
+            return default, by_step
+        fb = lambda method: "median" if method in ("p_star", "p_star_l1") else method
+        return fb(default), [dict(rule, method=fb(rule["method"])) for rule in by_step]
+
     def _resolve_device(self) -> str:
         if self.device_pref == "auto":
             return "cuda" if torch.cuda.is_available() else "cpu"
@@ -110,18 +135,6 @@ class TransformersAdaptedM6Model(nn.Module):
         self._backbone_device = want
 
     # ------------------------------------------------------------------ 取列（同 m5）
-    @staticmethod
-    def _interp_nan(arr: np.ndarray) -> np.ndarray:
-        out = arr.copy(); idx = np.arange(arr.shape[1])
-        for i in range(arr.shape[0]):
-            row = out[i]; m = np.isfinite(row)
-            if m.all():
-                continue
-            if not m.any():
-                out[i] = 0.0; continue
-            row[~m] = np.interp(idx[~m], idx[m], row[m])
-        return out
-
     def _col(self, batch_dict: dict, col: str) -> np.ndarray:
         if col not in batch_dict:
             raise KeyError(f"batch_dict 缺列 {col!r}；现有 keys={sorted(batch_dict)[:20]}...")
@@ -132,7 +145,7 @@ class TransformersAdaptedM6Model(nn.Module):
             arr = arr[None, :]
         if not np.isfinite(arr).all():
             if self.nan_policy == "interp":
-                arr = self._interp_nan(arr)
+                arr = interp_nan(arr).astype(np.float32)
             elif self.nan_policy == "zero":
                 arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
             else:
@@ -147,6 +160,10 @@ class TransformersAdaptedM6Model(nn.Module):
             if hist_c in batch_dict and fut_c in batch_dict:
                 h = self._col(batch_dict, hist_c)[:, -L:]; f = self._col(batch_dict, fut_c)[:, :H]
                 pf.append(np.concatenate([h, f], axis=1))
+            elif (hist_c, fut_c) not in _WARNED_MISSING_PAIRS:
+                warnings.warn(f"past_future 协变量对 {(hist_c, fut_c)} 在 batch_dict 里缺列，"
+                              f"本次推理跳过该协变量（只提示一次）")
+                _WARNED_MISSING_PAIRS.add((hist_c, fut_c))
         d = self.cfg["features"]["derived"]
         if d.get("solar_elevation"):
             pf.append(ctx.elev_deg.astype(np.float32))
@@ -222,7 +239,10 @@ class TransformersAdaptedM6Model(nn.Module):
         q_cal = physics_clip(q_cal, night_physics, ctx.p_clear[:, L:], ctx.cap[:, None],
                              float(ph["clear_sky_cap_ratio"]), bool(ph["capacity_cap"]))
         pt = self.cfg["decision"]["point"]
-        point = select_point(q_cal, levels, ctx.cap, pt["default"], pt.get("by_step") or (),
+        if pt.get("tail", "flat") != "flat":
+            raise ValueError(f"decision.point.tail: only 'flat' is implemented (got {pt.get('tail')!r})")
+        eff_default, eff_by_step = self._effective_point_methods()
+        point = select_point(q_cal, levels, ctx.cap, eff_default, eff_by_step,
                              self.shrink_factor, float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
         median = level_value(q_cal, levels, 0.5)
         pstar = p_star(q_cal, levels, ctx.cap[:, None], float(pt["floor_ratio"]), float(pt["tau_grid_step"]))

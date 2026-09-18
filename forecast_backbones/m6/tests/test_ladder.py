@@ -1,4 +1,5 @@
 import functools
+import json
 import numpy as np
 import pandas as pd
 import pytest
@@ -66,6 +67,16 @@ def test_recompute_points_chunking_matches_unchunked(tmp_path):
     pts_small = np.stack(out_small["observe_power_predict"].to_numpy())
     pts_big = np.stack(out_big["observe_power_predict"].to_numpy())
     assert np.array_equal(pts_small, pts_big)
+
+
+# ---------------------------------------------------------------- I2: decision.point.tail 只认 flat
+
+def test_recompute_points_raises_when_tail_not_flat(tmp_path):
+    m, res = _run(tmp_path, n_days=1)
+    cfg = {**m.cfg, "decision": {**m.cfg["decision"],
+                                 "point": {**m.cfg["decision"]["point"], "tail": "extrapolate"}}}
+    with pytest.raises(ValueError, match="tail"):
+        recompute_points(res, cfg, None, "physics_median")
 
 
 # ---------------------------------------------------------------- I1: 阶梯 ↔ 部署模型的口径不变量
@@ -250,3 +261,21 @@ def test_backfill_and_report_rejects_cal_end_after_val_start(tmp_path, monkeypat
 
     with pytest.raises(ValueError, match="泄漏|leak"):
         backfill_and_report(cfg, str(parquet_path), cal_start, cal_end, leaky_val_start, val_end)
+
+
+# ---------------------------------------------------------------- I4: diagnostics.json
+
+def test_backfill_and_report_writes_diagnostics_json(tmp_path, monkeypatch):
+    _patch_fake_backbone(monkeypatch)
+    parquet_path, out_dir, cfg, cal_start, cal_end, val_start, val_end = _write_backfill_inputs(tmp_path)
+
+    backfill_and_report(cfg, str(parquet_path), cal_start, cal_end, val_start, val_end)
+
+    diag_path = out_dir / "reports" / "diagnostics.json"
+    assert diag_path.exists()
+    diag = json.loads(diag_path.read_text(encoding="utf-8"))
+    assert set(diag) >= {"calibrator_last_stats", "degraded_frac", "n_rows_val", "n_rows_cal",
+                         "var_bin_hist", "stations_scored", "shrink_factor"}
+    assert sum(diag["var_bin_hist"].values()) == diag["n_rows_val"]
+    assert diag["calibrator_last_stats"]["n"] == diag["n_rows_val"] * 192
+    assert "per_tau_uncalibrated_frac" in diag["calibrator_last_stats"]

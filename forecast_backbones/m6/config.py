@@ -53,7 +53,8 @@ DEFAULT_CFG: dict = {
         "target_transform": "none",
     },
     "variability": {"signal": "k_nwp", "bins": 3, "k_nwp_edges": [0.35, 0.75],
-                    "nwp_spread_edges": None, "src_disagree_edges": None, "recent_kt_std_edges": None},
+                    "nwp_spread_edges": None, "src_disagree_edges": None, "recent_kt_std_edges": None,
+                    "ghi_col": "general_ghi_predict"},
     "data": {
         "issue_times_eval": "all",
         "issue_times_train": "all",

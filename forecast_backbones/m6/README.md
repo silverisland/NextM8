@@ -11,7 +11,9 @@
         --config forecast_backbones/m6/model_config.yaml --parquet 'data/clean/*.parquet' \
         --cal-start 2025-06-01 --cal-end 2025-07-16 --val-start 2025-07-16 --val-end 2025-09-01
     # 产物：
-    #   REPORT（人读）  runs/m6_baseline/reports/ladder.csv
+    #   REPORT（人读）  runs/m6_baseline/reports/{ladder.csv, diagnostics.json}
+    #     diagnostics.json：calibrator_last_stats（apply 产出的逐 τ 未校准比例等）、degraded_frac、
+    #     n_rows_val、n_rows_cal、var_bin_hist、stations_scored、shrink_factor——同样内容也会打印一遍。
     #   STATE（机读）   runs/m6_baseline/{calibration.parquet, calibration.parquet.json,
     #                                     decision_state.json, result_cal.parquet, result_val.parquet}
     # 3. 之后正常推理：model_config.yaml 的 calibration.table_path 指向上一步的 calibration.parquet，
@@ -44,3 +46,12 @@ calibrate → enforce_monotone → physics_clip → select_point，同一套 lev
 时 p* 偏高 +4.06；用 15 档 `CAL_LEVELS`（校准后）时只偏高 +0.58——档位越密，两端平延段越短，偏置越小。
 因此任何比较「开校准 vs 关校准」对 p* 影响的消融实验，都必须固定同一套分位档位（同为 `MODEL_LEVELS`
 或同为 `CAL_LEVELS`），否则档位密度变化本身的偏置会和校准效果混在一起，读不出校准的真实贡献。
+`decision.point.tail` 目前只实现了这一种（平延）扩展；`model forward` 与 `recompute_points`
+在读到非 `"flat"` 的值时会直接 `raise ValueError`（不会静默按平延跑）。
+
+(c) `calibration.enabled=True` 但 `calibration.table_path` 指向的文件不存在时：本次不校准，p* 会在
+未校准的 9 个原生 `MODEL_LEVELS` 上计算——按备注 (b) 的实测，这套分位集合本身系统性偏高。为避免在
+这套偏高的分位集合上再跑 p*/p*_L1 进一步放大偏置，这种"缺表退化"场景下 `decision.point.default`
+与 `by_step` 里配置成 `p_star`/`p_star_l1` 的方法本次会自动回退为 `median`（`cfg` 本身不改写，只影响
+当次 forward 实际生效的方法；后续用 `set_calibrator` 补上真正的 calibrator 后不再回退）。这与主动关闭
+`calibration.enabled=False` 是两回事：主动关闭校准时仍按配置跑 p_star/p_star_l1，不触发这个回退。

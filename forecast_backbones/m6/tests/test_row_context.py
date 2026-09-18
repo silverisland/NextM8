@@ -80,6 +80,34 @@ def test_build_row_context_warns_once_for_degraded_station(tmp_path, monkeypatch
     assert ctx.degraded.tolist() == [False, True]
 
 
+# ---------------------------------------------------------------- I5.2 / I5.3: ghi_col 显式配置项
+
+def test_ghi_col_missing_from_batch_raises(tmp_path):
+    """variability.ghi_col（默认 general_ghi_predict）不在 batch_dict 里 → ValueError，不再是零值兜底。"""
+    cfg = load_config({"timesfm3": {"context_len": 8, "pred_len": 4}})
+    b = _batch(); del b["general_ghi_predict"]
+    with pytest.raises(ValueError, match="ghi_col"):
+        build_row_context(b, cfg, _sm(tmp_path))
+
+
+def test_ghi_col_nan_is_interpolated_not_left_to_propagate(tmp_path):
+    """ghi 预报列里单个 NaN 之前会直接传播成该行 var_signal=NaN，进而被 variability_bins 兜到中档 bin；
+    现在先按 _col 同款逻辑插值，NaN 位置被邻居线性重建，signal 与无缺失时几乎完全一致，bin 也一致。"""
+    cfg = load_config({"timesfm3": {"context_len": 8, "pred_len": 4}})
+    sm = _sm(tmp_path)
+    clean = np.array([[300.0, 320.0, 340.0, 360.0], [300.0, 320.0, 340.0, 360.0]])
+    b_clean = _batch(); b_clean["general_ghi_predict"] = clean
+    ctx_clean = build_row_context(b_clean, cfg, sm)
+
+    with_nan = clean.copy(); with_nan[0, 1] = np.nan            # 邻居 300/340 线性插值应精确还原成 320
+    b_nan = _batch(); b_nan["general_ghi_predict"] = with_nan
+    ctx_nan = build_row_context(b_nan, cfg, sm)
+
+    assert np.isfinite(ctx_nan.var_signal).all()
+    assert np.isclose(ctx_nan.var_signal[0], ctx_clean.var_signal[0], atol=1e-6)
+    assert ctx_nan.var_bin[0] == ctx_clean.var_bin[0]
+
+
 def test_build_row_context_raises_for_nonfinite_cap(tmp_path):
     """station 在 station_meta 里完全不存在，且 batch_dict 没有 cap_power_on 兜底 → cap 非有限 → ValueError
     （而不是让 NaN 传播到 p_clear → physics_clip → NaN logits → NanwangMetric 静默丢站）。"""
