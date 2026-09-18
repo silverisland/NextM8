@@ -22,8 +22,9 @@
 raw_median / global_shrink / physics_median 三档用的是中位数（不受下面第 (b) 条 tail 偏置影响），只有
 calibrated_pstar 用 p*。
 
-测试：`python -m pytest forecast_backbones/m6/tests -q`（不需要 timesfm3；真实底座的冒烟测试由后续
-任务补充 `tests/test_real_backbone.py`，到时缺 timesfm3 会自动跳过，不影响本目录当前测试全绿）。
+测试：`python -m pytest forecast_backbones/m6/tests -q`（不需要 timesfm3；真实底座的冒烟测试见
+`tests/test_real_backbone.py`，本机缺 timesfm3 与本地权重时自动跳过，不影响本目录当前测试全绿；
+训练机上安装了 timesfm3 且权重路径存在时才会真正运行）。
 
 ## 备注
 
