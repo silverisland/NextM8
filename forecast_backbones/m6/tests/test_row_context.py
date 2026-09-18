@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 from forecast_backbones.m6.config import load_config
 from forecast_backbones.m6.features import StationMeta, build_row_context
 
@@ -38,3 +39,24 @@ def test_cap_falls_back_to_station_meta(tmp_path):
     b = _batch(); del b["cap_power_on"]
     ctx = build_row_context(b, cfg, _sm(tmp_path))
     assert ctx.cap.tolist() == [500.0, 300.0]
+
+def test_recent_kt_std_with_fixed_edges_bins(tmp_path):
+    cfg = load_config({"timesfm3": {"context_len": 8, "pred_len": 4},
+                        "variability": {"signal": "recent_kt_std", "recent_kt_std_edges": [0.05, 0.15]}})
+    b = _batch(); b["observe_power"] = np.array([[0., 50., 100., 150., 200., 250., 300., 350.],
+                                                  [0., 0., 0., 0., 0., 0., 0., 0.]])
+    ctx = build_row_context(b, cfg, _sm(tmp_path))
+    assert ctx.var_bin.shape == (2,) and set(ctx.var_bin.tolist()) <= {0, 1, 2}
+
+def test_variability_missing_edges_raises(tmp_path):
+    cfg = load_config({"timesfm3": {"context_len": 8, "pred_len": 4},
+                        "variability": {"signal": "recent_kt_std"}})
+    b = _batch(); b["observe_power"] = np.zeros((2, 8))
+    with pytest.raises(ValueError, match="recent_kt_std_edges"):
+        build_row_context(b, cfg, _sm(tmp_path))
+
+def test_nwp_spread_unmet_prerequisite_raises(tmp_path):
+    cfg = load_config({"timesfm3": {"context_len": 8, "pred_len": 4},
+                        "variability": {"signal": "nwp_spread", "nwp_spread_edges": [0.1, 0.2]}})
+    with pytest.raises(ValueError, match="nwp_spread"):
+        build_row_context(_batch(), cfg, _sm(tmp_path))

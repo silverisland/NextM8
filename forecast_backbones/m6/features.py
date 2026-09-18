@@ -183,18 +183,27 @@ def build_row_context(batch_dict: dict, cfg: dict, station_meta: StationMeta) ->
     gc_fut = ghi[:, L:]
     k_steps = np.where(gc_fut > 50.0, ghi_pred / np.maximum(gc_fut, 1e-6), 0.0)
     kind = vcfg["signal"]
-    if kind == "nwp_spread" and fcfg["nwp_members"]["enabled"]:
+    if kind == "nwp_spread":
+        if not fcfg["nwp_members"]["enabled"]:
+            raise ValueError("variability.signal=nwp_spread requires features.nwp_members.enabled=true")
         suf = fcfg["nwp_members"]["future_suffix"]
         members = np.stack([_to_np(batch_dict[c + suf]).astype(float)[:, :H] for c in fcfg["nwp_members"]["cols"]], axis=1)
         sig = spread_signal(members, gc_fut)
-    elif kind == "src_disagree" and len(fcfg["past_future"]) >= 3 and fcfg["past_future"][2][1] in batch_dict:
+    elif kind == "src_disagree":
+        if not (len(fcfg["past_future"]) >= 3 and fcfg["past_future"][2][1] in batch_dict):
+            raise ValueError("variability.signal=src_disagree requires a third features.past_future column present in batch_dict")
         sig = disagree_signal(ghi_pred, _to_np(batch_dict[fcfg["past_future"][2][1]]).astype(float)[:, :H], gc_fut)
     elif kind == "recent_kt_std":
         hist = _to_np(batch_dict[ds["pv_col"]]).astype(float)[:, -L:]
         sig = recent_kt_std_signal(hist, p_clear[:, :L])
-    else:
+    elif kind == "k_nwp":
         sig = k_nwp_signal(ghi_pred, gc_fut)
-    edges = vcfg.get("k_nwp_edges") if kind == "k_nwp" else None
+    else:
+        raise ValueError(f"variability.signal 未知取值: {kind!r}")
+    edges = vcfg.get(f"{kind}_edges")
+    if edges is None:
+        raise ValueError(f"variability.{kind}_edges must be set (derive once on the calibration set); "
+                          f"data-derived edges are not allowed at inference")
     vbin = variability_bins(sig, edges=edges, n_bins=int(vcfg["bins"]))
     return RowContext(station_id=sid, cap=cap, ts=ts, elev_deg=elev, ghi_clear=ghi, p_clear=p_clear,
                       night_future=night_future, k_steps=k_steps, var_signal=sig, var_bin=vbin, degraded=degraded)
