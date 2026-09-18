@@ -1,0 +1,77 @@
+# forecast_backbones/m6/model_config.yaml —— M6 推理配置真源；消融 = 改字段
+run:
+  model_name: m6
+  seeds: [0, 1, 2]
+  out_dir: runs/m6_baseline
+model: {}
+dataset:
+  pv_col: observe_power
+  label_col: observe_power_future
+  ts_col: timestamp_win
+  station_id_col: station_id
+  cap_col: cap_power_on
+  station_meta: forecast_backbones/m6/station_meta.csv
+  info_csv: info.csv
+  tz: Asia/Shanghai
+  step_min: 15
+timesfm3:
+  checkpoint: /data/tangqingang/timesfm-3.0-pytorch
+  context_len: 672
+  pred_len: 192
+  device: auto
+  per_core_batch_size: 64
+  return_quantiles: true
+  nan_policy: interp
+  make_positive: true
+  use_znorm: false
+  use_symmetric_averaging: true
+  eager_init: true
+features:
+  past_future:
+    - [general_ghi,   general_ghi_predict]
+    - [general_temp,  general_temp_predict]
+    - [GHI_solargis,  ghi_solargis_predict]
+    - [temp_solargis, temp_solargis_predict]
+  derived: {solar_elevation: true, clear_sky_power: true}
+  nwp_members:
+    enabled: false
+    cols: [SSRD_pos_1, SSRD_pos_2, SSRD_pos_3, SSRD_pos_4, SSRD_pos_5, SSRD_pos_6, SSRD_pos_7, SSRD_pos_8, SSRD_pos_9]
+    future_suffix: _predict
+    add_spread: true
+  past_only: []
+  target_transform: none
+variability: {signal: k_nwp, bins: 3, k_nwp_edges: [0.35, 0.75]}
+data:
+  issue_times_eval: all
+  issue_times_train: all
+  scored_steps: {short: [55, 151], ultra: [0, 16]}
+finetune:
+  enabled: false                       # 路线 A；LoRA 在后续计划打开
+  inference_path: evaluator
+calibration:
+  enabled: true
+  table_path: ${run.out_dir}/calibration.parquet
+  levels: [0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99]
+  normalization: clear_sky             # clear_sky | model_spread | none
+  strata: {solar_elevation_edges: [20, 45], variability: true, lead_edges: [4, 8, 16, 55, 103]}
+  fit_steps: [[0, 16], [55, 151]]
+  window_days: 45
+  n_min_factor: 10
+  fallback: hierarchical
+  aci: {enabled: false, gamma: 0.01}
+decision:
+  physics: {night_zero: true, clear_sky_cap_ratio: 1.05, capacity_cap: true}
+  point:
+    default: p_star
+    by_step:
+      - {steps: [0, 16],   method: p_star_l1}
+      - {steps: [55, 151], method: p_star}
+    floor_ratio: 0.2
+    tau_grid_step: 0.005
+    tail: flat
+    shrink_factor: null                # global_shrink 用；backfill 报表会打印拟合值
+eval:
+  metrics: [nanwang_short_D+1, nanwang_ultra_short, nrmse, crps, coverage, pit]
+  buckets: [variability, solar_elevation, station, lead]
+  report_dir: ${run.out_dir}/reports
+  batch_size: 64
