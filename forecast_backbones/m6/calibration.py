@@ -219,3 +219,27 @@ class Calibrator:
         c.table = pd.read_parquet(path)
         c._build_lookup()
         return c
+
+
+def result_to_long(result_df: pd.DataFrame, fit_steps, model_levels=MODEL_LEVELS) -> pd.DataFrame:
+    """evaluate_model 的 result_df（每行 192 步数组）→ 校准拟合长表（每行一步）。
+    只保留 fit_steps 区间内、非夜间、真值有限、p_clear>0 的 (行, 步)。"""
+    qc = quantile_cols(model_levels)
+    keep = np.zeros(len(result_df.iloc[0]["observe_power_future"]), bool)
+    for lo, hi in fit_steps:
+        keep[int(lo):int(hi)] = True
+    steps = np.flatnonzero(keep)
+    parts = []
+    # 用 to_dict("records") 而不是 itertuples：后者会把 'q_0.1' 这类非标识符列名改成位置字段
+    for r in result_df.to_dict("records"):
+        y = np.asarray(r["observe_power_future"], float)[steps]
+        night = np.asarray(r["night"], bool)[steps]; pc = np.asarray(r["p_clear"], float)[steps]
+        ok = np.isfinite(y) & ~night & (pc > 0)
+        if not ok.any():
+            continue
+        d = {"station_id": int(r["station_id"]), "lead": steps[ok], "elev_deg": np.asarray(r["elev_deg"], float)[steps][ok],
+             "var_bin": int(r["var_bin"]), "y": y[ok], "p_clear": pc[ok]}
+        for c in qc:
+            d[c] = np.asarray(r[c], float)[steps][ok]
+        parts.append(pd.DataFrame(d))
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["station_id", "lead", "elev_deg", "var_bin", "y", "p_clear", *qc])
