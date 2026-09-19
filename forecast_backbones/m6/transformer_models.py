@@ -65,6 +65,15 @@ def _lazy_torch_path_imports():
     return TorchBackbone, inject_lora, freeze_all_but_lora, load_lora_state_dict, set_lora_enabled, trainable_summary
 
 
+def _lazy_routing_imports():
+    """惰性导入 routing.py（本身不依赖 timesfm3，惰性只是与 _lazy_torch_path_imports 风格一致）。"""
+    try:
+        from .routing import save_routing, load_routing
+    except ImportError:
+        from routing import save_routing, load_routing
+    return save_routing, load_routing
+
+
 class TransformersAdaptedM6Model(nn.Module):
     """必须是本文件第一个 nn.Module 子类（registry 自动发现）。"""
 
@@ -100,7 +109,11 @@ class TransformersAdaptedM6Model(nn.Module):
         self.torch_path = bool(ft["enabled"]) or str(ft.get("inference_path", "evaluator")) == "torch"
         self.backbone = None                       # torch 路径：TorchBackbone 子模块（_attach_torch_path 赋值）
         self.lora_loaded = False
-        self.station_routing = None                # Task 5：{station_id: "lora"|"zeroshot"}
+        self.station_routing = None                # {station_id: "lora"|"zeroshot"}；finetune.enabled 且路由表存在时加载
+        if ft["enabled"]:
+            rp = Path(str(ft["routing_path"]))
+            if rp.exists():
+                self.station_routing = _lazy_routing_imports()[1](rp)
         if bool(t3.get("eager_init", True)):
             self._ensure_backbone(self._resolve_device())
 
@@ -182,9 +195,25 @@ class TransformersAdaptedM6Model(nn.Module):
         t3 = self.cfg["timesfm3"]
         pf = np.stack(pf_list).astype(np.float32) if pf_list else None            # [B,C,864]
         po = np.stack(po_list).astype(np.float32) if po_list else None            # [B,C,672]
-        return self.backbone.predict_quantiles(
-            tgt, pf, po, horizon=self.pred_len, use_znorm=bool(t3["use_znorm"]),
-            use_symmetric_averaging=bool(t3["use_symmetric_averaging"]), make_positive=bool(t3["make_positive"]))
+        kw = dict(horizon=self.pred_len, use_znorm=bool(t3["use_znorm"]),
+                  use_symmetric_averaging=bool(t3["use_symmetric_averaging"]), make_positive=bool(t3["make_positive"]))
+        if not self.station_routing:
+            return self.backbone.predict_quantiles(tgt, pf, po, **kw)
+        set_lora_enabled = _lazy_torch_path_imports()[4]
+        use_lora = np.array([self.station_routing.get(int(s), "lora") == "lora" for s in np.asarray(station_id).reshape(-1)])
+        try:
+            if use_lora.all():
+                set_lora_enabled(self.backbone.model, True)
+                return self.backbone.predict_quantiles(tgt, pf, po, **kw)
+            if not use_lora.any():
+                set_lora_enabled(self.backbone.model, False)
+                return self.backbone.predict_quantiles(tgt, pf, po, **kw)
+            set_lora_enabled(self.backbone.model, True);  q_lora = self.backbone.predict_quantiles(tgt, pf, po, **kw)
+            set_lora_enabled(self.backbone.model, False); q_zs = self.backbone.predict_quantiles(tgt, pf, po, **kw)
+            sel = torch.as_tensor(use_lora, device=q_lora.device)[:, None, None]
+            return torch.where(sel, q_lora, q_zs)
+        finally:
+            set_lora_enabled(self.backbone.model, True)
 
     # ------------------------------------------------------------------ 取列（同 m5）
     def _col(self, batch_dict: dict, col: str) -> np.ndarray:
