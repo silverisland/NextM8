@@ -57,3 +57,43 @@ calibrate → enforce_monotone → physics_clip → select_point，同一套 lev
 与 `by_step` 里配置成 `p_star`/`p_star_l1` 的方法本次会自动回退为 `median`（`cfg` 本身不改写，只影响
 当次 forward 实际生效的方法；后续用 `set_calibrator` 补上真正的 calibrator 后不再回退）。这与主动关闭
 `calibration.enabled=False` 是两回事：主动关闭校准时仍按配置跑 p_star/p_star_l1，不触发这个回退。
+
+## 路线 B：LoRA 微调（计划 2）
+
+前置：训练机 torch ≥ 2.4（timesfm3 用 `nn.RMSNorm`；本地 2.2.2 靠 `_torch_compat.ensure_rmsnorm()` 垫片跑测试）、
+`transformers==4.40.1`、`accelerate>=0.21`、timesfm3 3.0.2、真权重目录。`finetune.lora.target_modules` 是 timesfm3 的真名
+`query_proj/key_proj/value_proj/out_proj`（`seq_attn` 与 `var_attn` 都挂）；spec 初稿里的 `q_proj…` 在包里不存在，挂载零匹配会直接报错。
+
+`_torch_compat.py` 里还有第二个垫片 `ensure_finite_running_stats()`：timesfm3.torch 某些归一化层在方差恒为 0 的输入上反向传播会算出
+`sqrt(0)` 的梯度（NaN），这个垫片只改反向路径，前向数值逐位不变。两个垫片都在 `backbone.py` 导入 `timesfm3.torch` 之前打上，训练机
+torch ≥ 2.4 且不遇到零方差输入时其实用不上，留着不影响正确性。
+
+训练（一折）：
+```
+python -m forecast_backbones.m6.train --config forecast_backbones/m6/model_config.yaml \
+    --parquet "/path/to/*.parquet" --out runs/m6_lora_f0
+```
+`model_config.yaml` 里先把 `finetune.enabled: true`、`finetune.split.*` 改成真实日期；滚动第二折加 `--shift-days N`（全部边界整体后移 N 天），输出目录换 `_f1`。`--max-steps` 只用于冒烟。
+
+产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
+`station_routing.json`（逐站 `lora|zeroshot`，输给零样本的站回退；未出现在路由表里的未知站按设计默认 `"lora"`）、
+`calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：
+`ladder_lora.csv`（阶梯 4：`zeroshot_calibrated_pstar` / `lora_calibrated_pstar` / `routed_calibrated_pstar` 三行）、`station_ladder.csv`
+（逐站 `route` 列，取值 `lora|zeroshot`）。
+
+推理：`finetune.enabled: true` 时模型构造期自动加载 `lora_path`（缺失会 warn 并以零样本权重运行）与 `routing_path`（缺失=全站 lora）；
+`inference_path: torch`（默认，与训练一致）或 `evaluator`（LoRA 仍生效，走 timesfm3 自己的 decode，只作回归对照）。
+混合站 batch 会跑两次底座按行选路；单一路由的 batch 只跑一次。路线 A 的回填 CLI（`transformer_trainer.backfill_and_report`）
+不感知 `finetune`：只要 cfg 里 `finetune.enabled=True` 且 `lora_path` 指向的文件存在，模型构造时就会照常经 torch 路径加载
+LoRA 权重后再回填——路线 A 与路线 B 的产物在同一套 `run.out_dir` 约定下天然兼容，不需要额外接线（回归测试见
+`tests/test_ladder.py::test_backfill_uses_lora_weights_when_finetune_enabled`）。
+
+训练路径只经 `TimesFM3Torch.decode.__wrapped__` 调底座（`decode` 本身被 `@torch.no_grad()` 装饰，`predict_batch` 再套 `inference_mode`，
+都不可训）。`backbone.predict_quantiles` 逐条照搬了 `predict_batch` 的前后处理，四种开关组合与 evaluator 对齐到 1e-4（随机小模型测试）；
+真权重上的同一测试在 `test_real_backbone.py::test_torch_path_matches_evaluator_on_real_checkpoint`，有 checkpoint 才跑。
+
+真机待办清单：训练机上跑 `python -m pytest forecast_backbones/m6/tests/test_real_backbone.py -q`（本机因无 timesfm3/权重全 skip，
+训练机应全绿，含 m5 一致性、torch/evaluator 一致性）；填好 `station_meta.csv`（`station_id` 须与 parquet 一致）；把
+`finetune.split.train_end/val_start/val_end/test_start` 改成真实日期（默认值是占位的示例日期，不能直接拿去训练）。
+
+辅助头（`finetune.loss.aux_nanwang_head`）、阶梯 5 物理协变量消融与消融簇、堆叠 → 计划 3；本计划不读这些键。

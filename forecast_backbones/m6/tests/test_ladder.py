@@ -297,3 +297,24 @@ def test_backfill_and_report_writes_diagnostics_json(tmp_path, monkeypatch):
     assert sum(diag["var_bin_hist"].values()) == diag["n_rows_val"]
     assert diag["calibrator_last_stats"]["n"] == diag["n_rows_val"] * 192
     assert "per_tau_uncalibrated_frac" in diag["calibrator_last_stats"]
+
+
+# ---------------------------------------------------------------- 路线 B 兼容：回填走 LoRA
+
+
+def test_backfill_uses_lora_weights_when_finetune_enabled(tmp_path, monkeypatch):
+    """回填 CLI 与路线 B 产物兼容：finetune.enabled=True + lora_path 存在 → 模型经 torch 路径加载 LoRA 后回填。"""
+    timesfm3 = pytest.importorskip("timesfm3")
+    from .test_train import _patch_tiny_backbone, _inputs
+    from forecast_backbones.m6.train import train_m6
+    from forecast_backbones.m6.backbone import TorchBackbone
+    d = tmp_path / "tiny"; TorchBackbone.tiny_for_tests().model.save_pretrained(str(d))
+    from timesfm3 import ModelConfig, TimesFM3Evaluator
+    ev = TimesFM3Evaluator(ModelConfig(checkpoint_path=str(d), per_core_batch_size=4, device="cpu"))
+    _patch_tiny_backbone(monkeypatch, ev)
+    df, parquet, out, cfg = _inputs(tmp_path)
+    with pytest.warns(UserWarning, match="LoRA 权重"):
+        train_m6(cfg, str(parquet), max_steps=1)
+    rep = backfill_and_report(cfg, str(parquet), "2025-06-11", "2025-06-12", "2025-06-12", "2025-06-14")
+    assert list(rep["variant"]) == ["raw_median", "global_shrink", "physics_median", "calibrated_pstar"]
+    assert (out / "reports" / "ladder.csv").exists()
