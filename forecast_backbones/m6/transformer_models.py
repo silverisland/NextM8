@@ -39,6 +39,7 @@ try:
     from .calibration import Calibrator, CalibrationConfig
     from .losses import pinball_loss
     from ._arrays import interp_nan
+    from ._torch_compat import ensure_rmsnorm
 except ImportError:
     from config import load_config
     from features import StationMeta, build_row_context
@@ -47,6 +48,7 @@ except ImportError:
     from calibration import Calibrator, CalibrationConfig
     from losses import pinball_loss
     from _arrays import interp_nan
+    from _torch_compat import ensure_rmsnorm
 
 # 已经就哪些 past_future 协变量对发过"batch_dict 缺列"警告——跨调用去重，同一进程内每对只提示一次
 # （与 m5 的 self._warned_pairs 语义相同，这里用模块级集合而不是实例级）。
@@ -114,6 +116,9 @@ class TransformersAdaptedM6Model(nn.Module):
             rp = Path(str(ft["routing_path"]))
             if rp.exists():
                 self.station_routing = _lazy_routing_imports()[1](rp)
+            else:
+                warnings.warn(f"finetune.enabled=True 但站级路由表 {rp} 不存在：不做逐站路由"
+                              f"（station_routing 保持 None）")
         if bool(t3.get("eager_init", True)):
             self._ensure_backbone(self._resolve_device())
 
@@ -155,6 +160,7 @@ class TransformersAdaptedM6Model(nn.Module):
         return self.device_pref
 
     def _ensure_backbone(self, want: str):
+        ensure_rmsnorm()          # 幂等；torch < 2.4 时必须在 import timesfm3.torch.* 之前打上，backbone.py 未必已 import 过
         if self._backbone is not None and self._backbone_device == want:
             return
         from timesfm3 import ModelConfig, TimesFM3Evaluator            # 懒 import
@@ -200,7 +206,7 @@ class TransformersAdaptedM6Model(nn.Module):
         if not self.station_routing:
             return self.backbone.predict_quantiles(tgt, pf, po, **kw)
         set_lora_enabled = _lazy_torch_path_imports()[4]
-        use_lora = np.array([self.station_routing.get(int(s), "lora") == "lora" for s in np.asarray(station_id).reshape(-1)])
+        use_lora = np.array([self.station_routing.get(int(s), "zeroshot") == "lora" for s in np.asarray(station_id).reshape(-1)])
         try:
             if use_lora.all():
                 set_lora_enabled(self.backbone.model, True)
@@ -305,7 +311,9 @@ class TransformersAdaptedM6Model(nn.Module):
         pf_list, po_list = self._covariates(batch_dict, ctx)
         if self.torch_path:
             q_raw_t = self._quantiles_torch(tgt, pf_list, po_list, ctx.station_id)   # [B,H,9] tensor；训练时带梯度
-            q_raw = q_raw_t.detach().cpu().numpy().astype(np.float32)
+            if q_raw_t.dtype != torch.float32:
+                q_raw_t = q_raw_t.float()          # bf16 autocast → fp32：aux["quantiles"]/loss 口径统一，不随 autocast 变
+            q_raw = q_raw_t.detach().float().cpu().numpy()   # .float() 兜底：bf16 张量 .numpy() 会抛 TypeError
             dev = q_raw_t.device
         else:
             q_raw = self._run_backbone(tgt, pf_list, po_list)                          # [B,H,9]

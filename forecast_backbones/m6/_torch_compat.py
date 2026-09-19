@@ -38,13 +38,15 @@ def ensure_rmsnorm() -> bool:
     return True
 
 
-def ensure_finite_running_stats(eps: float = 1e-12) -> bool:
+def ensure_finite_running_stats() -> bool:
     """timesfm3.torch.util.update_running_stats 对恰好零方差的 patch 做 torch.sqrt(0)：前向安全（用
     torch.where 避了 0/0），反向在 0 处导数为 +inf，遇到该分支上游梯度恰为 0 时 0*inf=nan——光伏夜间连续
-    整段恰为 0.0，使这种零方差 patch 成为常态而非边角情形。替换成两处 sqrt 都套 _safe_sqrt 的版本：
-    前向逐位不变（v>0 时是 sqrt(v)，v==0 时精确是 0，与未打补丁的 timesfm3 逐位一致——route A 靠这个
-    保证与 master 位级相同），只有反向变了（clamp_min 让 v==0 处的局部导数有限，torch.where 把 v==0 的
-    元素路由到常数 0 分支，避免 0*inf=nan）。对 update_running_stats 的调用方（timesfm3.torch.util 自身、
+    整段恰为 0.0，使这种零方差 patch 成为常态而非边角情形。替换成两处 sqrt 都套 _safe_sqrt 的版本：双重
+    torch.where，不 clamp。前向逐位不变（v>0 时精确是 sqrt(v)，v<=0 时精确是 0，与未打补丁的 timesfm3
+    逐位一致——route A 靠这个保证与 master 位级相同；早前用 torch.sqrt(v.clamp_min(eps)) 的版本对 v 落在
+    (0, 1e-12) 时会把值钳到 sqrt(1e-12)=1e-6，不是逐位不变，且恰好落在 timesfm3 `_make_safe_for_division`
+    的 1e-6 判定边界上，已弃用）。只有反向变了：v<=0 处 torch.sqrt 只作用在与 v 无关的常量 1 上（梯度不经
+    v 回传），外层 torch.where 把 v<=0 的元素路由到常数 0 分支，避免 0*inf=nan。对 update_running_stats 的调用方（timesfm3.torch.util 自身、
     timesfm3.torch.cpm_revin_refine 等经 `from . import util` 按属性调用的模块）都用属性替换即时生效；
     额外扫一遍 sys.modules，把任何以 `from .util import update_running_stats` 方式按值导入过原函数的
     timesfm3.torch.* 模块也一并重绑定。补丁函数上挂 `_m6_original` 指回原始未打补丁的函数，供逐位对比
@@ -63,7 +65,8 @@ def ensure_finite_running_stats(eps: float = 1e-12) -> bool:
         return False
 
     def _safe_sqrt(v):
-        return torch.where(v > 0, torch.sqrt(v.clamp_min(eps)), torch.zeros_like(v))
+        safe = torch.where(v > 0, v, torch.ones_like(v))
+        return torch.where(v > 0, torch.sqrt(safe), torch.zeros_like(v))
 
     def _patched(n, mu, sigma, x, mask):
         is_legit = ~mask

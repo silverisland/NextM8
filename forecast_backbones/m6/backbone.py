@@ -25,6 +25,13 @@ except ImportError:
 
 ensure_rmsnorm()                                    # 必须在 import timesfm3.torch 之前
 ensure_finite_running_stats()                       # 同上：零方差 patch 的 sqrt 反向 NaN 垫片
+from timesfm3.torch import util as _util            # noqa: E402
+if not getattr(getattr(_util, "update_running_stats", None), "_m6_eps_patched", False):
+    raise RuntimeError(
+        "ensure_finite_running_stats() 垫片没有真正打上：timesfm3.torch.util.update_running_stats 缺失"
+        "或已改名（当前安装的 timesfm3 build 与 m6 假定的 3.0.2 API 不一致）。光伏夜间连续整段恰为 0.0，"
+        "让零方差 patch 在训练里是常态而非边角情形，垫片缺失只会在某次夜间 batch 恰好命中零方差分支的反向"
+        "传播时才炸出 NaN——必须在 import 期就拦下来，不能等训练中途才发现。")
 from timesfm3.torch.model import TimesFM3Torch      # noqa: E402
 from timesfm3.torch.timesfm3_forecaster import linear_interpolation, _znorm_stats, _is_nonnegative  # noqa: E402
 

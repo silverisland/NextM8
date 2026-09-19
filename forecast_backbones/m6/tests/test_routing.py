@@ -60,7 +60,7 @@ def test_mixed_batch_routes_per_row(tmp_path, tiny_evaluator):
     assert all(x.enabled for x in m.backbone.model.modules() if isinstance(x, LoRALinear))   # 调用后恢复
 
 
-def test_uniform_batch_single_pass_and_unknown_station_defaults_to_lora(tmp_path, tiny_evaluator, monkeypatch):
+def test_uniform_batch_single_pass_and_unknown_station_defaults_to_zeroshot(tmp_path, tiny_evaluator, monkeypatch):
     df = make_synthetic_frame(n_days=1, issue_every_min=360)
     bd, _ = _batch(df, [0, 2])                                          # 同一站两行
     sid = int(bd["station_id"][0]); assert int(bd["station_id"][1]) == sid
@@ -72,11 +72,15 @@ def test_uniform_batch_single_pass_and_unknown_station_defaults_to_lora(tmp_path
     with torch.no_grad():
         m(bd)
     assert len(calls) == 1                                              # 全零样本：单 pass
-    m.station_routing = {9999: "zeroshot"}                              # 表里没有的站 → 默认 lora
+    m.station_routing = {9999: "zeroshot"}                              # 表里没有的站（R6）→ 默认 zeroshot
     calls.clear()
     with torch.no_grad():
-        m(bd)
+        q_unknown = m(bd).aux["quantiles"].numpy()
     assert len(calls) == 1
+    m.station_routing = {sid: "zeroshot"}                               # 同一站显式 zeroshot 作对照
+    with torch.no_grad():
+        q_explicit_zeroshot = m(bd).aux["quantiles"].numpy()
+    assert np.allclose(q_unknown, q_explicit_zeroshot)                  # 未知站路由结果 = 零样本，不是 LoRA（B 非零，二者本应有别）
 
 
 def test_routing_loaded_at_construction_when_file_exists(tmp_path, tiny_evaluator):

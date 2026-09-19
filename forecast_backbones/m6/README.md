@@ -63,10 +63,16 @@ calibrate → enforce_monotone → physics_clip → select_point，同一套 lev
 前置：训练机 torch ≥ 2.4（timesfm3 用 `nn.RMSNorm`；本地 2.2.2 靠 `_torch_compat.ensure_rmsnorm()` 垫片跑测试）、
 `transformers==4.40.1`、`accelerate>=0.21`、timesfm3 3.0.2、真权重目录。`finetune.lora.target_modules` 是 timesfm3 的真名
 `query_proj/key_proj/value_proj/out_proj`（`seq_attn` 与 `var_attn` 都挂）；spec 初稿里的 `q_proj…` 在包里不存在，挂载零匹配会直接报错。
+实测过、确认可跑通的固定版本组合：`transformers==4.40.1`、`accelerate==0.29.3`、`timesfm3==3.0.2`；`build_training_args`
+按 `TrainingArguments.__init__` 实际签名探测传 `evaluation_strategy` 还是 `eval_strategy`（transformers ≥ 4.46 删掉了前者改名后者），换更新的 transformers 不需要改代码，但没有实测过。
 
 `_torch_compat.py` 里还有第二个垫片 `ensure_finite_running_stats()`：timesfm3.torch 某些归一化层在方差恒为 0 的输入上反向传播会算出
-`sqrt(0)` 的梯度（NaN），这个垫片只改反向路径，前向数值逐位不变。两个垫片都在 `backbone.py` 导入 `timesfm3.torch` 之前打上，训练机
-torch ≥ 2.4 且不遇到零方差输入时其实用不上，留着不影响正确性。
+`sqrt(0)` 的梯度（NaN），这个垫片只改反向路径，前向数值逐位不变。两个垫片都在 `backbone.py` 导入 `timesfm3.torch` 之前打上，但两者
+必要性不同：`ensure_rmsnorm()` 只在 torch < 2.4（没有原生 `nn.RMSNorm`）时才需要，torch ≥ 2.4 上是空操作；
+`ensure_finite_running_stats()` 与 torch 版本无关，任何 torch 版本都必须打——光伏夜间连续整段恰为 0.0，零方差 patch 是训练期的
+常态而不是边角情形，垫片缺失只会在某次夜间 batch 恰好命中该分支的反向传播时才炸出 NaN。`backbone.py` 在打完垫片后会立刻检查
+`timesfm3.torch.util.update_running_stats._m6_eps_patched` 确实为真，检查不过直接 `RuntimeError`（导入期就拦下来，不是训练到
+一半才发现某个 timesfm3 build 把这个函数改了名字）。
 
 训练（一折）：
 ```
@@ -76,7 +82,7 @@ python -m forecast_backbones.m6.train --config forecast_backbones/m6/model_confi
 `model_config.yaml` 里先把 `finetune.enabled: true`、`finetune.split.*` 改成真实日期；滚动第二折加 `--shift-days N`（全部边界整体后移 N 天），输出目录换 `_f1`。`--max-steps` 只用于冒烟。
 
 产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
-`station_routing.json`（逐站 `lora|zeroshot`，输给零样本的站回退；未出现在路由表里的未知站按设计默认 `"lora"`）、
+`station_routing.json`（逐站 `lora|zeroshot`，输给零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
 `calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：
 `ladder_lora.csv`（阶梯 4：`zeroshot_calibrated_pstar` / `lora_calibrated_pstar` / `routed_calibrated_pstar` 三行）、`station_ladder.csv`
 （逐站 `route` 列，取值 `lora|zeroshot`）。

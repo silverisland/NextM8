@@ -218,6 +218,29 @@ def test_calibration_enabled_missing_table_warns_and_falls_back(tmp_path):
     assert m_on.cfg["decision"]["point"]["default"] == "p_star"                  # cfg 本身未被改写
     assert [r["method"] for r in m_on.cfg["decision"]["point"]["by_step"]] == ["p_star_l1", "p_star"]
 
+def test_ensure_backbone_calls_ensure_rmsnorm_before_constructing_evaluator(tmp_path, tiny_ckpt_dir, monkeypatch):
+    """_ensure_backbone 必须自己调 ensure_rmsnorm（幂等），不能指望 backbone.py（路线 B 专属）已经被
+    同进程里别的测试提前 import 过而顺带打上垫片：路线 A 单独跑、torch < 2.4、且本次会话里还没有
+    任何东西 import 过 backbone.py 时，构造真实 evaluator 会直接 AttributeError（module 'torch.nn'
+    has no attribute 'RMSNorm'）。用 spy 包一层真实 ensure_rmsnorm，既验证被调用，又不破坏其副作用。"""
+    pytest.importorskip("timesfm3")
+    import forecast_backbones.m6.transformer_models as tm
+    from forecast_backbones.m6._torch_compat import ensure_rmsnorm as real_ensure_rmsnorm
+    calls = []
+
+    def spy():
+        calls.append(1)
+        return real_ensure_rmsnorm()
+
+    monkeypatch.setattr(tm, "ensure_rmsnorm", spy)
+    cfg = {"timesfm3": {"checkpoint": str(tiny_ckpt_dir), "device": "cpu", "per_core_batch_size": 4, "eager_init": True},
+           "dataset": {"station_meta": str(write_station_meta(tmp_path))}, "calibration": {"enabled": False},
+           "finetune": {"enabled": False, "inference_path": "evaluator"}}
+    m = tm.TransformersAdaptedM6Model(cfg)
+    assert len(calls) >= 1
+    assert m._backbone is not None
+
+
 def test_calibration_enabled_cfg_mismatch_raises_from_init(tmp_path):
     fit_cfg = CalibrationConfig(levels=CAL_LEVELS, model_levels=MODEL_LEVELS, normalization="clear_sky",
                                 elev_edges=(20.0, 45.0), lead_edges=(4, 8, 16, 55, 103),

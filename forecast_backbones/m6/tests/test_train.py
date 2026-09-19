@@ -102,6 +102,23 @@ def test_trained_artifacts_load_into_inference_model(tmp_path, tiny_evaluator, m
     assert o.logits.shape == (4, 192) and torch.isfinite(o.logits).all()
 
 
+def test_train_m6_raises_clear_error_when_no_finite_score_ever_recorded(tmp_path, tiny_evaluator, monkeypatch):
+    """南网打分全程非有限（没有一天能凑出完整可评分的一天）→ NanwangEvalCallback 从未记录到
+    best_epoch/存过权重；train_m6 必须在 trainer.train() 之后立刻拦下来，报出点名 val 窗口的
+    ValueError，而不是让后面的 torch.load(best_path) 摔出 FileNotFoundError。"""
+    _patch_tiny_backbone(monkeypatch, tiny_evaluator)
+    df, parquet, out, cfg = _inputs(tmp_path)
+    import forecast_backbones.m6.nanwang_callback as nc
+    monkeypatch.setattr(nc, "score_split", lambda *a, **k: (float("nan"), None, None))
+    with pytest.warns(UserWarning, match="LoRA 权重"):
+        with pytest.raises(ValueError) as exc:
+            train_m6(cfg, str(parquet), max_steps=1)
+    msg = str(exc.value)
+    assert cfg["finetune"]["split"]["val_start"] in msg and cfg["finetune"]["split"]["val_end"] in msg
+    assert "非有限" in msg
+    assert not (out / "lora_weights.pt").exists()
+
+
 def test_second_run_in_same_out_dir_starts_fresh(tmp_path, tiny_evaluator, monkeypatch):
     """跨任务约束 1 的回归测试：同一 out_dir 里已经有上一轮训练的 lora_weights.pt / station_routing.json
     时，第二轮训练的模型构造仍须是零样本、无路由起点——不能把上一轮的产物读回来当成本轮的起点。"""

@@ -98,6 +98,23 @@ def test_rejects_bad_shapes_and_horizon(tiny_evaluator):
         TorchBackbone(_wrong_levels_model())
 
 
+def test_backbone_import_raises_if_finite_running_stats_shim_fails_to_attach(monkeypatch):
+    """timesfm3 build 把 update_running_stats 改名/删掉时，ensure_finite_running_stats() 会静默
+    返回 False（不打补丁），但训练要等到某次夜间 batch 恰好命中零方差分支的反向传播才 NaN——必须在
+    backbone.py 的 import 期就用 RuntimeError 拦下来。用 monkeypatch 删掉该函数、重新 import
+    backbone.py 复现；测试结束务必把状态修复回去，不能让这个模块留在半初始化状态污染其他测试。"""
+    import importlib
+    import forecast_backbones.m6.backbone as backbone_mod
+    from timesfm3.torch import util as tfm_util
+    monkeypatch.delattr(tfm_util, "update_running_stats")
+    try:
+        with pytest.raises(RuntimeError, match="update_running_stats"):
+            importlib.reload(backbone_mod)
+    finally:
+        monkeypatch.undo()                     # 立刻恢复被删的属性（已打过补丁的原函数）
+        importlib.reload(backbone_mod)         # 重新正常初始化一遍，不让后续测试踩到半初始化的模块
+
+
 def _wrong_levels_model():
     from timesfm3.torch import configs
     from timesfm3.torch.model import TimesFM3Torch

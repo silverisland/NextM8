@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -64,13 +65,18 @@ def make_splits(ds_all, split: dict, shift_days: int = 0):
 def build_training_args(cfg: dict, out_dir, max_steps=None) -> TrainingArguments:
     s = cfg["finetune"]["schedule"]
     cuda = torch.cuda.is_available()
+    # transformers >= 4.46 删掉了 evaluation_strategy，改名 eval_strategy；按 TrainingArguments.__init__
+    # 实际签名探测该传哪个，不硬编码某个 transformers 版本的键名。
+    eval_strategy_kw = ("eval_strategy" if "eval_strategy" in inspect.signature(TrainingArguments.__init__).parameters
+                        else "evaluation_strategy")
     return TrainingArguments(
         output_dir=str(Path(out_dir) / "hf"), per_device_train_batch_size=int(s["batch_size"]),
         num_train_epochs=float(s["epochs_max"]), learning_rate=float(s["lr"]), weight_decay=float(s["weight_decay"]),
         max_grad_norm=float(s["grad_clip"]), bf16=(str(s["precision"]) == "bf16" and cuda), use_cpu=not cuda,
-        evaluation_strategy="no", save_strategy="no", logging_steps=int(s.get("logging_steps", 20)), report_to=[],
+        save_strategy="no", logging_steps=int(s.get("logging_steps", 20)), report_to=[],
         remove_unused_columns=False, disable_tqdm=True, dataloader_pin_memory=cuda,
-        max_steps=(-1 if max_steps is None else int(max_steps)), seed=int((cfg["run"].get("seeds") or [0])[0]))
+        max_steps=(-1 if max_steps is None else int(max_steps)), seed=int((cfg["run"].get("seeds") or [0])[0]),
+        **{eval_strategy_kw: "no"})
 
 
 def _station_table(zs: pd.DataFrame, lo: pd.DataFrame, routing: dict) -> pd.DataFrame:
@@ -118,6 +124,13 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
     trainer = Trainer(model=model, args=build_training_args(train_cfg, out, max_steps), data_collator=collate,
                       train_dataset=ds_train, callbacks=[cb])
     trainer.train()
+    if cb.best_epoch is None or not best_path.exists():
+        vs, ve = ft["split"]["val_start"], ft["split"]["val_end"]
+        raise ValueError(
+            f"训练全程未产出任何可用的最优 LoRA 权重：val 窗口 finetune.split=[{vs}, {ve}) 内南网短期打分"
+            f"（NanwangEvalCallback 每个 epoch 调一次 score_split）自始至终都是非有限值（没有一天能凑出"
+            f"完整可评分的一天），cb.best_epoch={cb.best_epoch!r}，{best_path} 不存在。请检查该 val 窗口"
+            f"的数据是否覆盖足够多的完整天。")
     # 最优权重
     load_lora_state_dict(model.backbone.model, torch.load(best_path, map_location="cpu"))
     model.lora_loaded = True

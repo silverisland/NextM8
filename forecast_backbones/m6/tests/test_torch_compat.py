@@ -70,3 +70,35 @@ def test_ensure_finite_running_stats_second_sqrt_guarded():
     _, _, new_sigma = util.update_running_stats(n, mu, sigma, x, mask)
     new_sigma.sum().backward()
     assert torch.isfinite(x.grad).all()
+
+
+def test_ensure_finite_running_stats_randomized_forward_identity_and_finite_grad():
+    """随机化版逐位一致性（补 test_..._forward_bit_identical 的手工构造用例）：300 组随机
+    n/mu/sigma/x，掩码随机，部分 (b,v) 的 patch 被强制成常数（其中一半再强制等于当前 running
+    mean，触发第二个 sqrt 的零方差分支）；断言 patched 与 _m6_original 三个输出逐位相同，
+    且零方差试验里反向梯度有限。"""
+    pytest.importorskip("timesfm3")
+    from timesfm3.torch import util
+    ensure_finite_running_stats()
+    patched = util.update_running_stats
+    orig = patched._m6_original
+    torch.manual_seed(12345)
+    B, V, P = 2, 3, 5
+    for trial in range(300):
+        n = torch.randint(0, 5, (B, V)).float()
+        mu = torch.randn(B, V)
+        sigma = torch.rand(B, V)
+        x = torch.randn(B, V, P)
+        mask = torch.rand(B, V, P) > 0.5
+        const_rows = torch.rand(B, V) > 0.6                       # 部分 patch 强制恒定（零方差）
+        equal_mean_rows = const_rows & (torch.rand(B, V) > 0.5)   # 其中一半恰等于 running mean
+        const_val = torch.where(equal_mean_rows, mu, torch.randn(B, V))
+        x = torch.where(const_rows.unsqueeze(-1).expand_as(x), const_val.unsqueeze(-1).expand_as(x), x)
+        x = x.detach().requires_grad_(True)
+        out_p = patched(n, mu, sigma, x, mask)
+        out_o = orig(n, mu, sigma, x, mask)
+        for a, b in zip(out_p, out_o):
+            assert torch.equal(a, b), f"trial {trial}"
+        if const_rows.any():
+            out_p[2].sum().backward()
+            assert torch.isfinite(x.grad).all(), f"trial {trial}"
