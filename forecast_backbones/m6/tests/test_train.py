@@ -62,7 +62,7 @@ def test_build_training_args_cpu_defaults(tmp_path):
 def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monkeypatch):
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
-    with pytest.warns(UserWarning, match="LoRA 权重"):                    # 训练前无权重：构造期 warn 一次
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):                    # 训练前无权重：构造期 warn 一次
         res = train_m6(cfg, str(parquet), max_steps=2)
     # 产物
     assert (out / "lora_weights.pt").exists() and (out / "station_routing.json").exists()
@@ -87,7 +87,7 @@ def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monk
 def test_trained_artifacts_load_into_inference_model(tmp_path, tiny_evaluator, monkeypatch):
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
-    with pytest.warns(UserWarning, match="LoRA 权重"):
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
         train_m6(cfg, str(parquet), max_steps=2)
     from forecast_backbones.m6.config import load_config
     import warnings
@@ -110,7 +110,7 @@ def test_train_m6_raises_clear_error_when_no_finite_score_ever_recorded(tmp_path
     df, parquet, out, cfg = _inputs(tmp_path)
     import forecast_backbones.m6.nanwang_callback as nc
     monkeypatch.setattr(nc, "score_split", lambda *a, **k: (float("nan"), None, None))
-    with pytest.warns(UserWarning, match="LoRA 权重"):
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
         with pytest.raises(ValueError) as exc:
             train_m6(cfg, str(parquet), max_steps=1)
     msg = str(exc.value)
@@ -124,7 +124,7 @@ def test_second_run_in_same_out_dir_starts_fresh(tmp_path, tiny_evaluator, monke
     时，第二轮训练的模型构造仍须是零样本、无路由起点——不能把上一轮的产物读回来当成本轮的起点。"""
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
-    with pytest.warns(UserWarning, match="LoRA 权重"):
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
         train_m6(cfg, str(parquet), max_steps=1)
     assert (out / "lora_weights.pt").exists() and (out / "station_routing.json").exists()
 
@@ -147,7 +147,7 @@ def test_second_run_in_same_out_dir_starts_fresh(tmp_path, tiny_evaluator, monke
                              "lora_loaded": self.lora_loaded, "station_routing": self.station_routing})
 
     monkeypatch.setattr(tm_mod, "TransformersAdaptedM6Model", _SpyModel)
-    with pytest.warns(UserWarning, match="LoRA 权重"):
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
         train_m6(cfg, str(parquet), max_steps=1)
 
     assert len(recorded) == 1, "第二轮训练模型只应构造一次"

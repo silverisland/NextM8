@@ -335,7 +335,7 @@ def test_backfill_uses_lora_weights_when_finetune_enabled(tmp_path, monkeypatch)
     rep_off = backfill_and_report(cfg_off, str(parquet), "2025-06-11", "2025-06-12", "2025-06-12", "2025-06-14",
                                   out_dir=out_zeroshot)
 
-    with pytest.warns(UserWarning, match="LoRA 权重"):
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
         train_m6(cfg, str(parquet), max_steps=1)
 
     # (a) 训后把 lora_B 全部改成非零常数，保证 LoRA 输出与零样本必然不同
