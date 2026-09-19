@@ -7,6 +7,7 @@ if str(ROOT) not in sys.path:
 import types
 import numpy as np
 import pandas as pd
+import pytest
 
 CAP = {1001: 500.0, 1002: 300.0}
 LAT = {1001: (30.0, 101.0, 4600.0), 1002: (30.0, 101.0, 4600.0)}
@@ -99,3 +100,22 @@ class FakeEvaluator:
             q = (med[:, None] * self.FACTORS[None, :]).astype(np.float32) if (self.with_quantiles and return_quantiles) else None
             outs.append(types.SimpleNamespace(ts_id=i, forecast=med, quantiles=q))
         return iter(outs)
+
+
+@pytest.fixture(scope="session")
+def tiny_ckpt_dir(tmp_path_factory):
+    """随机小 TimesFM3（8/16 patch、32 维、2 层）存成 HF 目录一次，供本会话全部测试复用同一份权重。"""
+    pytest.importorskip("timesfm3")
+    from forecast_backbones.m6.backbone import TorchBackbone
+    d = tmp_path_factory.mktemp("tiny_tfm3")
+    TorchBackbone.tiny_for_tests(seed=0).model.save_pretrained(str(d))
+    return d
+
+
+@pytest.fixture
+def tiny_evaluator(tiny_ckpt_dir):
+    """每个测试从 tiny_ckpt_dir 重新构造一个 TimesFM3Evaluator：evaluator 路径与 torch 路径共用同一份
+    存盘权重（一致性测试不受权重来源影响），但 evaluator 实例本身逐测试全新——后续任务会向
+    evaluator.model 注入/开关 LoRA 并训练，session 级共享实例会让那些变更泄漏进其他一致性测试。"""
+    from timesfm3 import ModelConfig, TimesFM3Evaluator
+    return TimesFM3Evaluator(ModelConfig(checkpoint_path=str(tiny_ckpt_dir), per_core_batch_size=4, device="cpu"))
