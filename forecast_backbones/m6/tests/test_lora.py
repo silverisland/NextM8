@@ -44,6 +44,16 @@ def test_inject_is_idempotent_and_raises_on_no_match():
         inject_lora(_Toy(), ["q_proj"], 2, 4, 0.0)                    # spec 里的错名必须报错，不得静默
 
 
+def test_inject_raises_on_no_match_after_partial_injection():
+    """验证：inject_lora 的幂等检查作用域限于当前目标。
+    先挂 query_proj，再试图挂不存在的 bogus_name 应该报错，不是因为 query_proj 已挂就沉默。"""
+    m = _Toy()
+    inject_lora(m, ["query_proj"], 2, 4, 0.0)                        # 先挂 query_proj
+    with pytest.raises(ValueError, match="bogus"):
+        inject_lora(m, ["bogus"], 2, 4, 0.0)                         # 试图挂不存在的目标→应报错
+    assert inject_lora(m, ["query_proj"], 2, 4, 0.0) == []           # 重复挂相同目标→返回 []（幂等）
+
+
 def test_enable_toggle_and_effect():
     torch.manual_seed(0)
     m = _Toy(); x = torch.randn(4, 8); y0 = m(x).detach()

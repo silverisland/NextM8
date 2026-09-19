@@ -12,6 +12,11 @@ import torch
 import torch.nn as nn
 
 
+def _is_lora_name(name: str) -> bool:
+    """Check if a parameter name corresponds to a LoRA factor (lora_A or lora_B)."""
+    return name.endswith(".lora_A") or name.endswith(".lora_B")
+
+
 class LoRALinear(nn.Module):
     def __init__(self, base: nn.Linear, rank: int, alpha: float, dropout: float):
         super().__init__()
@@ -49,8 +54,9 @@ def inject_lora(root: nn.Module, target_modules: Sequence[str], rank: int, alpha
         if isinstance(parent, LoRALinear):          # 已挂：mod 是 LoRALinear.base，跳过
             continue
         hits.append((name, parent, attr))
-    already = any(isinstance(m, LoRALinear) for m in root.modules())
-    if not hits and not already:
+    # Check if any LoRALinear modules already exist whose tail segment is in current targets
+    already_wrapped = any(name.split(".")[-1] in targets for name, m in root.named_modules() if isinstance(m, LoRALinear))
+    if not hits and not already_wrapped:
         raise ValueError(f"inject_lora: 没有任何 nn.Linear 的名字尾段命中 {sorted(targets)}；"
                          f"可用尾段示例：{sorted({n.split('.')[-1] for n, m in root.named_modules() if isinstance(m, nn.Linear)})[:12]}")
     for name, parent, attr in hits:
@@ -68,7 +74,7 @@ def set_lora_enabled(root: nn.Module, enabled: bool) -> int:
 
 def freeze_all_but_lora(root: nn.Module, unfreeze_output_head: bool, output_head_name: str = "output_head") -> None:
     for name, p in root.named_parameters():
-        is_lora = name.endswith(".lora_A") or name.endswith(".lora_B")
+        is_lora = _is_lora_name(name)
         is_head = unfreeze_output_head and (name == output_head_name or name.startswith(output_head_name + "."))
         p.requires_grad_(is_lora or is_head)
 
@@ -76,18 +82,20 @@ def freeze_all_but_lora(root: nn.Module, unfreeze_output_head: bool, output_head
 def lora_state_dict(root: nn.Module) -> dict[str, torch.Tensor]:
     out = {}
     for name, p in root.named_parameters():
-        if name.endswith(".lora_A") or name.endswith(".lora_B") or (p.requires_grad and name.startswith("output_head")):
+        is_lora = _is_lora_name(name)
+        is_head = p.requires_grad and (name == "output_head" or name.startswith("output_head."))
+        if is_lora or is_head:
             out[name] = p.detach().cpu().clone()
     return out
 
 
 def load_lora_state_dict(root: nn.Module, sd: dict) -> None:
     # Check that all keys in sd are valid (lora_* or output_head.*)
-    invalid_keys = [k for k in sd.keys() if not (k.endswith(".lora_A") or k.endswith(".lora_B") or k.startswith("output_head"))]
+    invalid_keys = [k for k in sd.keys() if not (_is_lora_name(k) or k == "output_head" or k.startswith("output_head."))]
     if invalid_keys:
         raise ValueError(f"LoRA 权重含 unexpected 键 {invalid_keys[:5]}：不是本模型的 LoRA 存档")
 
-    expected = {n for n, _ in root.named_parameters() if n.endswith(".lora_A") or n.endswith(".lora_B")}
+    expected = {n for n, _ in root.named_parameters() if _is_lora_name(n)}
     missing_lora = sorted(expected - set(sd))
     if missing_lora:
         raise ValueError(f"LoRA 权重缺键 {missing_lora[:5]}{'…' if len(missing_lora) > 5 else ''}")
