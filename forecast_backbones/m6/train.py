@@ -23,7 +23,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 from transformers import Trainer, TrainingArguments
@@ -116,7 +115,7 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
     best_path = out / "lora_weights.pt"
     cb = NanwangEvalCallback(model, ds_cal, ds_val, collate, train_cfg, best_path=best_path,
                              patience=int(ft["early_stop"]["patience"]), log_path=out / "train_log.json")
-    trainer = Trainer(model=model, args=build_training_args(cfg, out, max_steps), data_collator=collate,
+    trainer = Trainer(model=model, args=build_training_args(train_cfg, out, max_steps), data_collator=collate,
                       train_dataset=ds_train, callbacks=[cb])
     trainer.train()
     # 最优权重

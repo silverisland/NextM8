@@ -1,10 +1,13 @@
 import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 
 pytest.importorskip("timesfm3")
+import forecast_backbones.m6.transformer_models as tm_mod
 from forecast_backbones.m6.transformer_models import TransformersAdaptedM6Model
 from forecast_backbones.m6.train import make_splits, build_training_args, train_m6
 from forecast_backbones.m6.routing import load_routing
@@ -97,3 +100,42 @@ def test_trained_artifacts_load_into_inference_model(tmp_path, tiny_evaluator, m
     with torch.no_grad():
         o = m(bd)
     assert o.logits.shape == (4, 192) and torch.isfinite(o.logits).all()
+
+
+def test_second_run_in_same_out_dir_starts_fresh(tmp_path, tiny_evaluator, monkeypatch):
+    """跨任务约束 1 的回归测试：同一 out_dir 里已经有上一轮训练的 lora_weights.pt / station_routing.json
+    时，第二轮训练的模型构造仍须是零样本、无路由起点——不能把上一轮的产物读回来当成本轮的起点。"""
+    _patch_tiny_backbone(monkeypatch, tiny_evaluator)
+    df, parquet, out, cfg = _inputs(tmp_path)
+    with pytest.warns(UserWarning, match="LoRA 权重"):
+        train_m6(cfg, str(parquet), max_steps=1)
+    assert (out / "lora_weights.pt").exists() and (out / "station_routing.json").exists()
+
+    # 第二轮换一份全新底座（同一份 tiny 权重目录重新构造）：避免两次构造共享同一个 evaluator.model 对象，
+    # 让第一轮训练留在内存里的 LoRA 权重把"零样本起点"判定悄悄冲掉——真实场景里每轮训练都会从磁盘
+    # checkpoint 重新加载一份全新底座，这里也应如此，spy 才测的是 train.py 自己的哨兵路径逻辑。
+    from timesfm3 import ModelConfig, TimesFM3Evaluator
+    evaluator2 = TimesFM3Evaluator(ModelConfig(checkpoint_path=tiny_evaluator.config.checkpoint_path,
+                                               per_core_batch_size=4, device="cpu"))
+    _patch_tiny_backbone(monkeypatch, evaluator2)
+
+    RealModel = tm_mod.TransformersAdaptedM6Model
+    recorded = []
+
+    class _SpyModel(RealModel):
+        def __init__(self, model_config=None, **kw):
+            super().__init__(model_config, **kw)
+            recorded.append({"lora_path": self.cfg["finetune"]["lora_path"],
+                             "routing_path": self.cfg["finetune"]["routing_path"],
+                             "lora_loaded": self.lora_loaded, "station_routing": self.station_routing})
+
+    monkeypatch.setattr(tm_mod, "TransformersAdaptedM6Model", _SpyModel)
+    with pytest.warns(UserWarning, match="LoRA 权重"):
+        train_m6(cfg, str(parquet), max_steps=1)
+
+    assert len(recorded) == 1, "第二轮训练模型只应构造一次"
+    rec = recorded[0]
+    assert not Path(rec["lora_path"]).exists() and not Path(rec["routing_path"]).exists()
+    assert rec["lora_loaded"] is False and rec["station_routing"] is None
+    log2 = json.loads((out / "train_log.json").read_text())
+    assert log2["history"][0]["epoch"] == 0.0
