@@ -16,14 +16,15 @@ import torch
 import torch.nn as nn
 
 try:
-    from ._torch_compat import ensure_rmsnorm
+    from ._torch_compat import ensure_rmsnorm, ensure_finite_running_stats
     from .decision import MODEL_LEVELS
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from _torch_compat import ensure_rmsnorm
+    from _torch_compat import ensure_rmsnorm, ensure_finite_running_stats
     from decision import MODEL_LEVELS
 
 ensure_rmsnorm()                                    # 必须在 import timesfm3.torch 之前
+ensure_finite_running_stats()                       # 同上：零方差 patch 的 sqrt 反向 NaN 垫片
 from timesfm3.torch.model import TimesFM3Torch      # noqa: E402
 from timesfm3.torch.timesfm3_forecaster import linear_interpolation, _znorm_stats, _is_nonnegative  # noqa: E402
 
