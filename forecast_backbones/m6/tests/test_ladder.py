@@ -303,8 +303,22 @@ def test_backfill_and_report_writes_diagnostics_json(tmp_path, monkeypatch):
 
 
 def test_backfill_uses_lora_weights_when_finetune_enabled(tmp_path, monkeypatch):
-    """回填 CLI 与路线 B 产物兼容：finetune.enabled=True + lora_path 存在 → 模型经 torch 路径加载 LoRA 后回填。"""
+    """回填 CLI 与路线 B 产物兼容：finetune.enabled=True + lora_path 存在 → 模型经 torch 路径加载 LoRA 后回填，
+    且回填结果真的随 LoRA 权重变化（不是零样本回填碰巧也能算出同样形状的阶梯表）。
+
+    证明手段三件套：
+    (a) 训练后手动把 lora_weights.pt 里所有 lora_B 改成非零常数——不依赖训练本身是否真的带来提升，
+        权重必然与零样本不同；
+    (b) 监视 backfill_and_report 内部构造的模型（手法与 test_train.py::test_second_run_in_same_out_dir_starts_fresh
+        一致），断言它确实 lora_loaded=True 且 torch_path=True；
+    (c) 零样本基线回填（finetune.enabled=False）用独立 out_dir、且必须在训练/改权重之前用同一个
+        evaluator 跑——LoRA 注入是对 evaluator.model 的原地 monkey-patch，之后再用同一个 evaluator
+        构造"enabled=False"的模型不会真正回到零样本（已注入的 LoRALinear 层默认仍是 enabled=True），
+        必须在任何注入发生前先取这份基线，才能保证它是干净的零样本对照，再与 LoRA 回填的阶梯表比较
+        至少一个数值列不同。"""
     timesfm3 = pytest.importorskip("timesfm3")
+    import torch
+    import forecast_backbones.m6.transformer_models as tm_mod
     from .test_train import _patch_tiny_backbone, _inputs
     from forecast_backbones.m6.train import train_m6
     from forecast_backbones.m6.backbone import TorchBackbone
@@ -313,8 +327,44 @@ def test_backfill_uses_lora_weights_when_finetune_enabled(tmp_path, monkeypatch)
     ev = TimesFM3Evaluator(ModelConfig(checkpoint_path=str(d), per_core_batch_size=4, device="cpu"))
     _patch_tiny_backbone(monkeypatch, ev)
     df, parquet, out, cfg = _inputs(tmp_path)
+
+    # (c) 零样本基线：finetune.enabled=False，独立 out_dir，必须在下面 train_m6 第一次给 ev.model 挂
+    # LoRA 之前跑，否则这个 evaluator 就不再是干净的零样本底座了。
+    cfg_off = {**cfg, "finetune": {**cfg["finetune"], "enabled": False}}
+    out_zeroshot = tmp_path / "run_zeroshot"
+    rep_off = backfill_and_report(cfg_off, str(parquet), "2025-06-11", "2025-06-12", "2025-06-12", "2025-06-14",
+                                  out_dir=out_zeroshot)
+
     with pytest.warns(UserWarning, match="LoRA 权重"):
         train_m6(cfg, str(parquet), max_steps=1)
-    rep = backfill_and_report(cfg, str(parquet), "2025-06-11", "2025-06-12", "2025-06-12", "2025-06-14")
-    assert list(rep["variant"]) == ["raw_median", "global_shrink", "physics_median", "calibrated_pstar"]
+
+    # (a) 训后把 lora_B 全部改成非零常数，保证 LoRA 输出与零样本必然不同
+    lora_path = out / "lora_weights.pt"
+    sd = torch.load(lora_path, map_location="cpu")
+    for k, v in sd.items():
+        if k.endswith(".lora_B"):
+            sd[k] = torch.full_like(v, 0.05)
+    torch.save(sd, lora_path)
+
+    # (b) 监视 backfill_and_report 内部构造的模型
+    RealModel = tm_mod.TransformersAdaptedM6Model
+    recorded = []
+
+    class _SpyModel(RealModel):
+        def __init__(self, model_config=None, **kw):
+            super().__init__(model_config, **kw)
+            recorded.append({"lora_loaded": self.lora_loaded, "torch_path": self.torch_path})
+
+    monkeypatch.setattr(tm_mod, "TransformersAdaptedM6Model", _SpyModel)
+
+    rep_on = backfill_and_report(cfg, str(parquet), "2025-06-11", "2025-06-12", "2025-06-12", "2025-06-14")
+
+    assert len(recorded) == 1, "backfill_and_report 应只构造一次模型"
+    assert recorded[0]["lora_loaded"] is True and recorded[0]["torch_path"] is True
+    assert list(rep_on["variant"]) == ["raw_median", "global_shrink", "physics_median", "calibrated_pstar"]
     assert (out / "reports" / "ladder.csv").exists()
+
+    on_row = rep_on.set_index("variant").loc["raw_median"]
+    off_row = rep_off.set_index("variant").loc["raw_median"]
+    numeric_cols = ["nanwang_short_D+1", "nanwang_ultra_short", "nrmse_short_pct"]
+    assert any(on_row[c] != pytest.approx(off_row[c]) for c in numeric_cols), (on_row, off_row)

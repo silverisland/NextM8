@@ -80,7 +80,7 @@ def test_torch_path_matches_evaluator_on_real_checkpoint(tmp_path):
     from .test_model_route_a import _batch
     df = make_synthetic_frame(n_days=1, issue_every_min=360)
     base = {"dataset": {"station_meta": str(write_station_meta(tmp_path))}, "calibration": {"enabled": False},
-            "timesfm3": {"per_core_batch_size": 32}}
+            "timesfm3": {"checkpoint": CKPT, "per_core_batch_size": SHARED_PER_CORE_BATCH_SIZE}}
     m_eval = TransformersAdaptedM6Model({**base, "finetune": {"enabled": False, "inference_path": "evaluator"}})
     m_torch = TransformersAdaptedM6Model({**base, "finetune": {"enabled": False, "inference_path": "torch"}})
     bd, _ = _batch(df, [0, 1, 2, 3])

@@ -81,8 +81,11 @@ python -m forecast_backbones.m6.train --config forecast_backbones/m6/model_confi
 `ladder_lora.csv`（阶梯 4：`zeroshot_calibrated_pstar` / `lora_calibrated_pstar` / `routed_calibrated_pstar` 三行）、`station_ladder.csv`
 （逐站 `route` 列，取值 `lora|zeroshot`）。
 
-推理：`finetune.enabled: true` 时模型构造期自动加载 `lora_path`（缺失会 warn 并以零样本权重运行）与 `routing_path`（缺失=全站 lora）；
-`inference_path: torch`（默认，与训练一致）或 `evaluator`（LoRA 仍生效，走 timesfm3 自己的 decode，只作回归对照）。
+推理：`finetune.enabled: true` 时（`torch_path = bool(finetune.enabled) or inference_path == "torch"`，`enabled=True` 已经短路成
+`True`）**永远**走 torch 路径并挂 LoRA，`inference_path` 这个键在 `enabled=True` 时不被读取、不产生任何差异；模型构造期自动加载
+`lora_path`（缺失会 warn 并以零样本权重运行）与 `routing_path`（缺失=全站 lora，存在则按表逐站选路）。`inference_path` 只在
+`finetune.enabled: false` 时才生效：`evaluator`＝路线 A 原样不变（零样本、无 LoRA、无梯度），`torch`＝同样零样本但走可微的
+torch 路径（无 LoRA，仅用于对照 evaluator 与 torch 两条路径本身的数值一致性，见下段 1e-4 门控测试）。
 混合站 batch 会跑两次底座按行选路；单一路由的 batch 只跑一次。路线 A 的回填 CLI（`transformer_trainer.backfill_and_report`）
 不感知 `finetune`：只要 cfg 里 `finetune.enabled=True` 且 `lora_path` 指向的文件存在，模型构造时就会照常经 torch 路径加载
 LoRA 权重后再回填——路线 A 与路线 B 的产物在同一套 `run.out_dir` 约定下天然兼容，不需要额外接线（回归测试见
