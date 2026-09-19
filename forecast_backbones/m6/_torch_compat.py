@@ -41,11 +41,14 @@ def ensure_rmsnorm() -> bool:
 def ensure_finite_running_stats(eps: float = 1e-12) -> bool:
     """timesfm3.torch.util.update_running_stats 对恰好零方差的 patch 做 torch.sqrt(0)：前向安全（用
     torch.where 避了 0/0），反向在 0 处导数为 +inf，遇到该分支上游梯度恰为 0 时 0*inf=nan——光伏夜间连续
-    整段恰为 0.0，使这种零方差 patch 成为常态而非边角情形。替换成两处 sqrt 都 .clamp_min(eps) 的版本，
-    对 update_running_stats 的调用方（timesfm3.torch.util 自身、timesfm3.torch.cpm_revin_refine 等经
-    `from . import util` 按属性调用的模块）都用属性替换即时生效；额外扫一遍 sys.modules，把任何以
-    `from .util import update_running_stats` 方式按值导入过原函数的 timesfm3.torch.* 模块也一并重绑定。
-    必须在 import timesfm3.torch.* 之前调用（与 ensure_rmsnorm 顺序一致，紧跟其后）。"""
+    整段恰为 0.0，使这种零方差 patch 成为常态而非边角情形。替换成两处 sqrt 都套 _safe_sqrt 的版本：
+    前向逐位不变（v>0 时是 sqrt(v)，v==0 时精确是 0，与未打补丁的 timesfm3 逐位一致——route A 靠这个
+    保证与 master 位级相同），只有反向变了（clamp_min 让 v==0 处的局部导数有限，torch.where 把 v==0 的
+    元素路由到常数 0 分支，避免 0*inf=nan）。对 update_running_stats 的调用方（timesfm3.torch.util 自身、
+    timesfm3.torch.cpm_revin_refine 等经 `from . import util` 按属性调用的模块）都用属性替换即时生效；
+    额外扫一遍 sys.modules，把任何以 `from .util import update_running_stats` 方式按值导入过原函数的
+    timesfm3.torch.* 模块也一并重绑定。补丁函数上挂 `_m6_original` 指回原始未打补丁的函数，供逐位对比
+    用。必须在 import timesfm3.torch.* 之前调用（与 ensure_rmsnorm 顺序一致，紧跟其后）。"""
     import sys
 
     try:
@@ -59,6 +62,9 @@ def ensure_finite_running_stats(eps: float = 1e-12) -> bool:
     if getattr(orig, "_m6_eps_patched", False):
         return False
 
+    def _safe_sqrt(v):
+        return torch.where(v > 0, torch.sqrt(v.clamp_min(eps)), torch.zeros_like(v))
+
     def _patched(n, mu, sigma, x, mask):
         is_legit = ~mask
         is_legit_f = is_legit.float()
@@ -68,17 +74,18 @@ def ensure_finite_running_stats(eps: float = 1e-12) -> bool:
         inc_mu = torch.where(inc_n == 0, torch.zeros_like(inc_sum), inc_sum / inc_n)
         x_diff_sq = torch.where(is_legit, (x - inc_mu.unsqueeze(-1)) ** 2, torch.zeros_like(x))
         inc_var = torch.where(inc_n == 0, torch.zeros_like(inc_sum), x_diff_sq.sum(dim=-1) / inc_n)
-        inc_sigma = torch.sqrt(inc_var.clamp_min(eps))
+        inc_sigma = _safe_sqrt(inc_var)
         new_n = n + inc_n
         new_mu = torch.where(new_n == 0, torch.zeros_like(mu), (n * mu + inc_mu * inc_n) / new_n)
         var_sum = (n * sigma * sigma + inc_n * inc_sigma * inc_sigma
                   + n * (mu - new_mu) * (mu - new_mu) + inc_n * (inc_mu - new_mu) * (inc_mu - new_mu))
         safe_new_n = torch.where(new_n == 0, torch.ones_like(new_n), new_n)
         new_var = torch.where(new_n == 0, torch.zeros_like(sigma), var_sum / safe_new_n)
-        new_sigma = torch.sqrt(new_var.clamp_min(eps))
+        new_sigma = _safe_sqrt(new_var)
         return new_n, new_mu, new_sigma
 
     _patched._m6_eps_patched = True
+    _patched._m6_original = orig
     _util.update_running_stats = _patched
     for name, mod in list(sys.modules.items()):
         if mod is None or not name.startswith("timesfm3.torch") or name == "timesfm3.torch.util":
