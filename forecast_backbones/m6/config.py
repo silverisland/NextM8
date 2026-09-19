@@ -60,24 +60,28 @@ DEFAULT_CFG: dict = {
         "issue_times_train": "all",                # 路线 A 不读
         "scored_steps": {"short": [55, 151], "ultra": [0, 16]},
     },
-    "finetune": {                                   # 整段路线 A 不读——计划 2（LoRA 微调）打开
+    "finetune": {                                   # 路线 B（计划 2）：LoRA 微调；路线 A 只读 enabled/inference_path
         "enabled": False,
-        "inference_path": "evaluator",
+        "inference_path": "evaluator",              # evaluator | torch；enabled=True 时训练强制走 torch 路径
         "lora": {"rank": 8, "alpha": 16, "dropout": 0.05,
-                 "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]},
+                 # timesfm3 3.0.2 真名（transformer.py:188-193）；seq_attn 与 var_attn 两处都匹配
+                 "target_modules": ["query_proj", "key_proj", "value_proj", "out_proj"]},
         "unfreeze_output_head": True,
+        "lora_path": "${run.out_dir}/lora_weights.pt",          # 训练产物；推理时存在即加载
+        "routing_path": "${run.out_dir}/station_routing.json",  # 逐站 lora|zeroshot 路由表；存在即按表选路
         "loss": {"type": "pinball", "levels": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-                 "aux_nanwang_head": {"enabled": False, "weight": 0.5}},
+                 "aux_nanwang_head": {"enabled": False, "weight": 0.5}},   # 辅助头：计划 3 消融，本计划不读
         "masks": {"night": "solar_elevation_le_0", "curtailment_col": None,
                   "curtailment_autodetect": {"enabled": False, "plateau_ratio": 0.05,
                                              "k_nwp_min": 0.7, "min_run": 4},
                   "missing": True},
         "schedule": {"lr": 1.0e-4, "weight_decay": 0.01, "epochs_max": 10, "batch_size": 16,
-                     "grad_clip": 1.0, "precision": "bf16"},
-        "split": {"train_end": "2025-05-31", "cal_days": 45, "val_start": "2025-07-16",
-                  "val_end": "2025-08-31", "test_start": "2025-09-01", "rolling_folds": 2},
+                     "grad_clip": 1.0, "precision": "bf16", "logging_steps": 20},
+        "split": {"train_start": None, "train_end": "2025-05-31", "cal_days": 45,
+                  "val_start": "2025-07-16", "val_end": "2025-08-31", "test_start": "2025-09-01",
+                  "rolling_folds": 2},               # rolling_folds 只作说明；折间平移用 train_m6(shift_days=)
         "early_stop": {"metric": "nanwang_after_pstar", "patience": 3},
-        "guards": {"per_station_fallback_to_zeroshot": True},
+        "guards": {"per_station_fallback_to_zeroshot": True, "min_gain_pct": 0.0},
     },
     "calibration": {
         "enabled": True,
