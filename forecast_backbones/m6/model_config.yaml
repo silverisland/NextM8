@@ -77,12 +77,15 @@ finetune:                              # 路线 B（计划 2）：LoRA 微调；
     logging_steps: 20
   split:
     train_start: null                  # null = 数据最早
-    train_end: "2025-05-31"
-    cal_days: 45
-    val_start: "2025-07-16"
-    val_end: "2025-08-31"
-    test_start: "2025-09-01"
-    rolling_folds: 2                   # 说明用；折间平移用 train.py --shift-days
+    val_blocks:                        # 验证块 [start, end) 整天，分散到不同季节（占位日期，须改成真实日期）
+      - ["2025-01-10", "2025-01-31"]
+      - ["2025-04-10", "2025-05-01"]
+      - ["2025-07-16", "2025-08-06"]
+    test_start: "2025-09-01"           # 尾段测试起点
+    test_end: null                     # null = 数据末尾
+    cal_days: 45                       # 校准段 = [test_start − purge − cal_days, test_start − purge)
+    purge_days: 2                      # 块前剔除训练行天数，须 ≥ H=192 步折算（2 天）
+    embargo_days: 7                    # 块后额外剔除，块后共 purge+embargo = 9 天 = L+H
   early_stop:
     metric: nanwang_after_pstar
     patience: 3

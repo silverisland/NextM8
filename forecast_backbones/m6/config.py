@@ -8,6 +8,13 @@ from pathlib import Path
 
 import yaml
 
+try:
+    from ...pipelines.time_splits import LEGACY_KEYS
+except ImportError:
+    import sys
+    sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+    from pipelines.time_splits import LEGACY_KEYS
+
 DEFAULT_CFG: dict = {
     "run": {"model_name": "m6", "seeds": [0, 1, 2], "out_dir": "runs/m6_baseline"},
     "model": {},
@@ -77,9 +84,12 @@ DEFAULT_CFG: dict = {
                   "missing": True},
         "schedule": {"lr": 1.0e-4, "weight_decay": 0.01, "epochs_max": 10, "batch_size": 16,
                      "grad_clip": 1.0, "precision": "bf16", "logging_steps": 20},
-        "split": {"train_start": None, "train_end": "2025-05-31", "cal_days": 45,
-                  "val_start": "2025-07-16", "val_end": "2025-08-31", "test_start": "2025-09-01",
-                  "rolling_folds": 2},               # rolling_folds 只作说明；折间平移用 train_m6(shift_days=)
+        "split": {"train_start": None,                     # null = 数据最早
+                  # 验证块列表 [start, end) 整天；分散到不同季节；块前 purge_days、块后 purge_days+embargo_days 的训练行剔除
+                  "val_blocks": [["2025-01-10", "2025-01-31"], ["2025-04-10", "2025-05-01"], ["2025-07-16", "2025-08-06"]],
+                  "test_start": "2025-09-01", "test_end": None,   # 尾段测试；test_end null = 数据末尾
+                  "cal_days": 45,                           # 校准段 = [test_start − purge − cal_days, test_start − purge)
+                  "purge_days": 2, "embargo_days": 7},      # 2 天 ≥ H=192 步；块后 2+7=9 天 = L+H
         "early_stop": {"metric": "nanwang_after_pstar", "patience": 3},
         "guards": {"per_station_fallback_to_zeroshot": True, "min_gain_pct": 0.0},
     },
@@ -155,4 +165,9 @@ def load_config(src: str | Path | dict | None) -> dict:
         override = src
     else:
         override = yaml.safe_load(Path(src).read_text(encoding="utf-8")) or {}
-    return interpolate(deep_merge(DEFAULT_CFG, override))
+    cfg = interpolate(deep_merge(DEFAULT_CFG, override))
+    legacy = [k for k in LEGACY_KEYS if k in cfg["finetune"]["split"]]
+    if legacy:
+        raise ValueError(f"finetune.split 含旧键 {legacy}：单尾段验证已废弃，请改为 val_blocks=[[start,end],...] + "
+                         f"test_start/test_end + cal_days + purge_days/embargo_days")
+    return cfg
