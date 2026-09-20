@@ -125,7 +125,10 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
     ds_train, ds_cal, ds_val, ds_val_blocks, plan = make_splits(
         ds_all, ft["split"], shift_days, L=int(cfg["timesfm3"]["context_len"]), H=int(cfg["timesfm3"]["pred_len"]),
         step_min=int(cfg["dataset"]["step_min"]))
-    split_info = {"plan": plan.to_dict(), "shift_days": int(shift_days),
+    # generated_by 放第一个键：同名的 split_manifest.json 也可能由 pipelines.time_splits 的 CLI 落，
+    # 两份 manifest 的字段集合不同，读的人先看这一行就知道该按哪套字段解析。
+    split_info = {"generated_by": "forecast_backbones.m6.train",
+                  "plan": plan.to_dict(), "shift_days": int(shift_days),
                   "counts": {"train": len(ds_train), "cal": len(ds_cal), "val": len(ds_val),
                              "val_blocks": [len(b) for b in ds_val_blocks]}}
     (out / "split_manifest.json").write_text(json.dumps(split_info, indent=2, ensure_ascii=False), encoding="utf-8")

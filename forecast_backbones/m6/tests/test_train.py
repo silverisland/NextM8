@@ -62,6 +62,29 @@ def test_make_splits_boundaries_and_shift(tmp_path):
         make_splits(ds, {"train_end": "2025-06-11", "val_start": "2025-06-12", "val_end": "2025-06-14", "cal_days": 1, "test_start": "2025-06-14"})
 
 
+def test_make_splits_with_two_real_val_blocks(tmp_path):
+    """两个真验证块（06-05…06-07 与 06-18…06-20）：块 0 后的 9 天剔除一直吃到 06-16，正是块 1 的 purge 起点，
+    两块之间连一行训练数据都不剩；训练行只剩 [06-01, 06-03)，校准段 [06-25, 06-27)。不需要模型。"""
+    df = make_synthetic_frame(n_days=30, issue_every_min=60, seed=0, start="2025-06-01")   # 06-01 … 07-01，每小时一个起报
+    parquet = tmp_path / "two_blocks.parquet"; df.to_parquet(parquet, index=False)
+    ds = UnifiedDataset(str(parquet), timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"],
+                        timestamp_output="epoch_s", epoch_unit="s", for_hf_trainer=True)
+    split = {"train_start": None,
+             "val_blocks": [["2025-06-05", "2025-06-07"], ["2025-06-18", "2025-06-20"]],
+             "test_start": "2025-06-29", "test_end": None,
+             "cal_days": 2, "purge_days": 2, "embargo_days": 7}
+    tr, cal, val_all, blocks, plan = make_splits(ds, split)                               # 内部已跑过 verify_leak_free
+    per_day = 2 * 24                                                                      # 2 站 × 每小时一个起报 = 48 行/天
+    assert len(blocks) == 2 and [len(b) for b in blocks] == [2 * per_day, 2 * per_day]
+    assert len(val_all) == sum(len(b) for b in blocks)
+    ts = lambda d: pd.to_datetime(d._ts_as_datetime64("timestamp_win"))
+    s0, s1 = set(ts(blocks[0])), set(ts(blocks[1]))
+    assert not (s0 & s1) and max(s0) < min(s1)
+    assert len(tr) == 2 * per_day                                                         # 只剩 [06-01, 06-03) 两天
+    assert ts(tr).min() >= pd.Timestamp("2025-06-01") and ts(tr).max() < pd.Timestamp("2025-06-03")
+    assert len(cal) == 2 * per_day and plan.to_dict()["cal"] == ["2025-06-25", "2025-06-27"]
+
+
 def test_build_training_args_cpu_defaults(tmp_path):
     _, _, out, cfg = _inputs(tmp_path)
     from forecast_backbones.m6.config import load_config
@@ -95,6 +118,7 @@ def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monk
     assert set(res) >= {"ladder", "routing", "history", "best"}
     assert res["ladder"]["variant"].tolist() == ladder["variant"].tolist() and res["routing"] == routing
     man = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
+    assert man["generated_by"] == "forecast_backbones.m6.train"                  # 与 pipelines.time_splits 的 manifest 区分开
     assert man["plan"]["val_blocks"] == [["2025-06-12", "2025-06-14"]] and man["plan"]["cal"] == ["2025-06-16", "2025-06-17"]
     assert man["counts"]["train"] > 0 and man["counts"]["val_blocks"] == [man["counts"]["val"]]
     assert log["split"] == man and res["split"] == man

@@ -82,10 +82,14 @@ python -m forecast_backbones.m6.train --config forecast_backbones/m6/model_confi
 `model_config.yaml` 里先把 `finetune.enabled: true`、`finetune.split` 改成真实日期；滚动第二折加 `--shift-days N`，输出目录换 `_f1`。`--max-steps` 只用于冒烟。
 
 `finetune.split` 现在是验证块列表：`val_blocks` 若干个 `[start, end)` 整天区间（分散到不同季节），`test_start`/`test_end` 尾段测试，
-`cal_days` 校准段（固定放在 `test_start − purge_days` 之前），`purge_days`（块前剔除训练行，须 ≥ 2 天 = H）与 `embargo_days`
-（块后额外剔除，块后共 9 天 = L+H）。早停指标是各块南网短期得分的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`；
-切分事实落在 `out_dir/split_manifest.json`。给 M1–M4 生成同一规则的 `train/valid/cal/test.parquet`：
-`python -m pipelines.time_splits --parquet RAW.parquet --out-dir dataset/<name> --m6-config forecast_backbones/m6/model_config.yaml`。
+`cal_days` 校准段（固定放在 `test_start − purge_days` 之前），`purge_days`（块前剔除训练行）与 `embargo_days`（块后额外剔除）。
+两个天数都由 `SplitPlan.from_dict` 当场校验，给不够直接报错：`purge_days` 须 ≥ H 折算天数（默认 2 天），
+`purge_days + embargo_days` 须 ≥ L + H 折算天数（默认 9 天）——前 H 步保证块后训练行的标签不与块标签重叠，
+再往后的 L 步保证这些训练行 7 天的上下文不含块的标签。早停指标是各块南网短期得分的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`；
+切分事实落在 `out_dir/split_manifest.json`（`generated_by: forecast_backbones.m6.train`）。给 M1–M4 生成同一规则的 `train/valid/cal/test.parquet`：
+`python -m pipelines.time_splits --parquet RAW.parquet --out-dir dataset/<name> --m6-config forecast_backbones/m6/model_config.yaml`
+（`--m6-config` 时 L/H/step_min 默认取该 yaml 的 `timesfm3.context_len` / `timesfm3.pred_len` / `dataset.step_min`，
+显式给的 `--L/--H/--step-min` 仍然胜出；这条路落的 manifest 是 `generated_by: pipelines.time_splits`）。
 默认日期是占位示例，训练前改成真实日期；`--shift-days N` 把全部边界整体后移 N 天做第二折。
 
 产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
