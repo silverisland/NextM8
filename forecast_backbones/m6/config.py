@@ -8,6 +8,13 @@ from pathlib import Path
 
 import yaml
 
+try:
+    from ...pipelines.time_splits import LEGACY_KEYS
+except ImportError:
+    import sys
+    sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+    from pipelines.time_splits import LEGACY_KEYS
+
 DEFAULT_CFG: dict = {
     "run": {"model_name": "m6", "seeds": [0, 1, 2], "out_dir": "runs/m6_baseline"},
     "model": {},
@@ -60,24 +67,31 @@ DEFAULT_CFG: dict = {
         "issue_times_train": "all",                # 路线 A 不读
         "scored_steps": {"short": [55, 151], "ultra": [0, 16]},
     },
-    "finetune": {                                   # 整段路线 A 不读——计划 2（LoRA 微调）打开
+    "finetune": {                                   # 路线 B（计划 2）：LoRA 微调；路线 A 只读 enabled/inference_path
         "enabled": False,
-        "inference_path": "evaluator",
+        "inference_path": "evaluator",              # evaluator | torch；enabled=True 时训练强制走 torch 路径
         "lora": {"rank": 8, "alpha": 16, "dropout": 0.05,
-                 "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]},
+                 # timesfm3 3.0.2 真名（transformer.py:188-193）；seq_attn 与 var_attn 两处都匹配
+                 "target_modules": ["query_proj", "key_proj", "value_proj", "out_proj"]},
         "unfreeze_output_head": True,
+        "lora_path": "${run.out_dir}/lora_weights.pt",          # 训练产物；推理时存在即加载
+        "routing_path": "${run.out_dir}/station_routing.json",  # 逐站 lora|zeroshot 路由表；存在即按表选路
         "loss": {"type": "pinball", "levels": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-                 "aux_nanwang_head": {"enabled": False, "weight": 0.5}},
+                 "aux_nanwang_head": {"enabled": False, "weight": 0.5}},   # 辅助头：计划 3 消融，本计划不读
         "masks": {"night": "solar_elevation_le_0", "curtailment_col": None,
                   "curtailment_autodetect": {"enabled": False, "plateau_ratio": 0.05,
                                              "k_nwp_min": 0.7, "min_run": 4},
                   "missing": True},
         "schedule": {"lr": 1.0e-4, "weight_decay": 0.01, "epochs_max": 10, "batch_size": 16,
-                     "grad_clip": 1.0, "precision": "bf16"},
-        "split": {"train_end": "2025-05-31", "cal_days": 45, "val_start": "2025-07-16",
-                  "val_end": "2025-08-31", "test_start": "2025-09-01", "rolling_folds": 2},
+                     "grad_clip": 1.0, "precision": "bf16", "logging_steps": 20},
+        "split": {"train_start": None,                     # null = 数据最早
+                  # 验证块列表 [start, end) 整天；分散到不同季节；块前 purge_days、块后 purge_days+embargo_days 的训练行剔除
+                  "val_blocks": [["2025-01-10", "2025-01-31"], ["2025-04-10", "2025-05-01"], ["2025-07-16", "2025-08-06"]],
+                  "test_start": "2025-10-01", "test_end": None,   # 尾段测试；test_end null = 数据末尾
+                  "cal_days": 45,                           # 校准段 = [test_start − purge − cal_days, test_start − purge)
+                  "purge_days": 2, "embargo_days": 7},      # 2 天 ≥ H=192 步；块后 2+7=9 天 = L+H
         "early_stop": {"metric": "nanwang_after_pstar", "patience": 3},
-        "guards": {"per_station_fallback_to_zeroshot": True},
+        "guards": {"per_station_fallback_to_zeroshot": True, "min_gain_pct": 0.0},
     },
     "calibration": {
         "enabled": True,
@@ -151,4 +165,9 @@ def load_config(src: str | Path | dict | None) -> dict:
         override = src
     else:
         override = yaml.safe_load(Path(src).read_text(encoding="utf-8")) or {}
-    return interpolate(deep_merge(DEFAULT_CFG, override))
+    cfg = interpolate(deep_merge(DEFAULT_CFG, override))
+    legacy = [k for k in LEGACY_KEYS if k in cfg["finetune"]["split"]]
+    if legacy:
+        raise ValueError(f"finetune.split 含旧键 {legacy}：单尾段验证已废弃，请改为 val_blocks=[[start,end],...] + "
+                         f"test_start/test_end + cal_days + purge_days/embargo_days")
+    return cfg

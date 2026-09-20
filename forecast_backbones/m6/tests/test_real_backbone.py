@@ -71,3 +71,19 @@ def test_m6_full_stack_runs_and_shrinks(tmp_path):
     day = ~out.aux["night"]
     assert (out.logits.numpy()[day] <= out.aux["median"].numpy()[day] + 1e-4).all()
     assert out.aux["quantiles"].shape == (1, 192, 9)
+
+
+def test_torch_path_matches_evaluator_on_real_checkpoint(tmp_path):
+    """真权重：inference_path=torch 的零样本输出与 evaluator 路径 allclose(1e-4)（spec §10 第 3 步）。"""
+    from forecast_backbones.m6.transformer_models import TransformersAdaptedM6Model
+    from .conftest import make_synthetic_frame, write_station_meta
+    from .test_model_route_a import _batch
+    df = make_synthetic_frame(n_days=1, issue_every_min=360)
+    base = {"dataset": {"station_meta": str(write_station_meta(tmp_path))}, "calibration": {"enabled": False},
+            "timesfm3": {"checkpoint": CKPT, "per_core_batch_size": SHARED_PER_CORE_BATCH_SIZE}}
+    m_eval = TransformersAdaptedM6Model({**base, "finetune": {"enabled": False, "inference_path": "evaluator"}})
+    m_torch = TransformersAdaptedM6Model({**base, "finetune": {"enabled": False, "inference_path": "torch"}})
+    bd, _ = _batch(df, [0, 1, 2, 3])
+    with torch.no_grad():
+        a, b = m_eval(bd), m_torch(bd)
+    assert np.allclose(a.aux["quantiles"].cpu().numpy(), b.aux["quantiles"].cpu().numpy(), atol=1e-4)

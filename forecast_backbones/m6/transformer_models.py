@@ -39,6 +39,7 @@ try:
     from .calibration import Calibrator, CalibrationConfig
     from .losses import pinball_loss
     from ._arrays import interp_nan
+    from ._torch_compat import ensure_rmsnorm
 except ImportError:
     from config import load_config
     from features import StationMeta, build_row_context
@@ -47,10 +48,32 @@ except ImportError:
     from calibration import Calibrator, CalibrationConfig
     from losses import pinball_loss
     from _arrays import interp_nan
+    from _torch_compat import ensure_rmsnorm
 
 # 已经就哪些 past_future 协变量对发过"batch_dict 缺列"警告——跨调用去重，同一进程内每对只提示一次
 # （与 m5 的 self._warned_pairs 语义相同，这里用模块级集合而不是实例级）。
 _WARNED_MISSING_PAIRS: set[tuple[str, str]] = set()
+
+
+def _lazy_torch_path_imports():
+    """惰性导入 torch 路径依赖（backbone.py 一 import 就拉 timesfm3）：路线 A 的 Global Constraint
+    要求 transformer_models.py 模块级导入不依赖 timesfm3，所以只在 _attach_torch_path 里调用本函数。"""
+    try:
+        from .backbone import TorchBackbone
+        from .lora import inject_lora, freeze_all_but_lora, load_lora_state_dict, set_lora_enabled, trainable_summary
+    except ImportError:
+        from backbone import TorchBackbone
+        from lora import inject_lora, freeze_all_but_lora, load_lora_state_dict, set_lora_enabled, trainable_summary
+    return TorchBackbone, inject_lora, freeze_all_but_lora, load_lora_state_dict, set_lora_enabled, trainable_summary
+
+
+def _lazy_routing_imports():
+    """惰性导入 routing.py（本身不依赖 timesfm3，惰性只是与 _lazy_torch_path_imports 风格一致）。"""
+    try:
+        from .routing import save_routing, load_routing
+    except ImportError:
+        from routing import save_routing, load_routing
+    return save_routing, load_routing
 
 
 class TransformersAdaptedM6Model(nn.Module):
@@ -84,6 +107,18 @@ class TransformersAdaptedM6Model(nn.Module):
                 )
         self._backbone = None; self._backbone_device = None
         self.device_pref = t3.get("device", "auto")
+        ft = self.cfg["finetune"]
+        self.torch_path = bool(ft["enabled"]) or str(ft.get("inference_path", "evaluator")) == "torch"
+        self.backbone = None                       # torch 路径：TorchBackbone 子模块（_attach_torch_path 赋值）
+        self.lora_loaded = False
+        self.station_routing = None                # {station_id: "lora"|"zeroshot"}；finetune.enabled 且路由表存在时加载
+        if ft["enabled"]:
+            rp = Path(str(ft["routing_path"]))
+            if rp.exists():
+                self.station_routing = _lazy_routing_imports()[1](rp)
+            else:
+                warnings.warn(f"finetune.enabled=True 但站级路由表 {rp} 不存在：不做逐站路由"
+                              f"（station_routing 保持 None）")
         if bool(t3.get("eager_init", True)):
             self._ensure_backbone(self._resolve_device())
 
@@ -125,6 +160,7 @@ class TransformersAdaptedM6Model(nn.Module):
         return self.device_pref
 
     def _ensure_backbone(self, want: str):
+        ensure_rmsnorm()          # 幂等；torch < 2.4 时必须在 import timesfm3.torch.* 之前打上，backbone.py 未必已 import 过
         if self._backbone is not None and self._backbone_device == want:
             return
         from timesfm3 import ModelConfig, TimesFM3Evaluator            # 懒 import
@@ -133,6 +169,57 @@ class TransformersAdaptedM6Model(nn.Module):
                                                        per_core_batch_size=int(t3["per_core_batch_size"]),
                                                        device=want))
         self._backbone_device = want
+        if self.torch_path and self.backbone is None:
+            self._attach_torch_path()
+
+    def _attach_torch_path(self) -> None:
+        """从已加载的 evaluator 取底层 nn.Module 建 TorchBackbone；finetune.enabled 时挂 LoRA、冻结、加载权重。"""
+        TorchBackbone, inject_lora, freeze_all_but_lora, load_lora_state_dict, _, trainable_summary = _lazy_torch_path_imports()
+        if self._backbone is None:
+            raise RuntimeError("evaluator 尚未加载，不能建 torch 路径")
+        self.backbone = TorchBackbone.from_evaluator(self._backbone)
+        ft = self.cfg["finetune"]
+        if ft["enabled"]:
+            lo = ft["lora"]
+            names = inject_lora(self.backbone.model, list(lo["target_modules"]), int(lo["rank"]), float(lo["alpha"]), float(lo["dropout"]))
+            freeze_all_but_lora(self.backbone.model, bool(ft["unfreeze_output_head"]))
+            lp = Path(str(ft["lora_path"]))
+            if lp.exists():
+                load_lora_state_dict(self.backbone.model, torch.load(lp, map_location="cpu"))
+                self.lora_loaded = True
+            else:
+                self.lora_loaded = False
+                warnings.warn(f"finetune.enabled=True 但 LoRA 权重 {lp} 不存在：底座以零样本权重起步"
+                              f"（训练前正常；推理时表示尚未微调）。已挂 {len(names)} 个 LoRA 模块，"
+                              f"可训参数占比 {trainable_summary(self.backbone.model)['frac']:.4%}")
+        # inject_lora 新建的 LoRALinear（及其内部 nn.Dropout）默认 training=True，与已加载 evaluator（构造时
+        # 已 eval()）不一致：不显式摆回 eval 会让 dropout 在“看似零样本/未训练”的推理调用里静默生效，
+        # 同一权重连续两次 forward 都不可复现。默认落回推理态，训练脚本按惯例（同 evaluate_model）显式 m.train()。
+        self.backbone.eval()
+
+    def _quantiles_torch(self, tgt: np.ndarray, pf_list, po_list, station_id) -> torch.Tensor:
+        t3 = self.cfg["timesfm3"]
+        pf = np.stack(pf_list).astype(np.float32) if pf_list else None            # [B,C,864]
+        po = np.stack(po_list).astype(np.float32) if po_list else None            # [B,C,672]
+        kw = dict(horizon=self.pred_len, use_znorm=bool(t3["use_znorm"]),
+                  use_symmetric_averaging=bool(t3["use_symmetric_averaging"]), make_positive=bool(t3["make_positive"]))
+        if not self.station_routing:
+            return self.backbone.predict_quantiles(tgt, pf, po, **kw)
+        set_lora_enabled = _lazy_torch_path_imports()[4]
+        use_lora = np.array([self.station_routing.get(int(s), "zeroshot") == "lora" for s in np.asarray(station_id).reshape(-1)])
+        try:
+            if use_lora.all():
+                set_lora_enabled(self.backbone.model, True)
+                return self.backbone.predict_quantiles(tgt, pf, po, **kw)
+            if not use_lora.any():
+                set_lora_enabled(self.backbone.model, False)
+                return self.backbone.predict_quantiles(tgt, pf, po, **kw)
+            set_lora_enabled(self.backbone.model, True);  q_lora = self.backbone.predict_quantiles(tgt, pf, po, **kw)
+            set_lora_enabled(self.backbone.model, False); q_zs = self.backbone.predict_quantiles(tgt, pf, po, **kw)
+            sel = torch.as_tensor(use_lora, device=q_lora.device)[:, None, None]
+            return torch.where(sel, q_lora, q_zs)
+        finally:
+            set_lora_enabled(self.backbone.model, True)
 
     # ------------------------------------------------------------------ 取列（同 m5）
     def _col(self, batch_dict: dict, col: str) -> np.ndarray:
@@ -222,7 +309,15 @@ class TransformersAdaptedM6Model(nn.Module):
         tgt = self._col(batch_dict, self.target_col)[:, -L:]
         ctx = build_row_context(batch_dict, self.cfg, self.station_meta)
         pf_list, po_list = self._covariates(batch_dict, ctx)
-        q_raw = self._run_backbone(tgt, pf_list, po_list)                          # [B,H,9]
+        if self.torch_path:
+            q_raw_t = self._quantiles_torch(tgt, pf_list, po_list, ctx.station_id)   # [B,H,9] tensor；训练时带梯度
+            if q_raw_t.dtype != torch.float32:
+                q_raw_t = q_raw_t.float()          # bf16 autocast → fp32：aux["quantiles"]/loss 口径统一，不随 autocast 变
+            q_raw = q_raw_t.detach().float().cpu().numpy()   # .float() 兜底：bf16 张量 .numpy() 会抛 TypeError
+            dev = q_raw_t.device
+        else:
+            q_raw = self._run_backbone(tgt, pf_list, po_list)                          # [B,H,9]
+            q_raw_t = torch.as_tensor(q_raw, dtype=torch.float32, device=dev)
         B = q_raw.shape[0]
         # 校准
         if self.calibrator is not None:
@@ -252,7 +347,7 @@ class TransformersAdaptedM6Model(nn.Module):
         pstar = p_star(q_cal, levels, ctx.cap[:, None], float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
         logits = torch.as_tensor(point, dtype=torch.float32, device=dev)
         aux = {
-            "quantiles": torch.as_tensor(q_raw, dtype=torch.float32, device=dev),
+            "quantiles": q_raw_t,
             "quantiles_cal": torch.as_tensor(q_cal, dtype=torch.float32, device=dev),
             "levels_cal": list(levels),
             "p_star": torch.as_tensor(pstar, dtype=torch.float32, device=dev),
