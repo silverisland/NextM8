@@ -62,7 +62,7 @@ def test_split_defaults_are_multi_block_with_purge_and_embargo():
     sp = load_config(None)["finetune"]["split"]
     assert sp["train_start"] is None and sp["test_end"] is None
     assert sp["val_blocks"] == [["2025-01-10", "2025-01-31"], ["2025-04-10", "2025-05-01"], ["2025-07-16", "2025-08-06"]]
-    assert sp["test_start"] == "2025-09-01" and sp["cal_days"] == 45
+    assert sp["test_start"] == "2025-10-01" and sp["cal_days"] == 45
     assert sp["purge_days"] == 2 and sp["embargo_days"] == 7
     assert not {"train_end", "val_start", "val_end", "rolling_folds"} & set(sp)
 
@@ -79,3 +79,10 @@ def test_yaml_split_section_matches_defaults():
     import yaml
     y = yaml.safe_load((Path(__file__).resolve().parents[1] / "model_config.yaml").read_text(encoding="utf-8"))
     assert y["finetune"]["split"] == load_config(None)["finetune"]["split"]
+
+
+def test_default_split_is_self_consistent():
+    from pipelines.time_splits import SplitPlan
+    plan = SplitPlan.from_dict(load_config(None)["finetune"]["split"])
+    assert plan.to_dict()["cal"] == ["2025-08-15", "2025-09-29"]
+    assert plan.coverage_note is None

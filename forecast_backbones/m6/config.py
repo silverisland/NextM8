@@ -87,7 +87,7 @@ DEFAULT_CFG: dict = {
         "split": {"train_start": None,                     # null = 数据最早
                   # 验证块列表 [start, end) 整天；分散到不同季节；块前 purge_days、块后 purge_days+embargo_days 的训练行剔除
                   "val_blocks": [["2025-01-10", "2025-01-31"], ["2025-04-10", "2025-05-01"], ["2025-07-16", "2025-08-06"]],
-                  "test_start": "2025-09-01", "test_end": None,   # 尾段测试；test_end null = 数据末尾
+                  "test_start": "2025-10-01", "test_end": None,   # 尾段测试；test_end null = 数据末尾
                   "cal_days": 45,                           # 校准段 = [test_start − purge − cal_days, test_start − purge)
                   "purge_days": 2, "embargo_days": 7},      # 2 天 ≥ H=192 步；块后 2+7=9 天 = L+H
         "early_stop": {"metric": "nanwang_after_pstar", "patience": 3},
