@@ -4,15 +4,20 @@
 每行是一个起报时刻 timestamp_win；训练行标签向前伸 H 步、上下文向后伸 L 步，相邻行几乎共用同一段标签，
 所以切分只能按时间轴切，并在验证/校准/测试块前后丢掉一段训练行：
   块前 purge_days（≥ H 折算天数）：训练行标签不伸进块；
-  块后 purge_days + embargo_days（默认 2 + 7 = 9 天 = L + H）：训练行标签不与块标签重叠，且训练行上下文不含块的标签。
+  块后 purge_days + embargo_days 合计须 ≥ L + H 折算天数（默认 2 + 7 = 9 天 = 672 + 192 步）：
+  前 H 步保证训练行标签不与块标签重叠，再往后的 L 步保证训练行 7 天上下文不含块的标签。
 校准段固定放在 test_start − purge 之前 cal_days 天；训练行到校准段前 purge 为止。"""
 from __future__ import annotations
 
+import argparse
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 
 LEGACY_KEYS = ("train_end", "val_start", "val_end", "rolling_folds")
 ROLES = ("train", "val", "cal", "test", "dropped")
@@ -49,7 +54,7 @@ class SplitPlan:
         legacy = [k for k in LEGACY_KEYS if k in split]
         if legacy:
             raise ValueError(f"split 含旧键 {legacy}：请改为 val_blocks=[[start,end],...] + test_start/test_end + "
-                             f"cal_days + purge_days/embargo_days（见 docs 设计稿 2026-09-20-time-splits-design.md）")
+                             f"cal_days + purge_days/embargo_days（见 forecast_backbones/m6/README.md 的切分说明）")
         sh = pd.Timedelta(days=int(shift_days))
         purge, embargo, cal = int(split.get("purge_days", 2)), int(split.get("embargo_days", 7)), int(split.get("cal_days", 0))
         steps_per_day = 1440 / int(step_min)
@@ -58,6 +63,10 @@ class SplitPlan:
             raise ValueError(f"purge_days={purge} 小于 H={H} 步折算的 {min_purge} 天：训练行标签会伸进验证/校准/测试块")
         if embargo < 0:
             raise ValueError(f"embargo_days={embargo} 不能为负")
+        min_after = math.ceil((int(L) + int(H)) / steps_per_day)
+        if purge + embargo < min_after:
+            raise ValueError(f"purge_days={purge} + embargo_days={embargo} 合计 {purge + embargo} 天，"
+                             f"小于 L={L} + H={H} 步折算的 {min_after} 天：块后的训练行上下文仍会含验证块的标签")
         if cal < 0:
             raise ValueError(f"cal_days={cal} 不能为负")
         raw = list(split.get("val_blocks") or [])
@@ -80,6 +89,9 @@ class SplitPlan:
         if test_end is not None and test_end <= test_start:
             raise ValueError(f"test_end={test_end.date()} 不晚于 test_start={test_start.date()}")
         train_start = (_day(split["train_start"], "train_start") + sh) if split.get("train_start") else None
+        if train_start is not None and blocks[0][0] < train_start:
+            raise ValueError(f"第一个验证块起点 {blocks[0][0].date()} 早于 train_start {train_start.date()}："
+                             f"val_blocks 必须落在训练数据区间之内")
         plan = cls(tuple(blocks), test_start, test_end, cal, purge, embargo, train_start, int(L), int(H), int(step_min))
         c = plan.cal_interval
         guard = c[0] if c is not None else test_start - plan.purge
@@ -115,7 +127,8 @@ class SplitPlan:
 
     @property
     def inputs_disjoint_after(self) -> bool:
-        """块后剔除长度是否 ≥ L + H 步：为真时任何训练行上下文都不含验证块标签。"""
+        """块后剔除长度是否 ≥ L + H 步：为真时任何训练行上下文都不含验证块标签。
+        from_dict 已把这条当硬约束拦在构造期，所以对任何构造出来的 plan 恒为真；保留它是为了让 manifest 里直接读得到这条事实。"""
         return (self.purge_days + self.embargo_days) * 1440 / self.step_min >= self.L + self.H
 
     @property
@@ -170,11 +183,15 @@ class SplitPlan:
 
 def verify_leak_free(ts_train, ts_val_blocks, ts_cal, plan: SplitPlan) -> None:
     """独立于 assign 的算术复核（按实际行，不按块边界）：
-    训练行 t 的标签 (t, t+H] 不得与任何验证行 / 校准行的标签 (v, v+H] 相交，即
-    对每个验证块：not (min(v) − H < t < max(v) + H)；对校准段：not (t > min(c) − H)。不通过则 AssertionError。
+    标签侧：训练行 t 的标签 (t, t+H] 不得与任何验证行 / 校准行的标签 (v, v+H] 相交，即
+    对每个验证块：not (min(v) − H < t < max(v) + H)；对校准段：not (t > min(c) − H)。
+    上下文侧：块后起报的训练行 t 的上下文 [t − (L−1), t] 不得盖到块的标签段，即
+    对每个验证块：not (t > max(v) 且 t − (L−1) ≤ max(v) + H)。不通过则 AssertionError。
+    测试段的边界（t 不得 > test_start − H）无论有没有校准段都检查。
     失败时显式 raise AssertionError（不用裸 assert），以免 -O / PYTHONOPTIMIZE 下检查被整段剥离而静默通过。"""
     tr = np.asarray(ts_train).astype("datetime64[ns]")
     Hd = np.timedelta64(int(plan.H * plan.step_min), "m")
+    Ld_minus_1 = np.timedelta64(int((plan.L - 1) * plan.step_min), "m")
     for i, tv in enumerate(ts_val_blocks):
         tv = np.asarray(tv).astype("datetime64[ns]")
         if tv.size == 0 or tr.size == 0:
@@ -182,23 +199,18 @@ def verify_leak_free(ts_train, ts_val_blocks, ts_cal, plan: SplitPlan) -> None:
         bad = tr[(tr > tv.min() - Hd) & (tr < tv.max() + Hd)]
         if bad.size != 0:
             raise AssertionError(f"验证块 {i} 与 {bad.size} 个训练行标签重叠，例如 {bad.min()} … {bad.max()}")
-    if ts_cal is not None:
+        bad = tr[(tr > tv.max()) & (tr - Ld_minus_1 <= tv.max() + Hd)]
+        if bad.size != 0:
+            raise AssertionError(f"验证块 {i} 的标签落进 {bad.size} 个块后训练行的上下文，例如 {bad.min()} … {bad.max()}")
+    if plan.cal_interval is not None and ts_cal is not None:
         tc = np.asarray(ts_cal).astype("datetime64[ns]")
         if tc.size and tr.size:
             bad = tr[tr > tc.min() - Hd]
             if bad.size != 0:
                 raise AssertionError(f"校准段与 {bad.size} 个训练行标签重叠，例如 {bad.min()}")
-    else:
-        bad = tr[tr > _dt64(plan.test_start) - Hd] if tr.size else tr
-        if bad.size != 0:
-            raise AssertionError(f"测试段与 {bad.size} 个训练行标签重叠，例如 {bad.min()}")
-
-
-import argparse
-import json
-from pathlib import Path
-
-import yaml
+    bad = tr[tr > _dt64(plan.test_start) - Hd] if tr.size else tr
+    if bad.size != 0:
+        raise AssertionError(f"测试段与 {bad.size} 个训练行标签重叠，例如 {bad.min()}")
 
 
 def write_splits(df: pd.DataFrame, plan: SplitPlan, out_dir, ts_col: str = "timestamp_win",
@@ -220,6 +232,7 @@ def write_splits(df: pd.DataFrame, plan: SplitPlan, out_dir, ts_col: str = "time
     for r, name in files.items():
         m = role == r
         if r == "cal" and plan.cal_interval is None:
+            (out / name).unlink(missing_ok=True)        # 同一目录改用无校准段重切：删掉上一轮留下的 cal.parquet
             continue
         part = df[m].reset_index(drop=True)
         if r == "val":
@@ -244,17 +257,39 @@ def write_splits(df: pd.DataFrame, plan: SplitPlan, out_dir, ts_col: str = "time
     return manifest
 
 
+REQUIRED_SPLIT_KEYS = ("val_blocks", "test_start", "cal_days", "purge_days", "embargo_days")
+
+
 def load_split_dict(split_yaml=None, m6_config=None) -> dict:
-    """--split-yaml：顶层就是 split 字典；--m6-config：读 M6 model_config.yaml 的 finetune.split。二选一。"""
+    """--split-yaml：顶层就是 split 字典；--m6-config：读 M6 model_config.yaml 的 finetune.split。二选一。
+    两条路都要求 split 字典写全 REQUIRED_SPLIT_KEYS：CLI 不替用户默认 purge/embargo/cal 的天数。"""
     if (split_yaml is None) == (m6_config is None):
         raise ValueError("--split-yaml 与 --m6-config 二选一")
     if split_yaml is not None:
-        return yaml.safe_load(Path(split_yaml).read_text(encoding="utf-8")) or {}
+        split = yaml.safe_load(Path(split_yaml).read_text(encoding="utf-8")) or {}
+        where = split_yaml
+    else:
+        cfg = yaml.safe_load(Path(m6_config).read_text(encoding="utf-8")) or {}
+        try:
+            split = cfg["finetune"]["split"]
+        except (KeyError, TypeError):
+            raise ValueError(f"{m6_config} 缺 finetune.split") from None
+        where = f"{m6_config} 的 finetune.split"
+    missing = [k for k in REQUIRED_SPLIT_KEYS if k not in (split or {})]
+    if missing:
+        raise ValueError(f"{where} 缺少切分键 {missing}：这些键必须逐个写明，CLI 不替它们取默认值")
+    return split
+
+
+def _m6_geometry(m6_config) -> dict:
+    """从 M6 model_config.yaml 里取 L/H/step_min（缺哪个就不给哪个），供 CLI 当默认值用。
+    这里直接读 yaml 而不 import forecast_backbones.m6.config：pipelines 不依赖任何具体模型目录。"""
+    if m6_config is None:
+        return {}
     cfg = yaml.safe_load(Path(m6_config).read_text(encoding="utf-8")) or {}
-    try:
-        return cfg["finetune"]["split"]
-    except (KeyError, TypeError):
-        raise ValueError(f"{m6_config} 缺 finetune.split") from None
+    tf, ds = cfg.get("timesfm3") or {}, cfg.get("dataset") or {}
+    got = {"L": tf.get("context_len"), "H": tf.get("pred_len"), "step_min": ds.get("step_min")}
+    return {k: int(v) for k, v in got.items() if v is not None}
 
 
 def main(argv=None) -> dict:
@@ -262,10 +297,15 @@ def main(argv=None) -> dict:
     ap.add_argument("--parquet", required=True); ap.add_argument("--out-dir", required=True)
     ap.add_argument("--split-yaml", default=None); ap.add_argument("--m6-config", default=None)
     ap.add_argument("--ts-col", default="timestamp_win"); ap.add_argument("--shift-days", type=int, default=0)
-    ap.add_argument("--L", type=int, default=672); ap.add_argument("--H", type=int, default=192)
-    ap.add_argument("--step-min", type=int, default=15)
+    # 默认 None：解析后按 显式 flag > --m6-config 里的几何 > 内置默认 的顺序定 L/H/step_min
+    ap.add_argument("--L", type=int, default=None); ap.add_argument("--H", type=int, default=None)
+    ap.add_argument("--step-min", type=int, default=None)
     a = ap.parse_args(argv)
-    plan = SplitPlan.from_dict(load_split_dict(a.split_yaml, a.m6_config), shift_days=a.shift_days, L=a.L, H=a.H, step_min=a.step_min)
+    split = load_split_dict(a.split_yaml, a.m6_config)
+    geom = _m6_geometry(a.m6_config)
+    pick = lambda flag, key, fallback: flag if flag is not None else geom.get(key, fallback)
+    L, H, step_min = pick(a.L, "L", 672), pick(a.H, "H", 192), pick(a.step_min, "step_min", 15)
+    plan = SplitPlan.from_dict(split, shift_days=a.shift_days, L=L, H=H, step_min=step_min)
     df = pd.read_parquet(a.parquet)
     man = write_splits(df, plan, a.out_dir, ts_col=a.ts_col, source=a.parquet, shift_days=a.shift_days)
     c = man["counts"]
