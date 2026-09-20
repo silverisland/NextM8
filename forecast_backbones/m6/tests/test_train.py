@@ -23,16 +23,18 @@ def _patch_tiny_backbone(monkeypatch, evaluator):
     monkeypatch.setattr(TransformersAdaptedM6Model, "_ensure_backbone", _ensure)
 
 
-def _inputs(tmp_path, n_days=6):
-    df = make_synthetic_frame(n_days=n_days, issue_every_min=60, seed=0, start="2025-06-08")
+def _inputs(tmp_path, n_days=12):
+    df = make_synthetic_frame(n_days=n_days, issue_every_min=60, seed=0, start="2025-06-08")   # 06-08 … 06-20
     parquet = tmp_path / "data.parquet"; df.to_parquet(parquet, index=False)
     out = tmp_path / "run"
     cfg = {"dataset": {"station_meta": str(write_station_meta(tmp_path))},
            "run": {"out_dir": str(out)}, "eval": {"batch_size": 64},
            "finetune": {"enabled": True, "inference_path": "torch",
                         "schedule": {"batch_size": 4, "epochs_max": 1, "lr": 1e-3, "precision": "fp32", "logging_steps": 1},
-                        "split": {"train_start": None, "train_end": "2025-06-11", "cal_days": 1,
-                                  "val_start": "2025-06-12", "val_end": "2025-06-14", "test_start": "2025-06-14"},
+                        # train [06-08,06-10) | purge | val [06-12,06-14) | purge | cal [06-16,06-17) | purge | test [06-19,06-20)
+                        "split": {"train_start": None, "val_blocks": [["2025-06-12", "2025-06-14"]],
+                                  "test_start": "2025-06-19", "test_end": None,
+                                  "cal_days": 1, "purge_days": 2, "embargo_days": 7},
                         "early_stop": {"patience": 1}}}
     return df, parquet, out, cfg
 
@@ -41,13 +43,46 @@ def test_make_splits_boundaries_and_shift(tmp_path):
     df, parquet, _, cfg = _inputs(tmp_path)
     ds = UnifiedDataset(str(parquet), timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"],
                         timestamp_output="epoch_s", epoch_unit="s", for_hf_trainer=True)
-    tr, cal, val = make_splits(ds, cfg["finetune"]["split"])
-    per_day = len(df) // 6
-    assert len(tr) == 3 * per_day and len(cal) == per_day and len(val) == 2 * per_day
-    tr2, cal2, val2 = make_splits(ds, cfg["finetune"]["split"], shift_days=1)
-    assert len(tr2) == 4 * per_day and len(cal2) == per_day and len(val2) == per_day       # 整体后移 1 天，val 被数据末端截短
-    with pytest.raises(ValueError, match="val_start"):
-        make_splits(ds, {**cfg["finetune"]["split"], "cal_days": 2})                        # cal 撞进 val
+    per_day = len(df) // 12
+    tr, cal, val_all, blocks, plan = make_splits(ds, cfg["finetune"]["split"])
+    assert len(tr) == 2 * per_day and len(cal) == per_day and len(val_all) == 2 * per_day
+    assert len(blocks) == 1 and len(blocks[0]) == len(val_all)
+    assert plan.to_dict()["cal"] == ["2025-06-16", "2025-06-17"]
+    ts = lambda d: pd.to_datetime(d._ts_as_datetime64("timestamp_win"))
+    assert ts(tr).max() < pd.Timestamp("2025-06-10") and ts(val_all).min() >= pd.Timestamp("2025-06-12")
+    tr2, cal2, val2, blocks2, plan2 = make_splits(ds, cfg["finetune"]["split"], shift_days=1)      # 整体后移 1 天
+    assert len(tr2) == 3 * per_day and len(cal2) == per_day and len(val2) == 2 * per_day          # train 起点不动，上限后移 1 天
+    assert ts(tr2).min() >= pd.Timestamp("2025-06-08") and ts(tr2).max() < pd.Timestamp("2025-06-11")
+    assert plan2.test_start == pd.Timestamp("2025-06-20")
+    with pytest.raises(ValueError, match="段为空"):
+        make_splits(ds, {**cfg["finetune"]["split"], "val_blocks": [["2025-07-01", "2025-07-03"]], "test_start": "2025-07-10"})  # 块与校准段都落在数据之外
+    with pytest.raises(ValueError, match="cal_days"):
+        make_splits(ds, {**cfg["finetune"]["split"], "cal_days": 0})
+    with pytest.raises(ValueError, match="旧键"):
+        make_splits(ds, {"train_end": "2025-06-11", "val_start": "2025-06-12", "val_end": "2025-06-14", "cal_days": 1, "test_start": "2025-06-14"})
+
+
+def test_make_splits_with_two_real_val_blocks(tmp_path):
+    """两个真验证块（06-05…06-07 与 06-18…06-20）：块 0 后的 9 天剔除一直吃到 06-16，正是块 1 的 purge 起点，
+    两块之间连一行训练数据都不剩；训练行只剩 [06-01, 06-03)，校准段 [06-25, 06-27)。不需要模型。"""
+    df = make_synthetic_frame(n_days=30, issue_every_min=60, seed=0, start="2025-06-01")   # 06-01 … 07-01，每小时一个起报
+    parquet = tmp_path / "two_blocks.parquet"; df.to_parquet(parquet, index=False)
+    ds = UnifiedDataset(str(parquet), timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"],
+                        timestamp_output="epoch_s", epoch_unit="s", for_hf_trainer=True)
+    split = {"train_start": None,
+             "val_blocks": [["2025-06-05", "2025-06-07"], ["2025-06-18", "2025-06-20"]],
+             "test_start": "2025-06-29", "test_end": None,
+             "cal_days": 2, "purge_days": 2, "embargo_days": 7}
+    tr, cal, val_all, blocks, plan = make_splits(ds, split)                               # 内部已跑过 verify_leak_free
+    per_day = 2 * 24                                                                      # 2 站 × 每小时一个起报 = 48 行/天
+    assert len(blocks) == 2 and [len(b) for b in blocks] == [2 * per_day, 2 * per_day]
+    assert len(val_all) == sum(len(b) for b in blocks)
+    ts = lambda d: pd.to_datetime(d._ts_as_datetime64("timestamp_win"))
+    s0, s1 = set(ts(blocks[0])), set(ts(blocks[1]))
+    assert not (s0 & s1) and max(s0) < min(s1)
+    assert len(tr) == 2 * per_day                                                         # 只剩 [06-01, 06-03) 两天
+    assert ts(tr).min() >= pd.Timestamp("2025-06-01") and ts(tr).max() < pd.Timestamp("2025-06-03")
+    assert len(cal) == 2 * per_day and plan.to_dict()["cal"] == ["2025-06-25", "2025-06-27"]
 
 
 def test_build_training_args_cpu_defaults(tmp_path):
@@ -82,6 +117,12 @@ def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monk
     assert log["history"][0]["epoch"] == 0.0 and len(log["history"]) >= 2 and "best" in log
     assert set(res) >= {"ladder", "routing", "history", "best"}
     assert res["ladder"]["variant"].tolist() == ladder["variant"].tolist() and res["routing"] == routing
+    man = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
+    assert man["generated_by"] == "forecast_backbones.m6.train"                  # 与 pipelines.time_splits 的 manifest 区分开
+    assert man["plan"]["val_blocks"] == [["2025-06-12", "2025-06-14"]] and man["plan"]["cal"] == ["2025-06-16", "2025-06-17"]
+    assert man["counts"]["train"] > 0 and man["counts"]["val_blocks"] == [man["counts"]["val"]]
+    assert log["split"] == man and res["split"] == man
+    assert log["history"][0]["blocks"] and len(log["history"][0]["blocks"]) == 1
 
 
 def test_trained_artifacts_load_into_inference_model(tmp_path, tiny_evaluator, monkeypatch):
@@ -114,8 +155,7 @@ def test_train_m6_raises_clear_error_when_no_finite_score_ever_recorded(tmp_path
         with pytest.raises(ValueError) as exc:
             train_m6(cfg, str(parquet), max_steps=1)
     msg = str(exc.value)
-    assert cfg["finetune"]["split"]["val_start"] in msg and cfg["finetune"]["split"]["val_end"] in msg
-    assert "非有限" in msg
+    assert "2025-06-12" in msg and "2025-06-14" in msg and "非有限" in msg
     assert not (out / "lora_weights.pt").exists()
 
 
