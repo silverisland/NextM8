@@ -171,7 +171,8 @@ class SplitPlan:
 def verify_leak_free(ts_train, ts_val_blocks, ts_cal, plan: SplitPlan) -> None:
     """独立于 assign 的算术复核（按实际行，不按块边界）：
     训练行 t 的标签 (t, t+H] 不得与任何验证行 / 校准行的标签 (v, v+H] 相交，即
-    对每个验证块：not (min(v) − H < t < max(v) + H)；对校准段：not (t > min(c) − H)。不通过则 AssertionError。"""
+    对每个验证块：not (min(v) − H < t < max(v) + H)；对校准段：not (t > min(c) − H)。不通过则 AssertionError。
+    失败时显式 raise AssertionError（不用裸 assert），以免 -O / PYTHONOPTIMIZE 下检查被整段剥离而静默通过。"""
     tr = np.asarray(ts_train).astype("datetime64[ns]")
     Hd = np.timedelta64(int(plan.H * plan.step_min), "m")
     for i, tv in enumerate(ts_val_blocks):
@@ -179,12 +180,15 @@ def verify_leak_free(ts_train, ts_val_blocks, ts_cal, plan: SplitPlan) -> None:
         if tv.size == 0 or tr.size == 0:
             continue
         bad = tr[(tr > tv.min() - Hd) & (tr < tv.max() + Hd)]
-        assert bad.size == 0, f"验证块 {i} 与 {bad.size} 个训练行标签重叠，例如 {bad.min()} … {bad.max()}"
+        if bad.size != 0:
+            raise AssertionError(f"验证块 {i} 与 {bad.size} 个训练行标签重叠，例如 {bad.min()} … {bad.max()}")
     if ts_cal is not None:
         tc = np.asarray(ts_cal).astype("datetime64[ns]")
         if tc.size and tr.size:
             bad = tr[tr > tc.min() - Hd]
-            assert bad.size == 0, f"校准段与 {bad.size} 个训练行标签重叠，例如 {bad.min()}"
+            if bad.size != 0:
+                raise AssertionError(f"校准段与 {bad.size} 个训练行标签重叠，例如 {bad.min()}")
     else:
         bad = tr[tr > _dt64(plan.test_start) - Hd] if tr.size else tr
-        assert bad.size == 0, f"测试段与 {bad.size} 个训练行标签重叠，例如 {bad.min()}"
+        if bad.size != 0:
+            raise AssertionError(f"测试段与 {bad.size} 个训练行标签重叠，例如 {bad.min()}")
