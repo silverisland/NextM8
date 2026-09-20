@@ -192,3 +192,91 @@ def verify_leak_free(ts_train, ts_val_blocks, ts_cal, plan: SplitPlan) -> None:
         bad = tr[tr > _dt64(plan.test_start) - Hd] if tr.size else tr
         if bad.size != 0:
             raise AssertionError(f"测试段与 {bad.size} 个训练行标签重叠，例如 {bad.min()}")
+
+
+import argparse
+import json
+from pathlib import Path
+
+import yaml
+
+
+def write_splits(df: pd.DataFrame, plan: SplitPlan, out_dir, ts_col: str = "timestamp_win",
+                 source=None, shift_days: int = 0) -> dict:
+    """按 plan 把原始行表落成 train/valid[/cal]/test.parquet（按时间稳定排序）+ split_manifest.json。返回 manifest。"""
+    out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
+    ts = pd.to_datetime(df[ts_col])
+    if getattr(ts.dt, "tz", None) is not None:
+        ts = ts.dt.tz_localize(None)
+    ts = ts.to_numpy().astype("datetime64[ns]")
+    role, block = plan.assign(ts)
+    order = np.argsort(ts, kind="stable")
+    df, ts, role, block = df.iloc[order].reset_index(drop=True), ts[order], role[order], block[order]
+    val_ts = [ts[(role == "val") & (block == i)] for i in range(len(plan.val_blocks))]
+    verify_leak_free(ts[role == "train"], val_ts, ts[role == "cal"] if plan.cal_interval is not None else None, plan)
+
+    files = {"train": "train.parquet", "val": "valid.parquet", "cal": "cal.parquet", "test": "test.parquet"}
+    counts = {}
+    for r, name in files.items():
+        m = role == r
+        if r == "cal" and plan.cal_interval is None:
+            continue
+        part = df[m].reset_index(drop=True)
+        if r == "val":
+            part = part.assign(split_block=block[m].astype(np.int64))
+        part.to_parquet(out / name, index=False)
+        counts[r] = int(m.sum())
+    counts["dropped"] = int((role == "dropped").sum())
+    months = lambda t: sorted({str(x)[:7] for x in t.astype("datetime64[M]")})
+    blocks = [{"index": i, "start": plan.to_dict()["val_blocks"][i][0], "end": plan.to_dict()["val_blocks"][i][1],
+               "rows": int(tv.size), "months": months(tv)} for i, tv in enumerate(val_ts)]
+    st_col = "station_id" if "station_id" in df.columns else ("station" if "station" in df.columns else None)
+    stations = {}
+    if st_col is not None:
+        for s, grp in pd.Series(role).groupby(df[st_col].astype(str).to_numpy()):
+            vc = grp.value_counts()
+            stations[str(s)] = {r: int(vc.get(r, 0)) for r in counts if r != "dropped"}
+    manifest = {"generated_by": "pipelines.time_splits", "source": None if source is None else str(source),
+                "shift_days": int(shift_days), "ts_col": ts_col, "plan": plan.to_dict(), "counts": counts,
+                "blocks": blocks, "stations": stations, "n_nat": int(np.isnat(ts).sum()),
+                "inputs_disjoint_after": plan.inputs_disjoint_after, "coverage_note": plan.coverage_note}
+    (out / "split_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest
+
+
+def load_split_dict(split_yaml=None, m6_config=None) -> dict:
+    """--split-yaml：顶层就是 split 字典；--m6-config：读 M6 model_config.yaml 的 finetune.split。二选一。"""
+    if (split_yaml is None) == (m6_config is None):
+        raise ValueError("--split-yaml 与 --m6-config 二选一")
+    if split_yaml is not None:
+        return yaml.safe_load(Path(split_yaml).read_text(encoding="utf-8")) or {}
+    cfg = yaml.safe_load(Path(m6_config).read_text(encoding="utf-8")) or {}
+    try:
+        return cfg["finetune"]["split"]
+    except (KeyError, TypeError):
+        raise ValueError(f"{m6_config} 缺 finetune.split") from None
+
+
+def main(argv=None) -> dict:
+    ap = argparse.ArgumentParser(description="按时间轴切 train/valid[/cal]/test.parquet（验证块 purge/embargo，见 split_manifest.json）")
+    ap.add_argument("--parquet", required=True); ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--split-yaml", default=None); ap.add_argument("--m6-config", default=None)
+    ap.add_argument("--ts-col", default="timestamp_win"); ap.add_argument("--shift-days", type=int, default=0)
+    ap.add_argument("--L", type=int, default=672); ap.add_argument("--H", type=int, default=192)
+    ap.add_argument("--step-min", type=int, default=15)
+    a = ap.parse_args(argv)
+    plan = SplitPlan.from_dict(load_split_dict(a.split_yaml, a.m6_config), shift_days=a.shift_days, L=a.L, H=a.H, step_min=a.step_min)
+    df = pd.read_parquet(a.parquet)
+    man = write_splits(df, plan, a.out_dir, ts_col=a.ts_col, source=a.parquet, shift_days=a.shift_days)
+    c = man["counts"]
+    print(f"[time_splits] train={c['train']} val={c['val']} cal={c.get('cal', 0)} test={c['test']} dropped={c['dropped']} "
+          f"n_nat={man['n_nat']} → {a.out_dir}")
+    for b in man["blocks"]:
+        print(f"[time_splits] val block {b['index']}: [{b['start']}, {b['end']}) rows={b['rows']} months={b['months']}")
+    if man["coverage_note"]:
+        print(f"[time_splits] 提示：{man['coverage_note']}")
+    return man
+
+
+if __name__ == "__main__":
+    main()

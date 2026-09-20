@@ -1,8 +1,11 @@
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
-from pipelines.time_splits import SplitPlan, verify_leak_free, LEGACY_KEYS
+from pipelines.time_splits import SplitPlan, verify_leak_free, LEGACY_KEYS, write_splits, load_split_dict, main
 
 SPLIT = {"train_start": None,
          "val_blocks": [["2025-03-10", "2025-03-24"], ["2025-07-16", "2025-07-30"]],
@@ -116,3 +119,70 @@ def test_verify_leak_free_catches_target_overlap():
     leaky_cal = np.append(ts[role == "train"], cal[0] - np.timedelta64(24, "h"))
     with pytest.raises(AssertionError, match="校准段"):
         verify_leak_free(leaky_cal, [val0, ts[(role == "val") & (block == 1)]], cal, p)
+
+
+def _frame(start="2025-01-01", end="2025-12-01", stations=("A", "B")):
+    ts = pd.date_range(start, end, freq="15min", inclusive="left")
+    rows = []
+    for s in stations:
+        rows.append(pd.DataFrame({"timestamp_win": ts, "station": s,
+                                  "observe_power": [np.zeros(4, np.float32)] * len(ts),
+                                  "observe_power_future": [np.zeros(2, np.float32)] * len(ts)}))
+    df = pd.concat(rows, ignore_index=True).sample(frac=1.0, random_state=0).reset_index(drop=True)   # 乱序输入
+    return df
+
+
+def test_write_splits_files_and_manifest(tmp_path):
+    df = _frame()
+    plan = SplitPlan.from_dict(SPLIT)
+    man = write_splits(df, plan, tmp_path / "out", source="raw.parquet")
+    out = tmp_path / "out"
+    for f in ("train.parquet", "valid.parquet", "cal.parquet", "test.parquet", "split_manifest.json"):
+        assert (out / f).exists()
+    tr, va, ca, te = (pd.read_parquet(out / f) for f in ("train.parquet", "valid.parquet", "cal.parquet", "test.parquet"))
+    assert len(va) == 2 * 28 * 96 and set(va["split_block"]) == {0, 1}
+    assert "split_block" not in tr.columns and "_role" not in tr.columns
+    assert len(ca) == 2 * 45 * 96 and len(te) == 2 * 61 * 96
+    assert tr["timestamp_win"].is_monotonic_increasing                                   # 按时间排序落盘
+    assert tr["timestamp_win"].max() < pd.Timestamp("2025-08-13")
+    m = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
+    assert m == man
+    assert m["plan"]["val_blocks"] == SPLIT["val_blocks"] and m["source"] == "raw.parquet"
+    assert m["counts"]["train"] == len(tr) and m["counts"]["val"] == len(va) and m["counts"]["dropped"] > 0
+    assert m["blocks"][0] == {"index": 0, "start": "2025-03-10", "end": "2025-03-24", "rows": 14 * 96 * 2, "months": ["2025-03"]}
+    assert m["stations"] == {"A": {"train": len(tr) // 2, "val": len(va) // 2, "cal": len(ca) // 2, "test": len(te) // 2},
+                             "B": {"train": len(tr) // 2, "val": len(va) // 2, "cal": len(ca) // 2, "test": len(te) // 2}}
+    assert m["n_nat"] == 0 and m["inputs_disjoint_after"] is True and m["coverage_note"] is None
+
+
+def test_write_splits_without_cal_and_with_station_id_and_nat(tmp_path):
+    df = _frame().rename(columns={"station": "station_id"})
+    df.loc[0, "timestamp_win"] = pd.NaT
+    man = write_splits(df, SplitPlan.from_dict({**SPLIT, "cal_days": 0}), tmp_path / "o")
+    assert not (tmp_path / "o" / "cal.parquet").exists() and "cal" not in man["counts"]
+    assert man["n_nat"] == 1 and set(man["stations"]) == {"A", "B"}
+
+
+def test_load_split_dict_from_yaml_or_m6_config(tmp_path):
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump(SPLIT), encoding="utf-8")
+    (tmp_path / "m6.yaml").write_text(yaml.safe_dump({"finetune": {"split": SPLIT}, "run": {"out_dir": "${x}"}}), encoding="utf-8")
+    assert load_split_dict(split_yaml=tmp_path / "s.yaml") == SPLIT
+    assert load_split_dict(m6_config=tmp_path / "m6.yaml") == SPLIT
+    with pytest.raises(ValueError, match="二选一"):
+        load_split_dict()
+    with pytest.raises(ValueError, match="二选一"):
+        load_split_dict(split_yaml=tmp_path / "s.yaml", m6_config=tmp_path / "m6.yaml")
+    (tmp_path / "bad.yaml").write_text("run: {}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="finetune.split"):
+        load_split_dict(m6_config=tmp_path / "bad.yaml")
+
+
+def test_cli_end_to_end(tmp_path, capsys):
+    raw = tmp_path / "raw.parquet"; _frame().to_parquet(raw, index=False)
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump(SPLIT), encoding="utf-8")
+    man = main(["--parquet", str(raw), "--out-dir", str(tmp_path / "ds"), "--split-yaml", str(tmp_path / "s.yaml"),
+                "--shift-days", "1"])
+    assert man["plan"]["val_blocks"][0] == ["2025-03-11", "2025-03-25"] and man["shift_days"] == 1
+    assert (tmp_path / "ds" / "valid.parquet").exists()
+    out = capsys.readouterr().out
+    assert "train=" in out and "val=" in out
