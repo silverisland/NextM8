@@ -5,7 +5,8 @@ import pandas as pd
 import pytest
 import yaml
 
-from pipelines.time_splits import SplitPlan, verify_leak_free, LEGACY_KEYS, write_splits, load_split_dict, main
+from pipelines.time_splits import (SplitPlan, StationSplitPlan, verify_leak_free, LEGACY_KEYS, write_splits,
+                                   load_split_dict, load_test_starts, main)
 
 SPLIT = {"train_start": None,
          "val_blocks": [["2025-03-10", "2025-03-24"], ["2025-07-16", "2025-07-30"]],
@@ -181,8 +182,8 @@ def test_write_splits_files_and_manifest(tmp_path):
     assert m["plan"]["val_blocks"] == SPLIT["val_blocks"] and m["source"] == "raw.parquet"
     assert m["counts"]["train"] == len(tr) and m["counts"]["val"] == len(va) and m["counts"]["dropped"] > 0
     assert m["blocks"][0] == {"index": 0, "start": "2025-03-10", "end": "2025-03-24", "rows": 14 * 96 * 2, "months": ["2025-03"]}
-    assert m["stations"] == {"A": {"train": len(tr) // 2, "val": len(va) // 2, "cal": len(ca) // 2, "test": len(te) // 2},
-                             "B": {"train": len(tr) // 2, "val": len(va) // 2, "cal": len(ca) // 2, "test": len(te) // 2}}
+    per = {"train": len(tr) // 2, "val": len(va) // 2, "cal": len(ca) // 2, "test": len(te) // 2, "val_blocks": [0, 1]}
+    assert m["stations"] == {"A": per, "B": per} and m["by_station"] is False and m["station_col"] == "station"
     assert m["n_nat"] == 0 and m["inputs_disjoint_after"] is True and m["coverage_note"] is None
 
 
@@ -259,3 +260,108 @@ def test_cli_takes_geometry_from_m6_config(tmp_path):
                         "finetune": {"split": {**SPLIT, "purge_days": 4}}}), encoding="utf-8")
     man2 = main(["--parquet", str(raw), "--out-dir", str(tmp_path / "c"), "--m6-config", str(tmp_path / "m6b.yaml")])
     assert man2["plan"]["H"] == 384 and man2["plan"]["L"] == 672 and man2["plan"]["purge_days"] == 4
+
+
+# ---------------- 按站不同 test_start ----------------
+SPLIT_NO_TEST = {k: v for k, v in SPLIT.items() if k != "test_start"}
+
+
+def test_station_plan_filters_blocks_per_station_and_keeps_global_indices():
+    """A 站测试 10-01 容得下两个块；B 站测试 06-01（校准段起点 04-15）只容得下 3 月那块，7 月块被跳过并记录。"""
+    sp = StationSplitPlan.from_dict(SPLIT_NO_TEST, {"A": "2025-10-01", "B": "2025-06-01"})
+    assert sp.val_blocks == SplitPlan.from_dict(SPLIT).val_blocks
+    assert sp.block_index == {"A": (0, 1), "B": (0,)} and sp.skipped_blocks == {"A": [], "B": [1]}
+    assert sp.plans["B"].cal_interval == (pd.Timestamp("2025-04-15"), pd.Timestamp("2025-05-30"))
+    ts = _grid(); n = len(ts)
+    role, block = sp.assign(np.concatenate([ts, ts]), np.array(["A"] * n + ["B"] * n))
+    ra, rb, ba, bb = role[:n], role[n:], block[:n], block[n:]
+    assert set(ba[ra == "val"]) == {0, 1} and set(bb[rb == "val"]) == {0}                # B 的块序号仍是全局的 0
+    assert int((rb == "val").sum()) == 14 * 96 and int((rb == "test").sum()) == 183 * 96  # 06-01 … 12-01
+    assert int((rb == "cal").sum()) == 45 * 96
+    assert ts[rb == "train"].max() < np.datetime64("2025-04-13")                          # cal_start − purge
+    d = sp.to_dict()
+    assert d["by_station"] is True and d["test_start"] == {"A": "2025-10-01", "B": "2025-06-01"}
+    assert d["skipped_val_blocks"] == {"B": [1]} and d["val_blocks"] == SPLIT["val_blocks"]
+    sp.verify(np.concatenate([ts, ts]), np.array(["A"] * n + ["B"] * n), role, block)    # 不抛
+
+
+def test_station_plan_rejects_unknown_station_and_infeasible_cases():
+    sp = StationSplitPlan.from_dict(SPLIT_NO_TEST, {"A": "2025-10-01"})
+    with pytest.raises(ValueError, match="没有 test_start"):
+        sp.assign(_grid()[:10], np.array(["A"] * 5 + ["C"] * 5))
+    with pytest.raises(ValueError, match="一个验证块都容不下"):                           # B 测试 03-01：两块都在后面
+        StationSplitPlan.from_dict(SPLIT_NO_TEST, {"A": "2025-10-01", "B": "2025-03-01"})
+    with pytest.raises(ValueError, match="没有任何站容得下"):                             # 大家都容不下 7 月块
+        StationSplitPlan.from_dict(SPLIT_NO_TEST, {"A": "2025-06-01", "B": "2025-06-01"})
+    with pytest.raises(ValueError, match="test_starts 为空"):
+        StationSplitPlan.from_dict(SPLIT_NO_TEST, {})
+
+
+def test_station_plan_verify_reports_station_on_leak():
+    sp = StationSplitPlan.from_dict(SPLIT_NO_TEST, {"A": "2025-10-01", "B": "2025-06-01"})
+    ts = _grid(); n = len(ts)
+    role, block = sp.assign(np.concatenate([ts, ts]), np.array(["A"] * n + ["B"] * n))
+    bad = role.copy(); bad[n + int(np.searchsorted(ts, np.datetime64("2025-05-31")))] = "train"   # B 站塞一行到测试段前
+    with pytest.raises(AssertionError, match="站 B"):
+        sp.verify(np.concatenate([ts, ts]), np.array(["A"] * n + ["B"] * n), bad, block)
+
+
+def _test_files(tmp_path, starts: dict, station_col="station"):
+    paths = []
+    for st, day in starts.items():
+        ts = pd.date_range(day, periods=4 * 96, freq="15min")
+        p = tmp_path / f"test_{st}.parquet"
+        pd.DataFrame({"timestamp_win": ts, station_col: st, "observe_power": [np.zeros(4, np.float32)] * len(ts)}
+                     ).to_parquet(p, index=False)
+        paths.append(str(p))
+    return paths
+
+
+def test_load_test_starts_from_parquets_floors_to_day(tmp_path):
+    paths = _test_files(tmp_path, {"A": "2025-10-01 06:15", "B": "2025-06-01 00:00"})
+    assert load_test_starts(paths) == {"A": "2025-10-01", "B": "2025-06-01"}
+    assert load_test_starts([str(tmp_path / "test_*.parquet")]) == {"A": "2025-10-01", "B": "2025-06-01"}
+    with pytest.raises(FileNotFoundError):
+        load_test_starts([str(tmp_path / "nope_*.parquet")])
+    pd.DataFrame({"timestamp_win": pd.date_range("2025-07-01", periods=3, freq="15min")}).to_parquet(tmp_path / "x.parquet")
+    with pytest.raises(ValueError, match="站标识列"):
+        load_test_starts([str(tmp_path / "x.parquet")])
+
+
+def test_cli_by_station_from_test_parquets(tmp_path, capsys):
+    raw = tmp_path / "raw.parquet"; _frame().to_parquet(raw, index=False)
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump({**SPLIT_NO_TEST, "test_start": None}), encoding="utf-8")
+    _test_files(tmp_path, {"A": "2025-10-01", "B": "2025-06-01"})
+    man = main(["--parquet", str(raw), "--out-dir", str(tmp_path / "ds"), "--split-yaml", str(tmp_path / "s.yaml"),
+                "--test-parquets", str(tmp_path / "test_*.parquet")])
+    assert man["by_station"] is True and man["plan"]["test_start"] == {"A": "2025-10-01", "B": "2025-06-01"}
+    assert man["stations"]["A"]["val_blocks"] == [0, 1] and man["stations"]["B"]["val_blocks"] == [0]
+    tr = pd.read_parquet(tmp_path / "ds" / "train.parquet"); va = pd.read_parquet(tmp_path / "ds" / "valid.parquet")
+    assert tr[tr["station"] == "B"]["timestamp_win"].max() < pd.Timestamp("2025-04-13")
+    assert tr[tr["station"] == "A"]["timestamp_win"].max() < pd.Timestamp("2025-08-13")
+    assert set(va[va["station"] == "B"]["split_block"]) == {0} and set(va[va["station"] == "A"]["split_block"]) == {0, 1}
+    out = capsys.readouterr().out
+    assert "站 B: test_start=2025-06-01 跳过验证块 [1]" in out
+    # split 里同时写了 test_start → 冲突报错；两个按站开关同时给 → 报错
+    (tmp_path / "s2.yaml").write_text(yaml.safe_dump(SPLIT), encoding="utf-8")
+    with pytest.raises(ValueError, match="删掉其一"):
+        main(["--parquet", str(raw), "--out-dir", str(tmp_path / "e"), "--split-yaml", str(tmp_path / "s2.yaml"),
+              "--test-parquets", str(tmp_path / "test_*.parquet")])
+    with pytest.raises(ValueError, match="二选一"):
+        main(["--parquet", str(raw), "--out-dir", str(tmp_path / "e"), "--split-yaml", str(tmp_path / "s.yaml"),
+              "--test-parquets", "x", "--test-start-by-station", "y"])
+
+
+def test_cli_by_station_from_mapping_file_and_missing_station(tmp_path):
+    raw = tmp_path / "raw.parquet"; _frame().to_parquet(raw, index=False)
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump(SPLIT_NO_TEST), encoding="utf-8")          # 干脆不写 test_start
+    (tmp_path / "m.json").write_text(json.dumps({"A": "2025-10-01", "B": "2025-06-01"}), encoding="utf-8")
+    man = main(["--parquet", str(raw), "--out-dir", str(tmp_path / "ds"), "--split-yaml", str(tmp_path / "s.yaml"),
+                "--test-start-by-station", str(tmp_path / "m.json")])
+    assert man["plan"]["skipped_val_blocks"] == {"B": [1]}
+    (tmp_path / "m2.yaml").write_text(yaml.safe_dump({"A": "2025-10-01"}), encoding="utf-8")   # 少了 B
+    with pytest.raises(ValueError, match="没有 test_start"):
+        main(["--parquet", str(raw), "--out-dir", str(tmp_path / "e"), "--split-yaml", str(tmp_path / "s.yaml"),
+              "--test-start-by-station", str(tmp_path / "m2.yaml")])
+    with pytest.raises(ValueError, match="缺少切分键"):                                        # 不按站时 test_start 仍必填
+        main(["--parquet", str(raw), "--out-dir", str(tmp_path / "e"), "--split-yaml", str(tmp_path / "s.yaml")])

@@ -44,20 +44,45 @@ except ImportError:
     from lora import load_lora_state_dict, set_lora_enabled, trainable_summary
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
-    from ...pipelines.time_splits import SplitPlan, verify_leak_free
+    from ...pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
+                                          load_test_starts, station_keys)
 except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
-    from pipelines.time_splits import SplitPlan, verify_leak_free
+    from pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
+                                       load_test_starts, station_keys)
 
 
-def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15):
-    """按 SplitPlan 在起报时间轴上切 train / cal / val（全部验证块合并）/ val_blocks（逐块列表）。
-    train 行已剔除每个验证块前 purge、后 purge+embargo，以及校准段前 purge 之后的一切；返回末项为 plan。"""
-    plan = SplitPlan.from_dict(split, shift_days=shift_days, L=L, H=H, step_min=step_min)
-    if plan.cal_interval is None:
+def build_plan(split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15):
+    """split.test_start 是日期 → SplitPlan；是 {station: 日期} 映射，或 split.test_parquets 给了测试集文件
+    （每站 test_start = 该站在测试集里最早起报时刻的整天）→ StationSplitPlan。两者都给则报错。"""
+    t0, files = split.get("test_start"), split.get("test_parquets")
+    if files:
+        if t0 is not None:
+            raise ValueError("finetune.split 同时给了 test_start 与 test_parquets：删掉其一")
+        starts = load_test_starts(list(files) if isinstance(files, (list, tuple)) else [files],
+                                  ts_col=split.get("ts_col", "timestamp_win"), station_col=split.get("station_col"))
+        return StationSplitPlan.from_dict(split, starts, shift_days=shift_days, L=L, H=H, step_min=step_min)
+    if isinstance(t0, dict):
+        return StationSplitPlan.from_dict(split, t0, shift_days=shift_days, L=L, H=H, step_min=step_min)
+    return SplitPlan.from_dict(split, shift_days=shift_days, L=L, H=H, step_min=step_min)
+
+
+def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15,
+                station_col: str = "station_id"):
+    """按 SplitPlan / StationSplitPlan 在起报时间轴上切 train / cal / val（全部验证块合并）/ val_blocks（逐块列表）。
+    train 行已剔除每个验证块前 purge、后 purge+embargo，以及校准段前 purge 之后的一切；返回末项为 plan。
+    按站切分时某站容不下的验证块该站不出行，其他站照常；块序号是全局的。"""
+    plan = build_plan(split, shift_days=shift_days, L=L, H=H, step_min=step_min)
+    if not has_cal(plan):
         raise ValueError("M6 训练需要校准段：finetune.split.cal_days 须 ≥ 1")
     ts = ds_all._ts_as_datetime64(ds_all.timestamp_cols[0])
-    role, block = plan.assign(ts)
+    station = None
+    if isinstance(plan, StationSplitPlan):
+        known = set(ds_all.timestamp_cols) | set(ds_all.entity_cols) | set(ds_all.feature_cols) | set(ds_all.label_cols)
+        if station_col not in known:
+            raise ValueError(f"按站切分需要站标识列 {station_col!r}，数据里没有（列：{sorted(known)[:12]}…）")
+        station = station_keys(ds_all.column(station_col))
+    role, block = assign_rows(plan, ts, station)
 
     def _sel(mask, name):
         idx = np.flatnonzero(mask)
@@ -68,7 +93,7 @@ def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int =
     is_val = role == "val"
     ds_train, ds_cal, ds_val_all = _sel(role == "train", "train"), _sel(role == "cal", "cal"), _sel(is_val, "val")
     ds_val_blocks = [_sel(is_val & (block == i), f"val_blocks[{i}]") for i in range(len(plan.val_blocks))]
-    verify_leak_free(ts[role == "train"], [ts[is_val & (block == i)] for i in range(len(plan.val_blocks))], ts[role == "cal"], plan)
+    verify_rows(plan, ts, role, block, station)
     return ds_train, ds_cal, ds_val_all, ds_val_blocks, plan
 
 
@@ -124,7 +149,7 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
                             for_hf_trainer=True)
     ds_train, ds_cal, ds_val, ds_val_blocks, plan = make_splits(
         ds_all, ft["split"], shift_days, L=int(cfg["timesfm3"]["context_len"]), H=int(cfg["timesfm3"]["pred_len"]),
-        step_min=int(cfg["dataset"]["step_min"]))
+        step_min=int(cfg["dataset"]["step_min"]), station_col=str(cfg["dataset"]["station_id_col"]))
     # generated_by 放第一个键：同名的 split_manifest.json 也可能由 pipelines.time_splits 的 CLI 落，
     # 两份 manifest 的字段集合不同，读的人先看这一行就知道该按哪套字段解析。
     split_info = {"generated_by": "forecast_backbones.m6.train",
