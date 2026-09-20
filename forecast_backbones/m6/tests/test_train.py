@@ -94,6 +94,11 @@ def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monk
     assert log["history"][0]["epoch"] == 0.0 and len(log["history"]) >= 2 and "best" in log
     assert set(res) >= {"ladder", "routing", "history", "best"}
     assert res["ladder"]["variant"].tolist() == ladder["variant"].tolist() and res["routing"] == routing
+    man = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
+    assert man["plan"]["val_blocks"] == [["2025-06-12", "2025-06-14"]] and man["plan"]["cal"] == ["2025-06-16", "2025-06-17"]
+    assert man["counts"]["train"] > 0 and man["counts"]["val_blocks"] == [man["counts"]["val"]]
+    assert log["split"] == man and res["split"] == man
+    assert log["history"][0]["blocks"] and len(log["history"][0]["blocks"]) == 1
 
 
 def test_trained_artifacts_load_into_inference_model(tmp_path, tiny_evaluator, monkeypatch):
@@ -126,8 +131,7 @@ def test_train_m6_raises_clear_error_when_no_finite_score_ever_recorded(tmp_path
         with pytest.raises(ValueError) as exc:
             train_m6(cfg, str(parquet), max_steps=1)
     msg = str(exc.value)
-    assert cfg["finetune"]["split"]["val_start"] in msg and cfg["finetune"]["split"]["val_end"] in msg
-    assert "非有限" in msg
+    assert "2025-06-12" in msg and "2025-06-14" in msg and "非有限" in msg
     assert not (out / "lora_weights.pt").exists()
 
 

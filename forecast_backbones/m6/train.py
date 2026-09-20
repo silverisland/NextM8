@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # forecast_backbones/m6/train.py
 """M6 路线 B 训练入口（spec §5.2）：
-  1. finetune.split 切 train / cal / val（arrow 后端 filter_by_time；shift_days 整体后移做滚动折）
+  1. finetune.split 走 SplitPlan 切 train / cal / 多个验证块（块前后 purge/embargo 剔训练行；shift_days 整体后移做滚动折）
   2. HF Trainer：损失走模型 compute_loss（pinball 9 档 + 夜间/缺失掩码），LoRA + output_head 可训
-  3. NanwangEvalCallback：epoch 0 零样本基线，每 epoch cal→δ、val→校准→p*→南网短期，最优权重 + 耐心早停
+  3. NanwangEvalCallback：epoch 0 零样本基线，每 epoch 对每个验证块 cal→δ、块→校准→p*→南网短期，块均值作早停指标 + 最优权重
   4. 训后：加载最优 LoRA；零样本 vs LoRA 逐站比较（各自校准）→ station_routing.json
   5. 路由后的模型重拟合校准表 → calibration.parquet（与推理时一致）
-  6. 报表：reports/ladder_lora.csv（阶梯第 4 步）、reports/station_ladder.csv；状态：lora_weights.pt、train_log.json
+  6. 报表：reports/ladder_lora.csv（阶梯第 4 步）、reports/station_ladder.csv；状态：lora_weights.pt、train_log.json、split_manifest.json
 用 HF Trainer 而不是 pipelines.transformer_trainer.train_model：后者 import 的 transformer_utils 本仓库没有，
 语义（forward 返 loss、collate 出 batch_dict/labels）在这里逐条保持一致。
 
@@ -122,25 +122,30 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
     ds_all = UnifiedDataset(str(parquet_path), timestamp_cols=[cfg["dataset"]["ts_col"]], entity_cols=[],
                             label_cols=[cfg["dataset"]["label_col"]], timestamp_output="epoch_s", epoch_unit="s",
                             for_hf_trainer=True)
-    ds_train, ds_cal, ds_val = make_splits(ds_all, ft["split"], shift_days)
-    if min(len(ds_train), len(ds_cal), len(ds_val)) == 0:
-        raise ValueError(f"切分后有空段：train={len(ds_train)} cal={len(ds_cal)} val={len(ds_val)}")
+    ds_train, ds_cal, ds_val, ds_val_blocks, plan = make_splits(
+        ds_all, ft["split"], shift_days, L=int(cfg["timesfm3"]["context_len"]), H=int(cfg["timesfm3"]["pred_len"]),
+        step_min=int(cfg["dataset"]["step_min"]))
+    split_info = {"plan": plan.to_dict(), "shift_days": int(shift_days),
+                  "counts": {"train": len(ds_train), "cal": len(ds_cal), "val": len(ds_val),
+                             "val_blocks": [len(b) for b in ds_val_blocks]}}
+    (out / "split_manifest.json").write_text(json.dumps(split_info, indent=2, ensure_ascii=False), encoding="utf-8")
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
-    print(f"[m6-lora] train={len(ds_train)} cal={len(ds_cal)} val={len(ds_val)} rows; "
-          f"trainable={trainable_summary(model.backbone.model)}")
+    print(f"[m6-lora] train={len(ds_train)} cal={len(ds_cal)} val={len(ds_val)} rows in {len(ds_val_blocks)} blocks "
+          f"{plan.to_dict()['val_blocks']}; trainable={trainable_summary(model.backbone.model)}")
+    if plan.coverage_note:
+        print(f"[m6-lora] 提示：{plan.coverage_note}")
     best_path = out / "lora_weights.pt"
-    cb = NanwangEvalCallback(model, ds_cal, ds_val, collate, train_cfg, best_path=best_path,
+    cb = NanwangEvalCallback(model, ds_cal, ds_val_blocks, collate, train_cfg, best_path=best_path,
                              patience=int(ft["early_stop"]["patience"]), log_path=out / "train_log.json")
     trainer = Trainer(model=model, args=build_training_args(train_cfg, out, max_steps), data_collator=collate,
                       train_dataset=ds_train, callbacks=[cb])
     trainer.train()
     if cb.best_epoch is None or not best_path.exists():
-        vs, ve = ft["split"]["val_start"], ft["split"]["val_end"]
         raise ValueError(
-            f"训练全程未产出任何可用的最优 LoRA 权重：val 窗口 finetune.split=[{vs}, {ve}) 内南网短期打分"
-            f"（NanwangEvalCallback 每个 epoch 调一次 score_split）自始至终都是非有限值（没有一天能凑出"
-            f"完整可评分的一天），cb.best_epoch={cb.best_epoch!r}，{best_path} 不存在。请检查该 val 窗口"
-            f"的数据是否覆盖足够多的完整天。")
+            f"训练全程未产出任何可用的最优 LoRA 权重：验证块 {plan.to_dict()['val_blocks']} 上的南网短期打分"
+            f"（NanwangEvalCallback 每个 epoch 对每块各调一次 score_split，取块均值）自始至终都是非有限值"
+            f"（没有一块能凑出完整可评分的一天），cb.best_epoch={cb.best_epoch!r}，{best_path} 不存在。"
+            f"请检查各验证块是否覆盖足够多的完整天。")
     # 最优权重
     load_lora_state_dict(model.backbone.model, torch.load(best_path, map_location="cpu"))
     model.lora_loaded = True
@@ -168,11 +173,13 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
     station_tab = _station_table(zs_tab, lo_tab, routing)
     station_tab.to_csv(report_dir / "station_ladder.csv", index=False)
     log = json.loads((out / "train_log.json").read_text(encoding="utf-8"))
-    log.update({"final": ladder.to_dict("records"), "routing": {str(k): v for k, v in routing.items()}, "shift_days": int(shift_days)})
+    log.update({"final": ladder.to_dict("records"), "routing": {str(k): v for k, v in routing.items()},
+                "shift_days": int(shift_days), "split": split_info})
     (out / "train_log.json").write_text(json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8")
     print(ladder.to_string(index=False)); print(station_tab.to_string(index=False))
-    print(f"[m6-lora] 产物：{best_path} / {out / 'station_routing.json'} / {cfg['calibration']['table_path']} / {report_dir}")
-    return {"ladder": ladder, "routing": routing, "history": cb.history, "best": cb.best}
+    print(f"[m6-lora] 产物：{best_path} / {out / 'station_routing.json'} / {cfg['calibration']['table_path']} / "
+          f"{out / 'split_manifest.json'} / {report_dir}")
+    return {"ladder": ladder, "routing": routing, "history": cb.history, "best": cb.best, "split": split_info}
 
 
 if __name__ == "__main__":
