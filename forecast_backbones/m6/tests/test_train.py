@@ -12,6 +12,7 @@ from forecast_backbones.m6.transformer_models import TransformersAdaptedM6Model
 from forecast_backbones.m6.train import make_splits, build_training_args, train_m6
 from forecast_backbones.m6.routing import load_routing
 from pipelines.transformer_dataset import UnifiedDataset
+from pipelines.time_splits import SplitPlan, StationSplitPlan
 from .conftest import make_synthetic_frame, write_station_meta, CAP
 
 
@@ -196,3 +197,44 @@ def test_second_run_in_same_out_dir_starts_fresh(tmp_path, tiny_evaluator, monke
     assert rec["lora_loaded"] is False and rec["station_routing"] is None
     log2 = json.loads((out / "train_log.json").read_text())
     assert log2["history"][0]["epoch"] == 0.0
+
+
+def test_make_splits_by_station_test_start(tmp_path):
+    """站 1001 测试 06-28 容得下两个块；站 1002 测试 06-13（校准段起点 06-10）只容得下第一块，第二块只剩 1001 的行。"""
+    df = make_synthetic_frame(n_days=30, issue_every_min=60, seed=0, start="2025-06-01")        # 06-01 … 07-01
+    parquet = tmp_path / "d.parquet"; df.to_parquet(parquet, index=False)
+    ds_all = UnifiedDataset(str(parquet), timestamp_cols=["timestamp_win"], entity_cols=[],
+                            label_cols=["observe_power_future"], timestamp_output="epoch_s", epoch_unit="s",
+                            for_hf_trainer=True)
+    split = {"train_start": None, "val_blocks": [["2025-06-05", "2025-06-07"], ["2025-06-14", "2025-06-16"]],
+             "test_start": {1001: "2025-06-28", 1002: "2025-06-13"}, "test_end": None,
+             "cal_days": 1, "purge_days": 2, "embargo_days": 7}
+    ds_train, ds_cal, ds_val, blocks, plan = make_splits(ds_all, split)
+    assert isinstance(plan, StationSplitPlan) and plan.skipped_blocks == {"1001": [], "1002": [1]}
+    st = lambda ds: set(np.asarray(ds.column("station_id")).astype(int).tolist())
+    ts = lambda ds: pd.to_datetime(ds._ts_as_datetime64("timestamp_win"))
+    assert st(blocks[0]) == {1001, 1002} and st(blocks[1]) == {1001}
+    assert len(ds_val) == len(blocks[0]) + len(blocks[1])
+    tr = pd.DataFrame({"ts": ts(ds_train), "st": np.asarray(ds_train.column("station_id")).astype(int)})
+    assert tr[tr.st == 1002].ts.max() < pd.Timestamp("2025-06-03")                             # 块 0 前 purge
+    assert tr[tr.st == 1001].ts.max() < pd.Timestamp("2025-06-23")                             # cal_start 06-25 − purge
+    ca = pd.DataFrame({"ts": ts(ds_cal), "st": np.asarray(ds_cal.column("station_id")).astype(int)})
+    assert ca[ca.st == 1002].ts.min() >= pd.Timestamp("2025-06-10") and ca[ca.st == 1001].ts.min() >= pd.Timestamp("2025-06-25")
+    d = plan.to_dict()
+    assert d["by_station"] is True and d["test_start"] == {"1001": "2025-06-28", "1002": "2025-06-13"}
+    with pytest.raises(ValueError, match="没有 test_start"):                                    # 少给一个站
+        make_splits(ds_all, {**split, "test_start": {1001: "2025-06-28"}})
+
+
+def test_build_plan_from_test_parquets(tmp_path):
+    from forecast_backbones.m6.train import build_plan
+    for sid, day in ((1001, "2025-06-28 08:00"), (1002, "2025-06-13")):
+        pd.DataFrame({"timestamp_win": pd.date_range(day, periods=8, freq="15min"), "station_id": sid}
+                     ).to_parquet(tmp_path / f"test_{sid}.parquet", index=False)
+    split = {"train_start": None, "val_blocks": [["2025-06-05", "2025-06-07"]], "test_start": None, "test_end": None,
+             "cal_days": 1, "purge_days": 2, "embargo_days": 7, "test_parquets": [str(tmp_path / "test_*.parquet")]}
+    plan = build_plan(split)
+    assert isinstance(plan, StationSplitPlan) and plan.to_dict()["test_start"] == {"1001": "2025-06-28", "1002": "2025-06-13"}
+    with pytest.raises(ValueError, match="删掉其一"):
+        build_plan({**split, "test_start": "2025-06-28"})
+    assert isinstance(build_plan({**split, "test_parquets": None, "test_start": "2025-06-28"}), SplitPlan)

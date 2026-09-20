@@ -92,6 +92,17 @@ python -m forecast_backbones.m6.train --config forecast_backbones/m6/model_confi
 显式给的 `--L/--H/--step-min` 仍然胜出；这条路落的 manifest 是 `generated_by: pipelines.time_splits`）。
 默认日期是占位示例，训练前改成真实日期；`--shift-days N` 把全部边界整体后移 N 天做第二折。
 
+**按站不同的测试起点**（测试集已按站切好、各站测试时段不一样）：`test_start` 不再是一个日期，而是每站一个。
+CLI 直接从现有测试集文件推：
+`python -m pipelines.time_splits --parquet TRAIN.parquet --out-dir dataset/<name> --split-yaml split.yaml --test-parquets "data/test/*.parquet"`
+（每站 `test_start` = 该站在这些文件里最早起报时刻所在的整天；也可 `--test-start-by-station map.yaml` 给 `{station: 'YYYY-MM-DD'}`；
+此时 split.yaml 里的 `test_start` 不写或写 null，写了非空值会报错；站标识列缺省认 `station_id` / `station`，可用 `--station-col` 指定）。
+M6 配置里对应写 `finetune.split.test_start: {1001: "2025-06-28", 1002: "2025-06-13"}`，
+或 `test_start: null` + `test_parquets: ["data/test/*.parquet"]`。规则：验证块、purge/embargo、cal_days 全站共用；
+每站的校准段各自贴在自己的 `test_start − purge` 之前；某站 `test_start` 太早、容不下某个验证块时，该站跳过那个块（其他站照常），
+跳过情况记在 manifest 的 `plan.skipped_val_blocks` 与终端输出里；一个站一个块都容不下、或一个块没有任何站容得下、
+或训练数据里有站没给 `test_start`，都直接报错。`valid.parquet` 的 `split_block` 与 `train_log.json` 里的块序号一律是全局序号。
+
 产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
 `station_routing.json`（逐站 `lora|zeroshot`，输给零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
 `calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：

@@ -81,7 +81,8 @@ finetune:                              # 路线 B（计划 2）：LoRA 微调；
       - ["2025-01-10", "2025-01-31"]
       - ["2025-04-10", "2025-05-01"]
       - ["2025-07-16", "2025-08-06"]
-    test_start: "2025-10-01"           # 尾段测试起点（占位日期，须改成真实日期）
+    test_start: "2025-10-01"           # 尾段测试起点（占位日期，须改成真实日期）；各站不同时写 {station_id: 日期} 映射，
+                                       # 或改 null 并加 test_parquets: ["data/test/*.parquet"] 从现有测试集推（见 README）
     test_end: null                     # null = 数据末尾
     cal_days: 45                       # 校准段 = [test_start − purge − cal_days, test_start − purge)
     purge_days: 2                      # 块前剔除训练行天数，须 ≥ H=192 步折算（2 天）
