@@ -1,0 +1,118 @@
+import numpy as np
+import pandas as pd
+import pytest
+
+from pipelines.time_splits import SplitPlan, verify_leak_free, LEGACY_KEYS
+
+SPLIT = {"train_start": None,
+         "val_blocks": [["2025-03-10", "2025-03-24"], ["2025-07-16", "2025-07-30"]],
+         "test_start": "2025-10-01", "test_end": None,
+         "cal_days": 45, "purge_days": 2, "embargo_days": 7}
+
+
+def _grid(start="2025-01-01", end="2025-12-01"):
+    return pd.date_range(start, end, freq="15min", inclusive="left").to_numpy()
+
+
+def test_from_dict_builds_intervals_in_days():
+    p = SplitPlan.from_dict(SPLIT)
+    assert p.val_blocks == ((pd.Timestamp("2025-03-10"), pd.Timestamp("2025-03-24")),
+                            (pd.Timestamp("2025-07-16"), pd.Timestamp("2025-07-30")))
+    assert p.cal_interval == (pd.Timestamp("2025-08-15"), pd.Timestamp("2025-09-29"))   # test_start − 2d − 45d
+    ex = p.train_exclusions
+    assert ex[0] == (pd.Timestamp("2025-03-08"), pd.Timestamp("2025-04-02"))            # −purge, +purge+embargo
+    assert ex[1] == (pd.Timestamp("2025-07-14"), pd.Timestamp("2025-08-08"))
+    assert ex[2] == (pd.Timestamp("2025-08-13"), None)                                   # cal_start − purge → +inf
+    assert p.inputs_disjoint_after is True                                               # 9 days × 96 ≥ 864
+    assert p.coverage_note is None                                                       # Q1 and Q3
+    d = p.to_dict()
+    assert d["val_blocks"] == [["2025-03-10", "2025-03-24"], ["2025-07-16", "2025-07-30"]]
+    assert d["cal"] == ["2025-08-15", "2025-09-29"] and d["test_start"] == "2025-10-01" and d["test_end"] is None
+
+
+def test_assign_roles_and_counts_on_full_grid():
+    p = SplitPlan.from_dict(SPLIT)
+    ts = _grid()
+    role, block = p.assign(ts)
+    n = lambda r: int((role == r).sum())
+    assert n("val") == 28 * 96 and set(block[role == "val"]) == {0, 1}
+    assert int(((role == "val") & (block == 0)).sum()) == 14 * 96
+    assert n("cal") == 45 * 96
+    assert n("test") == 61 * 96                                                          # 10-01 … 12-01
+    # train = everything up to 08-13 minus the two exclusion windows (25 days each)
+    days_before_cal_purge = (pd.Timestamp("2025-08-13") - pd.Timestamp("2025-01-01")).days
+    assert n("train") == (days_before_cal_purge - 2 * 25) * 96
+    assert n("dropped") == len(ts) - n("train") - n("val") - n("cal") - n("test")
+    assert block[role != "val"].max() == -1
+    verify_leak_free(ts[role == "train"], [ts[(role == "val") & (block == i)] for i in range(2)], ts[role == "cal"], p)
+
+
+def test_train_start_and_shift_days_apply_to_everything():
+    p = SplitPlan.from_dict({**SPLIT, "train_start": "2025-02-01"}, shift_days=3)
+    assert p.train_start == pd.Timestamp("2025-02-04")
+    assert p.val_blocks[0] == (pd.Timestamp("2025-03-13"), pd.Timestamp("2025-03-27"))
+    assert p.test_start == pd.Timestamp("2025-10-04")
+    role, _ = p.assign(_grid())
+    assert (role[_grid() < np.datetime64("2025-02-04")] == "dropped").all()
+
+
+def test_nat_rows_are_dropped():
+    ts = _grid("2025-01-01", "2025-01-03").astype("datetime64[ns]")
+    ts[5] = np.datetime64("NaT")
+    role, _ = SplitPlan.from_dict(SPLIT).assign(ts)
+    assert role[5] == "dropped" and (role[[0, 1, 2]] == "train").all()
+
+
+@pytest.mark.parametrize("bad, msg", [
+    ({**SPLIT, "purge_days": 1}, "purge_days"),
+    ({**SPLIT, "val_blocks": [["2025-03-10", "2025-03-11"]]}, "不足 2 天"),
+    ({**SPLIT, "val_blocks": [["2025-03-10", "2025-03-24"], ["2025-03-20", "2025-04-01"]]}, "重叠"),
+    ({**SPLIT, "val_blocks": [["2025-03-10 06:00", "2025-03-24"]]}, "00:00"),
+    ({**SPLIT, "val_blocks": [["2025-09-10", "2025-09-24"]]}, "purge"),                  # 09-24 + 2d > cal_start 08-15
+    ({**SPLIT, "test_end": "2025-09-01"}, "test_end"),
+    ({**SPLIT, "val_blocks": []}, "val_blocks"),
+    ({**SPLIT, "cal_days": -1}, "cal_days"),
+])
+def test_from_dict_rejects_bad_plans(bad, msg):
+    with pytest.raises(ValueError, match=msg):
+        SplitPlan.from_dict(bad)
+
+
+def test_from_dict_rejects_legacy_keys():
+    legacy = {"train_end": "2025-05-31", "val_start": "2025-07-16", "val_end": "2025-08-31",
+              "test_start": "2025-09-01", "cal_days": 45}
+    with pytest.raises(ValueError) as e:
+        SplitPlan.from_dict(legacy)
+    assert "train_end" in str(e.value) and "val_blocks" in str(e.value)
+    assert set(LEGACY_KEYS) == {"train_end", "val_start", "val_end", "rolling_folds"}
+
+
+def test_no_cal_when_cal_days_zero():
+    p = SplitPlan.from_dict({**SPLIT, "cal_days": 0})
+    assert p.cal_interval is None
+    assert p.train_exclusions[-1] == (pd.Timestamp("2025-09-29"), None)                  # test_start − purge
+    role, _ = p.assign(_grid())
+    assert int((role == "cal").sum()) == 0
+    verify_leak_free(_grid()[role == "train"], [], None, p)
+
+
+def test_coverage_note_when_single_quarter():
+    p = SplitPlan.from_dict({**SPLIT, "val_blocks": [["2025-07-01", "2025-07-15"], ["2025-08-01", "2025-08-08"]]})
+    assert p.coverage_note is not None and "季度" in p.coverage_note
+
+
+def test_verify_leak_free_catches_target_overlap():
+    p = SplitPlan.from_dict(SPLIT)
+    ts = _grid()
+    role, block = p.assign(ts)
+    val0 = ts[(role == "val") & (block == 0)]
+    leaky_train = np.append(ts[role == "train"], val0[0] - np.timedelta64(24, "h"))       # 1 day before block: label overlaps
+    with pytest.raises(AssertionError, match="验证块 0"):
+        verify_leak_free(leaky_train, [val0, ts[(role == "val") & (block == 1)]], ts[role == "cal"], p)
+    leaky_after = np.append(ts[role == "train"], val0[-1] + np.timedelta64(24, "h"))      # 1 day after block: label overlaps
+    with pytest.raises(AssertionError, match="验证块 0"):
+        verify_leak_free(leaky_after, [val0, ts[(role == "val") & (block == 1)]], ts[role == "cal"], p)
+    cal = ts[role == "cal"]
+    leaky_cal = np.append(ts[role == "train"], cal[0] - np.timedelta64(24, "h"))
+    with pytest.raises(AssertionError, match="校准段"):
+        verify_leak_free(leaky_cal, [val0, ts[(role == "val") & (block == 1)]], cal, p)
