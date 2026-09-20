@@ -54,20 +54,26 @@ def score_split(model, ds_cal, ds_val, collate, cfg) -> tuple[float, pd.DataFram
 
 
 class NanwangEvalCallback(TrainerCallback):
-    def __init__(self, model, ds_cal, ds_val, collate, cfg, best_path, patience: int, log_path):
-        self.model, self.ds_cal, self.ds_val, self.collate, self.cfg = model, ds_cal, ds_val, collate, cfg
+    """ds_val_blocks：验证块数据集列表；每块各自 score_split，块均值（等权、跳过非有限）作早停指标，逐块分数记入 history。"""
+
+    def __init__(self, model, ds_cal, ds_val_blocks, collate, cfg, best_path, patience: int, log_path):
+        if not isinstance(ds_val_blocks, (list, tuple)) or len(ds_val_blocks) == 0:
+            raise ValueError("ds_val_blocks 须是非空列表（每个元素一个验证块数据集）")
+        self.model, self.ds_cal, self.ds_val_blocks, self.collate, self.cfg = model, ds_cal, list(ds_val_blocks), collate, cfg
         self.best_path, self.log_path, self.patience = Path(best_path), Path(log_path), int(patience)
         self.best, self.best_epoch, self.bad_epochs, self.history = -np.inf, None, 0, []
 
-    def _score(self) -> float:
-        score, _, _ = score_split(self.model, self.ds_cal, self.ds_val, self.collate, self.cfg)
-        return float(score)
+    def _score(self) -> tuple[float, list[float]]:
+        per = [float(score_split(self.model, self.ds_cal, ds, self.collate, self.cfg)[0]) for ds in self.ds_val_blocks]
+        finite = [s for s in per if np.isfinite(s)]
+        return (float(np.mean(finite)) if finite else float("nan")), per
 
     def _save_best(self):
         self.best_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(lora_state_dict(self.model.backbone.model), self.best_path)
 
-    def _record(self, epoch: float, score: float, control):
+    def _record(self, epoch: float, scored: tuple[float, list[float]], control):
+        score, per = scored
         if np.isfinite(score) and score > self.best:
             self.best, self.best_epoch, self.bad_epochs = score, float(epoch), 0
             self._save_best()
@@ -75,11 +81,13 @@ class NanwangEvalCallback(TrainerCallback):
             self.bad_epochs += 1
             if self.bad_epochs >= self.patience and control is not None:
                 control.should_training_stop = True
-        self.history.append({"epoch": float(epoch), "nanwang_after_pstar": score, "best": self.best, "bad_epochs": self.bad_epochs})
+        self.history.append({"epoch": float(epoch), "nanwang_after_pstar": score, "blocks": per,
+                             "best": self.best, "bad_epochs": self.bad_epochs})
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text(json.dumps({"history": self.history, "best": self.best, "best_epoch": self.best_epoch,
                                              "patience": self.patience}, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"[m6-lora] epoch {epoch:g}: nanwang_after_pstar={score:.4f} best={self.best:.4f}@{self.best_epoch} bad={self.bad_epochs}")
+        print(f"[m6-lora] epoch {epoch:g}: nanwang_after_pstar={score:.4f} blocks={[round(s, 4) for s in per]} "
+              f"best={self.best:.4f}@{self.best_epoch} bad={self.bad_epochs}")
 
     def on_train_begin(self, args, state, control, **kwargs):
         self._record(0.0, self._score(), None)          # 零样本基线：LoRA B=0，等价零样本；永远是初始最优

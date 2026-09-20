@@ -46,10 +46,12 @@ def test_score_split_rejects_model_with_calibrator(tmp_path, tiny_evaluator):
         score_split(m, ds_cal, ds_val, collate, m.cfg)
 
 
-def _cb(tmp_path, m, patience, scores, monkeypatch):
+def _cb(tmp_path, m, patience, scores, monkeypatch, n_blocks=1):
+    """scores：每次 _score 调用依次消费 n_blocks 个分数。"""
     it = iter(scores)
     monkeypatch.setattr(nc, "score_split", lambda *a, **k: (next(it), None, None))
-    return NanwangEvalCallback(m, None, None, None, m.cfg, best_path=tmp_path / "best.pt", patience=patience, log_path=tmp_path / "log.json")
+    return NanwangEvalCallback(m, None, [None] * n_blocks, None, m.cfg, best_path=tmp_path / "best.pt", patience=patience,
+                               log_path=tmp_path / "log.json")
 
 
 def test_callback_keeps_best_and_stops_on_patience(tmp_path, tiny_evaluator, monkeypatch):
@@ -86,3 +88,34 @@ def test_callback_equal_score_does_not_replace_best(tmp_path, tiny_evaluator, mo
     args = TrainingArguments(output_dir=str(tmp_path / "hf"), report_to=[]); state = TrainerState(); control = TrainerControl()
     cb.on_train_begin(args, state, control); state.epoch = 1.0; cb.on_epoch_end(args, state, control)
     assert cb.best_epoch == 0.0 and control.should_training_stop is True
+
+
+def test_score_is_mean_over_blocks_and_skips_non_finite(tmp_path, tiny_evaluator, monkeypatch):
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    cb = _cb(tmp_path, m, patience=2, scores=[80.0, 90.0, float("nan"), 70.0, float("nan"), float("nan")],
+             monkeypatch=monkeypatch, n_blocks=2)
+    assert cb._score() == (85.0, [80.0, 90.0])
+    mean, per = cb._score()
+    assert mean == 70.0 and np.isnan(per[0]) and per[1] == 70.0
+    mean, per = cb._score()
+    assert np.isnan(mean) and len(per) == 2
+
+
+def test_history_records_per_block_scores(tmp_path, tiny_evaluator, monkeypatch):
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    cb = _cb(tmp_path, m, patience=2, scores=[80.0, 90.0, 82.0, 92.0], monkeypatch=monkeypatch, n_blocks=2)
+    args = TrainingArguments(output_dir=str(tmp_path / "hf"), report_to=[]); state = TrainerState(); control = TrainerControl()
+    cb.on_train_begin(args, state, control); state.epoch = 1.0; cb.on_epoch_end(args, state, control)
+    assert cb.history[0]["blocks"] == [80.0, 90.0] and cb.history[0]["nanwang_after_pstar"] == 85.0
+    assert cb.history[1]["blocks"] == [82.0, 92.0] and cb.best == 87.0 and cb.best_epoch == 1.0
+    log = json.loads((tmp_path / "log.json").read_text())
+    assert log["history"][1]["blocks"] == [82.0, 92.0]
+
+
+def test_callback_rejects_empty_block_list(tmp_path, tiny_evaluator):
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    with pytest.raises(ValueError, match="ds_val_blocks"):
+        NanwangEvalCallback(m, None, [], None, m.cfg, best_path=tmp_path / "b.pt", patience=1, log_path=tmp_path / "l.json")
