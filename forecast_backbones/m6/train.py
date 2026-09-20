@@ -24,6 +24,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from transformers import Trainer, TrainingArguments
@@ -43,23 +44,32 @@ except ImportError:
     from lora import load_lora_state_dict, set_lora_enabled, trainable_summary
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
+    from ...pipelines.time_splits import SplitPlan, verify_leak_free
 except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
+    from pipelines.time_splits import SplitPlan, verify_leak_free
 
 
-def make_splits(ds_all, split: dict, shift_days: int = 0):
-    sh = pd.Timedelta(days=int(shift_days))
-    train_end = pd.Timestamp(split["train_end"]) + sh
-    cal_end = train_end + pd.Timedelta(days=int(split["cal_days"]))
-    val_start = pd.Timestamp(split["val_start"]) + sh
-    val_end = pd.Timestamp(split["val_end"]) + sh
-    train_start = (pd.Timestamp(split["train_start"]) + sh) if split.get("train_start") else None
-    if val_start < cal_end:
-        raise ValueError(f"val_start={val_start.date()} 早于 cal 段结束 {cal_end.date()}：校准段与验证段重叠会造成时间泄漏")
-    if not (train_end < val_start and val_start < val_end):
-        raise ValueError(f"切分顺序非法：train_end={train_end.date()} val_start={val_start.date()} val_end={val_end.date()}")
-    f = lambda a, b: ds_all.filter_by_time(None if a is None else str(a), str(b))
-    return f(train_start, train_end), f(train_end, cal_end), f(val_start, val_end)
+def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15):
+    """按 SplitPlan 在起报时间轴上切 train / cal / val（全部验证块合并）/ val_blocks（逐块列表）。
+    train 行已剔除每个验证块前 purge、后 purge+embargo，以及校准段前 purge 之后的一切；返回末项为 plan。"""
+    plan = SplitPlan.from_dict(split, shift_days=shift_days, L=L, H=H, step_min=step_min)
+    if plan.cal_interval is None:
+        raise ValueError("M6 训练需要校准段：finetune.split.cal_days 须 ≥ 1")
+    ts = ds_all._ts_as_datetime64(ds_all.timestamp_cols[0])
+    role, block = plan.assign(ts)
+
+    def _sel(mask, name):
+        idx = np.flatnonzero(mask)
+        if idx.size == 0:
+            raise ValueError(f"切分后 {name} 段为空（plan={plan.to_dict()}）")
+        return ds_all.select(idx)
+
+    is_val = role == "val"
+    ds_train, ds_cal, ds_val_all = _sel(role == "train", "train"), _sel(role == "cal", "cal"), _sel(is_val, "val")
+    ds_val_blocks = [_sel(is_val & (block == i), f"val_blocks[{i}]") for i in range(len(plan.val_blocks))]
+    verify_leak_free(ts[role == "train"], [ts[is_val & (block == i)] for i in range(len(plan.val_blocks))], ts[role == "cal"], plan)
+    return ds_train, ds_cal, ds_val_all, ds_val_blocks, plan
 
 
 def build_training_args(cfg: dict, out_dir, max_steps=None) -> TrainingArguments:
