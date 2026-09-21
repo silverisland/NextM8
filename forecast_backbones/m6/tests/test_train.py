@@ -222,8 +222,10 @@ def test_make_splits_by_station_test_start(tmp_path):
     assert ca[ca.st == 1002].ts.min() >= pd.Timestamp("2025-06-10") and ca[ca.st == 1001].ts.min() >= pd.Timestamp("2025-06-25")
     d = plan.to_dict()
     assert d["by_station"] is True and d["test_start"] == {"1001": "2025-06-28", "1002": "2025-06-13"}
-    with pytest.raises(ValueError, match="没有 test_start"):                                    # 少给一个站
-        make_splits(ds_all, {**split, "test_start": {1001: "2025-06-28"}})
+    _, _, _, _, plan2 = make_splits(ds_all, {**split, "test_start": {1001: "2025-06-28"}})     # 少给 1002：视为没有测试集
+    assert plan2.no_test == {"1002"} and set(plan2.plans) == {"1001", "1002"}
+    last = pd.Timestamp(df.loc[df.station_id == 1002, "timestamp_win"].max()).normalize()
+    assert plan2.to_dict()["test_start"]["1002"] == (last + pd.Timedelta(days=3)).strftime("%Y-%m-%d")
 
 
 def test_build_plan_from_test_parquets(tmp_path):

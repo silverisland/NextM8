@@ -12,6 +12,8 @@
 #   以后只传 --split-yaml data/splits/m1_m4_v1/split_resolved.yaml（不带 --test-parquets）即可复现同一切分。
 #
 # 每站的测试起点由 --test-parquets 从现有测试集推出（该站测试集里最早一天），这里不写 test_start。
+# 两边站对不上时不报错：只在测试集里的站切分时忽略；只在训练数据里的站视为没有测试集，
+# 数据一直用到它的最后一天，照常参加训练和验证（想让它全进训练，把它写进下面的 train_only_stations）。
 # 日期一律写成 "YYYY-MM-DD"，表示当天 00:00。
 
 # 训练数据最早从哪天开始用；null = 用全部历史

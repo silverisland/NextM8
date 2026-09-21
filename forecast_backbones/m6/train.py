@@ -47,26 +47,36 @@ except ImportError:
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
     from ...pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
-                                          load_test_starts, station_keys)
+                                          load_test_starts, station_keys, reconcile_test_starts)
 except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
     from pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
-                                       load_test_starts, station_keys)
+                                       load_test_starts, station_keys, reconcile_test_starts)
 
 
-def build_plan(split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15):
+def build_plan(split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15,
+               ts=None, station=None):
     """split.test_start 是日期 → SplitPlan；是 {station: 日期} 映射，或 split.test_parquets 给了测试集文件
-    （每站 test_start = 该站在测试集里最早起报时刻的整天）→ StationSplitPlan。两者都给则报错。"""
+    （每站 test_start = 该站在测试集里最早起报时刻的整天）→ StationSplitPlan。两者都给则报错。
+    给了 ts/station 时按数据对齐：只在测试里的站忽略，没有测试集的站数据用到末尾（reconcile_test_starts）。"""
     t0, files = split.get("test_start"), split.get("test_parquets")
     if files:
         if t0 is not None:
             raise ValueError("finetune.split 同时给了 test_start 与 test_parquets：删掉其一")
         starts = load_test_starts(list(files) if isinstance(files, (list, tuple)) else [files],
                                   ts_col=split.get("ts_col", "timestamp_win"), station_col=split.get("station_col"))
-        return StationSplitPlan.from_dict(split, starts, shift_days=shift_days, L=L, H=H, step_min=step_min)
-    if isinstance(t0, dict):
-        return StationSplitPlan.from_dict(split, t0, shift_days=shift_days, L=L, H=H, step_min=step_min)
-    return SplitPlan.from_dict(split, shift_days=shift_days, L=L, H=H, step_min=step_min)
+    elif isinstance(t0, dict):
+        starts = t0
+    else:
+        return SplitPlan.from_dict(split, shift_days=shift_days, L=L, H=H, step_min=step_min)
+    if ts is not None and station is not None:
+        starts, test_only, no_test = reconcile_test_starts(ts, station, starts, int(split.get("purge_days", 2)))
+        for s in test_only:
+            print(f"[m6] 站 {s} 只在测试集里、训练数据里没有：切分时忽略")
+        for s in no_test:
+            print(f"[m6] 站 {s} 没有测试集：数据一直用到它的最后一天")
+        split = {**split, "stations_without_test": sorted(set(split.get("stations_without_test") or []) | set(no_test))}
+    return StationSplitPlan.from_dict(split, starts, shift_days=shift_days, L=L, H=H, step_min=step_min)
 
 
 def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15,
@@ -74,16 +84,16 @@ def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int =
     """按 SplitPlan / StationSplitPlan 在起报时间轴上切 train / cal / val（全部验证块合并）/ val_blocks（逐块列表）。
     train 行已剔除每个验证块前 purge、后 purge+embargo，以及校准段前 purge 之后的一切；返回末项为 plan。
     按站切分时某站容不下的验证块该站不出行，其他站照常；块序号是全局的。"""
-    plan = build_plan(split, shift_days=shift_days, L=L, H=H, step_min=step_min)
-    if not has_cal(plan):
-        raise ValueError("M6 训练需要校准段：finetune.split.cal_days 须 ≥ 1")
     ts = ds_all._ts_as_datetime64(ds_all.timestamp_cols[0])
     station = None
-    if isinstance(plan, StationSplitPlan):
+    if split.get("test_parquets") or isinstance(split.get("test_start"), dict):
         known = set(ds_all.timestamp_cols) | set(ds_all.entity_cols) | set(ds_all.feature_cols) | set(ds_all.label_cols)
         if station_col not in known:
             raise ValueError(f"按站切分需要站标识列 {station_col!r}，数据里没有（列：{sorted(known)[:12]}…）")
         station = station_keys(ds_all.column(station_col))
+    plan = build_plan(split, shift_days=shift_days, L=L, H=H, step_min=step_min, ts=ts, station=station)
+    if not has_cal(plan):
+        raise ValueError("M6 训练需要校准段：finetune.split.cal_days 须 ≥ 1")
     role, block = assign_rows(plan, ts, station)
 
     def _sel(mask, name):
