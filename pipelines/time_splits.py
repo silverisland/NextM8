@@ -50,7 +50,7 @@ def _reject_auto(split: dict) -> None:
 
 
 # 只进训练的站：不参加验证、没有校准段、不参与自动放块；数据除测试起点前 purge 天与测试段外全部是训练行
-PER_STATION_KEYS = ("train_only_stations", "min_station_days_for_val")
+PER_STATION_KEYS = ("train_only_stations", "min_station_days_for_val", "stations_without_test")
 
 
 @dataclass(frozen=True)
@@ -73,8 +73,8 @@ class SplitPlan:
         """allow_empty_blocks 只给 StationSplitPlan 用：某站一个块都容不下且 allow_stations_without_val 为真时，
         该站的 plan 没有验证块（只剩训练/测试的划分）。"""
         _reject_auto(split)
-        if split.get("train_only_stations"):
-            raise ValueError("train_only_stations 需要按站切分：请按站给 test_start（--test-parquets / --test-start-by-station / "
+        if split.get("train_only_stations") or split.get("stations_without_test"):
+            raise ValueError("train_only_stations 需要按站切分（stations_without_test 同理）：请按站给 test_start（--test-parquets / --test-start-by-station / "
                              "test_start 写 {站: 日期}），或用 pipelines.time_splits 命令行（会自动转成按站切分）")
         legacy = [k for k in LEGACY_KEYS if k in split]
         if legacy:
@@ -254,6 +254,7 @@ class StationSplitPlan:
     block_index: dict                         # station -> (全局序号, ...)，与该站 plan.val_blocks 逐项对应
     skipped_blocks: dict                      # station -> [跳过的全局序号]
     train_only: frozenset = frozenset()       # 只进训练的站（split.train_only_stations）
+    no_test: frozenset = frozenset()          # 没有测试集的站（split.stations_without_test）：test_start 是占位值
 
     @classmethod
     def from_dict(cls, split: dict, test_starts: dict, shift_days: int = 0, L: int = 672, H: int = 192,
@@ -267,6 +268,10 @@ class StationSplitPlan:
         unknown = sorted(train_only - set(starts))
         if unknown:
             raise ValueError(f"train_only_stations 里这些站没有 test_start：{unknown}（名字写错了，或测试集里没有这个站）")
+        no_test = frozenset(_station_key(x) for x in (split.get("stations_without_test") or []))
+        unknown = sorted(no_test - set(starts))
+        if unknown:
+            raise ValueError(f"stations_without_test 里这些站没有占位 test_start：{unknown}（请用 reconcile_test_starts 生成）")
         eligible = {s: t for s, t in starts.items() if s not in train_only}
         if not eligible:
             raise ValueError("所有站都被列为只进训练（train_only_stations / min_station_days_for_val），没有站可以做验证")
@@ -297,7 +302,7 @@ class StationSplitPlan:
                                             allow_empty_blocks=True)
             index[st] = tuple(keep)
             skipped[st] = [i for i in range(len(raw_blocks)) if i not in keep]
-        return cls(ref, plans, index, skipped, train_only)
+        return cls(ref, plans, index, skipped, train_only, no_test)
 
     @property
     def val_blocks(self) -> tuple:
@@ -354,6 +359,7 @@ class StationSplitPlan:
         d["val_blocks_by_station"] = {s: list(self.block_index[s]) for s in self.plans}
         d["skipped_val_blocks"] = {s: v for s, v in self.skipped_blocks.items() if v}
         d["train_only_stations"] = sorted(self.train_only)
+        d["stations_without_test"] = sorted(self.no_test)
         return d
 
 
@@ -462,6 +468,24 @@ def resolve_auto_blocks(ts: np.ndarray, station: np.ndarray, test_starts: dict, 
     return [[a.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d")] for a, e in blocks], notes
 
 
+def reconcile_test_starts(ts: np.ndarray, station: np.ndarray, test_starts: dict, purge_days: int) -> tuple[dict, list, list]:
+    """把按站的 test_start 与训练数据里实际出现的站对齐。返回 (starts, test_only, no_test)：
+    test_only = 只在测试集里、训练数据里没有的站 → 从 starts 去掉（它们没有任何训练行，切分用不上）；
+    no_test = 只在训练数据里、没有测试集的站 → 给占位 test_start = 该站最后一天 + 1 天 + purge_days，
+    这样它没有测试行、末尾也不剔除任何行（test_start − purge 正好是最后一天的次日），可用数据一直到末尾。"""
+    t = np.asarray(ts).astype("datetime64[ns]")
+    st = station_keys(station)
+    starts = {_station_key(k): v for k, v in test_starts.items()}
+    present = sorted(set(st[~np.isnat(t)].tolist()))
+    test_only = sorted(set(starts) - set(present))
+    no_test = sorted(set(present) - set(starts))
+    out = {s: starts[s] for s in present if s in starts}
+    for s in no_test:
+        last = pd.Timestamp(t[(st == s) & ~np.isnat(t)].max()).normalize()
+        out[s] = (last + pd.Timedelta(days=1 + int(purge_days))).strftime("%Y-%m-%d")
+    return out, test_only, no_test
+
+
 def days_before_test(ts: np.ndarray, station: np.ndarray, test_starts: dict) -> dict:
     """每站在自己测试起点之前有数据的天数（有行的日期数，数据中间有缺口时不按日历跨度算）。"""
     t = np.asarray(ts).astype("datetime64[ns]")
@@ -489,7 +513,8 @@ def station_report(ts: np.ndarray, station: np.ndarray, role: np.ndarray, block:
         pre = int((r != "test").sum())
         rows.append({"station": s, "data_start": str(d[ok].min()) if ok.any() else None,
                      "data_end": str(d[ok].max()) if ok.any() else None,
-                     "test_start": pd.Timestamp(t0).strftime("%Y-%m-%d"),
+                     "test_start": ("无测试集" if isinstance(plan, StationSplitPlan) and s in plan.no_test
+                                    else pd.Timestamp(t0).strftime("%Y-%m-%d")),
                      "val_blocks": sorted(int(x) for x in set(bk[r == "val"].tolist())),
                      "skipped_blocks": list(plan.skipped_blocks.get(s, [])) if isinstance(plan, StationSplitPlan) else [],
                      "train_only": bool(isinstance(plan, StationSplitPlan) and s in plan.train_only),
@@ -554,7 +579,7 @@ def _ts_array(col: pd.Series) -> np.ndarray:
 
 
 def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
-                 source=None, shift_days: int = 0, station_col=None, write: bool = True) -> dict:
+                 source=None, shift_days: int = 0, station_col=None, write: bool = True, extra: dict | None = None) -> dict:
     """按 plan（SplitPlan 或 StationSplitPlan）把原始行表落成 train/valid[/cal]/test.parquet（按时间稳定排序）
     + split_manifest.json。返回 manifest（含逐站覆盖 station_report）。按站切分时站标识列取 station_col，
     缺省自动认 station_id / station。write=False 只算不落盘（--dry-run）。
@@ -616,7 +641,7 @@ def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
                 "plan": plan.to_dict(), "counts": counts,
                 "blocks": blocks, "stations": stations, "n_nat": int(np.isnat(ts).sum()),
                 "inputs_disjoint_after": ref.inputs_disjoint_after, "coverage_note": ref.coverage_note,
-                "station_report": [] if report is None else report.to_dict("records")}
+                "station_report": [] if report is None else report.to_dict("records"), **(extra or {})}
     if write:
         (out / "split_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest
@@ -726,9 +751,13 @@ def _resolved_yaml(plan, source_yaml, n_files: int, shift_days: int) -> str:
         out["allow_stations_without_val"] = True
     if isinstance(plan, StationSplitPlan) and plan.train_only:
         out["train_only_stations"] = sorted(plan.train_only)
+    if isinstance(plan, StationSplitPlan) and plan.no_test:
+        out["stations_without_test"] = sorted(plan.no_test)
     head = (f"# 由 pipelines.time_splits 生成：源配置 {source_yaml}，数据 {n_files} 个文件"
             + (f"，已含 --shift-days {shift_days}" if shift_days else "") + "。\n"
-            "# val_blocks / test_start 是这次实际用到的固定日期；原样 --split-yaml 本文件（不带 --test-parquets）即可复现同一切分。\n")
+            "# val_blocks / test_start 是这次实际用到的固定日期；原样 --split-yaml 本文件（不带 --test-parquets）即可复现同一切分。\n"
+            + ("# stations_without_test 里的站没有测试集，它们的 test_start 是占位值（最后一天 + 1 + purge_days），不产生测试行、不剔除末尾数据。\n"
+               if isinstance(plan, StationSplitPlan) and plan.no_test else ""))
     return head + yaml.safe_dump(out, allow_unicode=True, sort_keys=False)
 
 
@@ -779,6 +808,15 @@ def main(argv=None) -> dict:
     if starts is not None and station is None:
         raise ValueError("按站给了 test_start，但数据里没有站标识列（station_id / station），请用 --station-col 指定")
 
+    test_only: list = []
+    if starts is not None:
+        starts, test_only, no_test = reconcile_test_starts(ts, station, starts, int(split["purge_days"]))
+        for s in test_only:
+            print(f"[time_splits] 站 {s} 只在测试集里、训练数据里没有：切分时忽略（它在测试里是模型没见过的站）")
+        for s in no_test:
+            print(f"[time_splits] 站 {s} 没有测试集：不留测试段，数据一直用到它的最后一天，照常参加训练/验证")
+        split = {**split, "stations_without_test": sorted(set(split.get("stations_without_test") or []) | set(no_test))}
+
     explicit = [_station_key(x) for x in (split.get("train_only_stations") or [])]
     min_days = int(split.get("min_station_days_for_val") or 0)
     if min_days < 0:
@@ -827,7 +865,7 @@ def main(argv=None) -> dict:
     else:
         plan = SplitPlan.from_dict(split, shift_days=a.shift_days, L=L, H=H, step_min=step_min)
     man = write_splits(df, plan, a.out_dir, ts_col=a.ts_col, source=paths, shift_days=a.shift_days,
-                       station_col=a.station_col, write=not a.dry_run)
+                       station_col=a.station_col, write=not a.dry_run, extra={"ignored_test_only_stations": test_only})
     c = man["counts"]
     print(f"[time_splits] train={c['train']} val={c['val']} cal={c.get('cal', 0)} test={c['test']} dropped={c['dropped']} "
           f"n_nat={man['n_nat']}" + (" （dry-run，未写文件）" if a.dry_run else f" → {a.out_dir}"))

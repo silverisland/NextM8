@@ -134,6 +134,11 @@ M6 的 `finetune.split` 不解析 `auto`，要用就抄 `split_resolved.yaml` �
 它们落在验证块日期里的行也是训练行。逐站覆盖表的"只进训练"列标出这些站；`split_resolved.yaml` 把最终名单写成 `train_only_stations`（去掉阈值），
 原样重跑结果不变。阈值需要数据，M6 的 `finetune.split` 只认 `train_only_stations` 名单（且须按站给 `test_start`）。
 
+**训练与测试的站对不上**：只在测试集里、训练数据里没有的站，切分时忽略（manifest 的 `ignored_test_only_stations` 记下名单）；
+只在训练数据里、没有测试集的站，给占位 `test_start` = 该站最后一天 + 1 + `purge_days`，于是它没有测试行、末尾不剔除任何行，
+照常参加训练和验证（写进 `train_only_stations` 则全进训练）。这些站列在 `stations_without_test`，覆盖表的测试起点列显示"无测试集"，
+`split_resolved.yaml` 连同占位日期一起写下，原样重跑不变。M6 `make_splits` 同样处理。
+
 产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
 `station_routing.json`（逐站 `lora|zeroshot`，输给零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
 `calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：

@@ -362,10 +362,11 @@ def test_cli_by_station_from_mapping_file_and_missing_station(tmp_path):
     man = main(["--parquet", str(raw), "--out-dir", str(tmp_path / "ds"), "--split-yaml", str(tmp_path / "s.yaml"),
                 "--test-start-by-station", str(tmp_path / "m.json")])
     assert man["plan"]["skipped_val_blocks"] == {"B": [1]}
-    (tmp_path / "m2.yaml").write_text(yaml.safe_dump({"A": "2025-10-01"}), encoding="utf-8")   # 少了 B
-    with pytest.raises(ValueError, match="没有 test_start"):
-        main(["--parquet", str(raw), "--out-dir", str(tmp_path / "e"), "--split-yaml", str(tmp_path / "s.yaml"),
-              "--test-start-by-station", str(tmp_path / "m2.yaml")])
+    (tmp_path / "m2.yaml").write_text(yaml.safe_dump({"A": "2025-10-01"}), encoding="utf-8")   # 少了 B：B 视为没有测试集
+    man = main(["--parquet", str(raw), "--out-dir", str(tmp_path / "e"), "--split-yaml", str(tmp_path / "s.yaml"),
+                "--test-start-by-station", str(tmp_path / "m2.yaml")])
+    assert man["plan"]["stations_without_test"] == ["B"]
+    assert set(pd.read_parquet(tmp_path / "e" / "test.parquet")["station"]) == {"A"}
     with pytest.raises(ValueError, match="缺少切分键"):                                        # 不按站时 test_start 仍必填
         main(["--parquet", str(raw), "--out-dir", str(tmp_path / "e"), "--split-yaml", str(tmp_path / "s.yaml")])
 
@@ -563,3 +564,45 @@ def test_single_test_start_with_threshold_switches_to_by_station(tmp_path):
     rep = {r["station"]: r for r in man["station_report"]}
     assert rep["S"]["train_only"] and rep["S"]["train_days"] == 28 and rep["S"]["test_days"] == 61
     assert rep["A"]["val_days"] == 28 and not rep["A"]["train_only"]
+
+
+def test_unmatched_stations_are_ignored_or_kept_to_their_end(tmp_path, capsys):
+    """E 有训练数据、没有测试文件 → 不留测试段、数据用到最后一天、照常参加验证；
+    T 只有测试文件（测试起点早到一个验证块都容不下）→ 切分时忽略，不报错。"""
+    spans = {**SPANS, "E": ("2024-09-01", "2025-12-01")}
+    _write_station_files(tmp_path, spans)
+    (tmp_path / "test" / "E.parquet").unlink()
+    pd.DataFrame({"timestamp_win": pd.date_range("2024-07-01", periods=48, freq="60min"), "station": "T"}
+                 ).to_parquet(tmp_path / "test" / "T.parquet", index=False)
+    run = lambda split, out, *extra: (
+        (tmp_path / "s.yaml").write_text(yaml.safe_dump(split), encoding="utf-8"),
+        main(["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "s.yaml"),
+              "--out-dir", str(tmp_path / out), *extra]))[1]
+    man = run(AUTO, "ds", "--test-parquets", str(tmp_path / "test" / "*.parquet"))
+    printed = capsys.readouterr().out
+    assert "站 T 只在测试集里" in printed and "站 E 没有测试集" in printed
+    assert man["ignored_test_only_stations"] == ["T"] and man["plan"]["stations_without_test"] == ["E"]
+    assert man["plan"]["test_start"]["E"] == "2025-12-03"                                  # 最后一天 11-30 + 1 + purge 2
+    rep = {r["station"]: r for r in man["station_report"]}
+    assert "T" not in rep and rep["E"]["test_start"] == "无测试集"
+    assert rep["E"]["val_days"] > 0 and rep["E"]["test_days"] == 0
+    last = pd.Timestamp("2025-11-30 23:00")
+    tr = pd.concat([pd.read_parquet(tmp_path / "ds" / f) for f in ("train.parquet", "valid.parquet")])
+    assert tr.loc[tr.station == "E", "timestamp_win"].max() == last                       # 末尾一行都没剔
+
+    resolved = (tmp_path / "ds" / "split_resolved.yaml").read_text(encoding="utf-8")
+    assert "stations_without_test" in resolved and "占位值" in resolved
+    (tmp_path / "r.yaml").write_text(resolved, encoding="utf-8")
+    again = main(["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "r.yaml"),
+                  "--out-dir", str(tmp_path / "ds2")])                                     # 原样复现
+    assert again["plan"] == man["plan"] and again["counts"] == man["counts"]
+    for f in ("train.parquet", "valid.parquet", "test.parquet"):
+        assert pd.read_parquet(tmp_path / "ds" / f).equals(pd.read_parquet(tmp_path / "ds2" / f)), f
+
+    man = run({**AUTO, "train_only_stations": ["E"]}, "only", "--test-parquets", str(tmp_path / "test" / "*.parquet"))
+    rep = {r["station"]: r for r in man["station_report"]}
+    assert rep["E"]["train_only"] and rep["E"]["val_days"] == 0 and rep["E"]["dropped_days"] == 0
+    with pytest.raises(ValueError, match="需要按站切分"):
+        SplitPlan.from_dict({**SPLIT, "stations_without_test": ["A"]})
+    with pytest.raises(ValueError, match="没有占位 test_start"):
+        StationSplitPlan.from_dict({**FIXED, "stations_without_test": ["Q"]}, {"A": "2025-10-01"})
