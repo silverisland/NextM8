@@ -80,10 +80,11 @@ def build_plan(split: dict, shift_days: int = 0, L: int = 672, H: int = 192, ste
 
 
 def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15,
-                station_col: str = "station_id"):
+                station_col: str = "station_id", need_cal: bool = True):
     """按 SplitPlan / StationSplitPlan 在起报时间轴上切 train / cal / val（全部验证块合并）/ val_blocks（逐块列表）。
     train 行已剔除每个验证块前 purge、后 purge+embargo，以及校准段前 purge 之后的一切；返回末项为 plan。
-    按站切分时某站容不下的验证块该站不出行，其他站照常；块序号是全局的。"""
+    按站切分时某站容不下的验证块该站不出行，其他站照常；块序号是全局的。
+    need_cal=False（calibration.enabled=false，不做 conformal）：不要求校准段，返回的 cal 为 None。"""
     ts = ds_all._ts_as_datetime64(ds_all.timestamp_cols[0])
     station = None
     if split.get("test_parquets") or isinstance(split.get("test_start"), dict):
@@ -92,8 +93,10 @@ def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int =
             raise ValueError(f"按站切分需要站标识列 {station_col!r}，数据里没有（列：{sorted(known)[:12]}…）")
         station = station_keys(ds_all.column(station_col))
     plan = build_plan(split, shift_days=shift_days, L=L, H=H, step_min=step_min, ts=ts, station=station)
-    if not has_cal(plan):
-        raise ValueError("M6 训练需要校准段：finetune.split.cal_days 须 ≥ 1")
+    if need_cal and not has_cal(plan):
+        raise ValueError("M6 训练需要校准段：finetune.split.cal_days 须 ≥ 1（不做 conformal 时写 calibration.enabled: false）")
+    if not need_cal and has_cal(plan):
+        print("[m6] calibration.enabled=false：切分里的校准段不使用，这些行也不进训练；想让它们进训练请把 cal_days 改成 0")
     role, block = assign_rows(plan, ts, station)
 
     def _sel(mask, name):
@@ -103,7 +106,8 @@ def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int =
         return ds_all.select(idx)
 
     is_val = role == "val"
-    ds_train, ds_cal, ds_val_all = _sel(role == "train", "train"), _sel(role == "cal", "cal"), _sel(is_val, "val")
+    ds_train, ds_val_all = _sel(role == "train", "train"), _sel(is_val, "val")
+    ds_cal = _sel(role == "cal", "cal") if need_cal else None
     ds_val_blocks = [_sel(is_val & (block == i), f"val_blocks[{i}]") for i in range(len(plan.val_blocks))]
     verify_rows(plan, ts, role, block, station)
     return ds_train, ds_cal, ds_val_all, ds_val_blocks, plan
@@ -143,22 +147,26 @@ def _dataset_with_station_id(paths, cfg: dict, station_meta, scratch_dir) -> Uni
                           for_hf_trainer=True)
 
 
-def _check_presplit_dir(splits_dir) -> Path:
+def _check_presplit_dir(splits_dir, need_cal: bool = True) -> Path:
     d = Path(splits_dir)
-    need = ["train.parquet", "valid.parquet", "cal.parquet", "split_manifest.json"]
+    need = ["train.parquet", "valid.parquet", "split_manifest.json"] + (["cal.parquet"] if need_cal else [])
     missing = [f for f in need if not (d / f).exists()]
     if missing:
-        raise FileNotFoundError(f"{d} 缺 {missing}：M6 训练需要校准段，用 pipelines.time_splits 切分时 cal_days 须 ≥ 1")
+        hint = ("：M6 做 conformal 需要校准段，用 pipelines.time_splits 切分时 cal_days 须 ≥ 1；"
+                "不做 conformal 请在配置里写 calibration.enabled: false") if "cal.parquet" in missing else ""
+        raise FileNotFoundError(f"{d} 缺 {missing}{hint}")
     return d
 
 
 def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir):
     """读 pipelines.time_splits 落好的目录：train.parquet / valid.parquet（含 split_block）/ cal.parquet /
-    split_manifest.json。返回 (ds_train, ds_cal, ds_val_all, ds_val_blocks, manifest)。块序号沿用 manifest 的全局序号。"""
-    d = _check_presplit_dir(splits_dir)
+    split_manifest.json。返回 (ds_train, ds_cal, ds_val_all, ds_val_blocks, manifest)。块序号沿用 manifest 的全局序号。
+    calibration.enabled=false 时不读 cal.parquet（有也不读），ds_cal 为 None。"""
+    need_cal = bool(cfg["calibration"]["enabled"])
+    d = _check_presplit_dir(splits_dir, need_cal)
     man = json.loads((d / "split_manifest.json").read_text(encoding="utf-8"))
     ds_train = _dataset_with_station_id([str(d / "train.parquet")], cfg, station_meta, scratch_dir)
-    ds_cal = _dataset_with_station_id([str(d / "cal.parquet")], cfg, station_meta, scratch_dir)
+    ds_cal = _dataset_with_station_id([str(d / "cal.parquet")], cfg, station_meta, scratch_dir) if need_cal else None
     ds_val = _dataset_with_station_id([str(d / "valid.parquet")], cfg, station_meta, scratch_dir)
     blk = np.asarray(ds_val.column("split_block")).astype(int) if "split_block" in ds_val.feature_cols \
         else None
@@ -172,7 +180,7 @@ def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir):
             raise ValueError(f"valid.parquet 里验证块 {i} 没有行（manifest 声明了 {n_blocks} 个块）")
         ds_val_blocks.append(ds_val.select(idx))
     for name, ds in (("train", ds_train), ("cal", ds_cal)):
-        if len(ds) == 0:
+        if ds is not None and len(ds) == 0:
             raise ValueError(f"{d / (name + '.parquet')} 为空")
     return ds_train, ds_cal, ds_val, ds_val_blocks, man
 
@@ -204,16 +212,19 @@ def _station_table(zs: pd.DataFrame, lo: pd.DataFrame, routing: dict) -> pd.Data
 def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, max_steps=None,
              splits_dir=None) -> dict:
     """两种喂数方式二选一：parquet_path（原始行表，按 finetune.split 在内存里切）或 splits_dir
-    （pipelines.time_splits 落好的 train/valid/cal.parquet + split_manifest.json，与 M1–M4 共用同一份切分）。"""
+    （pipelines.time_splits 落好的 train/valid/cal.parquet + split_manifest.json，与 M1–M4 共用同一份切分）。
+    calibration.enabled=false：不做 conformal——不要校准段，早停与逐站路由按未校准分位上的点预测
+    （decision.point 配置）打分，不写 calibration.parquet，阶梯报表三行改叫 *_uncalibrated。"""
     if (parquet_path is None) == (splits_dir is None):
         raise ValueError("parquet_path 与 splits_dir 二选一")
-    if splits_dir is not None:
-        if shift_days:
-            raise ValueError("splits_dir 模式下 shift_days 无效：整体后移请在 pipelines.time_splits 切分时用 --shift-days")
-        _check_presplit_dir(splits_dir)           # 先于模型构造：缺文件不必先加载底座
     if out_dir is not None:
         config_path = deep_merge(_raw_override(config_path), {"run": {"out_dir": str(out_dir)}})
     cfg = load_config(config_path)
+    need_cal = bool(cfg["calibration"]["enabled"])
+    if splits_dir is not None:
+        if shift_days:
+            raise ValueError("splits_dir 模式下 shift_days 无效：整体后移请在 pipelines.time_splits 切分时用 --shift-days")
+        _check_presplit_dir(splits_dir, need_cal)           # 先于模型构造：缺文件不必先加载底座
     ft = cfg["finetune"]
     if not ft["enabled"]:
         raise ValueError("train_m6 需要 finetune.enabled=true")
@@ -240,23 +251,25 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
         split_info = {"generated_by": "forecast_backbones.m6.train", "source": "pipelines.time_splits",
                       "splits_dir": str(Path(splits_dir).resolve()), "plan": plan_dict,
                       "shift_days": int(man.get("shift_days", 0)),
-                      "counts": {"train": len(ds_train), "cal": len(ds_cal), "val": len(ds_val),
+                      "counts": {"train": len(ds_train), "cal": 0 if ds_cal is None else len(ds_cal), "val": len(ds_val),
                                  "val_blocks": [len(b) for b in ds_val_blocks]}}
     else:
         ds_all = _dataset_with_station_id(_expand_paths(parquet_path), cfg, model.station_meta, scratch)
         ds_train, ds_cal, ds_val, ds_val_blocks, plan = make_splits(
             ds_all, ft["split"], shift_days, L=int(cfg["timesfm3"]["context_len"]), H=int(cfg["timesfm3"]["pred_len"]),
-            step_min=int(cfg["dataset"]["step_min"]), station_col=str(cfg["dataset"]["station_id_col"]))
+            step_min=int(cfg["dataset"]["step_min"]), station_col=str(cfg["dataset"]["station_id_col"]), need_cal=need_cal)
         plan_dict, coverage_note = plan.to_dict(), (plan.reference if isinstance(plan, StationSplitPlan) else plan).coverage_note
         # generated_by 放第一个键：同名的 split_manifest.json 也可能由 pipelines.time_splits 的 CLI 落，
         # 两份 manifest 的字段集合不同，读的人先看这一行就知道该按哪套字段解析。
         split_info = {"generated_by": "forecast_backbones.m6.train",
                       "plan": plan_dict, "shift_days": int(shift_days),
-                      "counts": {"train": len(ds_train), "cal": len(ds_cal), "val": len(ds_val),
+                      "counts": {"train": len(ds_train), "cal": 0 if ds_cal is None else len(ds_cal), "val": len(ds_val),
                                  "val_blocks": [len(b) for b in ds_val_blocks]}}
     (out / "split_manifest.json").write_text(json.dumps(split_info, indent=2, ensure_ascii=False), encoding="utf-8")
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
-    print(f"[m6-lora] train={len(ds_train)} cal={len(ds_cal)} val={len(ds_val)} rows in {len(ds_val_blocks)} blocks "
+    if not need_cal:
+        print("[m6-lora] calibration.enabled=false：不做 conformal，早停与逐站路由按未校准分位上的点预测打分")
+    print(f"[m6-lora] train={len(ds_train)} cal={0 if ds_cal is None else len(ds_cal)} val={len(ds_val)} rows in {len(ds_val_blocks)} blocks "
           f"{plan_dict['val_blocks']}; trainable={trainable_summary(model.backbone.model)}")
     if coverage_note:
         print(f"[m6-lora] 提示：{coverage_note}")
@@ -288,13 +301,15 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
     save_routing(out / "station_routing.json", routing)
     model.station_routing = routing
     routed_score, _, calib = score_split(model, ds_cal, ds_val, collate, train_cfg)
-    calib.save(cfg["calibration"]["table_path"])
+    if calib is not None:
+        calib.save(cfg["calibration"]["table_path"])
     res_val = evaluate_model(model, ds_val, collate, train_cfg)
     res_val.to_parquet(out / "result_val_lora.parquet", index=False)
     n_lora = sum(v == "lora" for v in routing.values()); n_zs = len(routing) - n_lora
-    ladder = pd.DataFrame([{"variant": "zeroshot_calibrated_pstar", "nanwang_short_D+1": zs_score, "n_stations_lora": 0, "n_stations_zeroshot": len(routing)},
-                           {"variant": "lora_calibrated_pstar", "nanwang_short_D+1": lo_score, "n_stations_lora": len(routing), "n_stations_zeroshot": 0},
-                           {"variant": "routed_calibrated_pstar", "nanwang_short_D+1": routed_score, "n_stations_lora": n_lora, "n_stations_zeroshot": n_zs}])
+    tag = "calibrated_pstar" if need_cal else "uncalibrated"
+    ladder = pd.DataFrame([{"variant": f"zeroshot_{tag}", "nanwang_short_D+1": zs_score, "n_stations_lora": 0, "n_stations_zeroshot": len(routing)},
+                           {"variant": f"lora_{tag}", "nanwang_short_D+1": lo_score, "n_stations_lora": len(routing), "n_stations_zeroshot": 0},
+                           {"variant": f"routed_{tag}", "nanwang_short_D+1": routed_score, "n_stations_lora": n_lora, "n_stations_zeroshot": n_zs}])
     ladder.to_csv(report_dir / "ladder_lora.csv", index=False)
     station_tab = _station_table(zs_tab, lo_tab, routing)
     station_tab.to_csv(report_dir / "station_ladder.csv", index=False)
@@ -303,8 +318,9 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
                 "shift_days": int(shift_days), "split": split_info})
     (out / "train_log.json").write_text(json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8")
     print(ladder.to_string(index=False)); print(station_tab.to_string(index=False))
-    print(f"[m6-lora] 产物：{best_path} / {out / 'station_routing.json'} / {cfg['calibration']['table_path']} / "
-          f"{out / 'split_manifest.json'} / {report_dir}")
+    print(f"[m6-lora] 产物：{best_path} / {out / 'station_routing.json'} / "
+          + (f"{cfg['calibration']['table_path']} / " if calib is not None else "")
+          + f"{out / 'split_manifest.json'} / {report_dir}")
     return {"ladder": ladder, "routing": routing, "history": cb.history, "best": cb.best, "split": split_info}
 
 

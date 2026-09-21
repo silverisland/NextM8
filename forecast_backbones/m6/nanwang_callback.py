@@ -29,12 +29,16 @@ except ImportError:
 
 
 def score_split(model, ds_cal, ds_val, collate, cfg) -> tuple[float, pd.DataFrame, object]:
+    """ds_cal 上拟合校准表 → ds_val 上按 decision.point 取点 → 南网短期日准确率。ds_cal=None 时不校准，
+    点预测在未校准的原生分位上取，返回的校准表为 None。返回 (块内均值, 逐站表, 校准表)。"""
     if getattr(model, "calibrator", None) is not None:
         raise ValueError("score_split 需要未挂 calibrator 的模型（训练模型应输出原始分位，校准在这里拟合）")
     was_training = bool(model.training)
     try:
-        res_cal = evaluate_model(model, ds_cal, collate, cfg)
-        calib = fit_calibrator_from_result(res_cal, cfg)
+        calib = None                                  # ds_cal=None：不做 conformal，点预测直接取未校准分位
+        if ds_cal is not None:
+            res_cal = evaluate_model(model, ds_cal, collate, cfg)
+            calib = fit_calibrator_from_result(res_cal, cfg)
         res_val = evaluate_model(model, ds_val, collate, cfg)
         gccap = {model.station_meta.name(int(s)): float(c) for s, c in
                  res_val.drop_duplicates("station_id")[["station_id", "cap"]].itertuples(index=False)}

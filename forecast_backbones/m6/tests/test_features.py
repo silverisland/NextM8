@@ -86,3 +86,17 @@ def test_station_meta_id_of_and_attach_station_id(tmp_path):
         attach_station_id(pd.DataFrame({"station": ["S1001", "S9"]}), meta)
     with pytest.raises(ValueError, match="既没有"):
         attach_station_id(pd.DataFrame({"x": [1]}), meta)
+
+
+
+def test_station_meta_numeric_station_names_map(tmp_path):
+    """站名全是数字时 read_csv 会读成整数；StationMeta 仍按文本站名映射（数据里整数站号 1001 同样能对上）。"""
+    import pandas as pd
+    from forecast_backbones.m6.features import StationMeta, attach_station_id
+    p = tmp_path / "m.csv"
+    p.write_text("station_id,station,lat,lon,alt_m,cap_mw\n1,1001,30,101,0,50\n2,1002,30,101,0,60\n", encoding="utf-8")
+    meta = StationMeta.from_csv(p)
+    assert meta.id_of("1001") == 1 and meta.name(2) == "1002"
+    assert StationMeta(pd.read_csv(p)).id_of("1002") == 2                       # 不经 from_csv、列已是整数也一样
+    out = attach_station_id(pd.DataFrame({"station": [1001, "1002"]}), meta)
+    assert out["station_id"].tolist() == [1, 2]

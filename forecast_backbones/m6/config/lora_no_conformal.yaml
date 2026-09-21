@@ -1,0 +1,125 @@
+# forecast_backbones/m6/config/lora_no_conformal.yaml —— M6 路线 B：只训 LoRA，不做 conformal。
+# 与 configs.yaml 的差别只有 5 处：run.out_dir、features.past_future、finetune.enabled、calibration.enabled、decision.point。
+# 用法：python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/lora_no_conformal.yaml \
+#         --splits-dir data/splits/m1_m4_v1 --out runs/m6_lora_v1
+# 直接用 M1–M4 的切分目录，不需要 cal.parquet。
+run:
+  model_name: m6
+  seeds: [0, 1, 2]
+  out_dir: runs/m6_lora_no_conformal
+model: {}
+dataset:
+  pv_col: observe_power
+  label_col: observe_power_future
+  ts_col: timestamp_win
+  station_id_col: station_id
+  cap_col: cap_power_on
+  station_meta: forecast_backbones/m6/station_meta.csv
+  info_csv: info.csv                   # 路线 A 不读
+  tz: Asia/Shanghai
+  step_min: 15
+timesfm3:
+  checkpoint: /data/tangqingang/timesfm-3.0-pytorch
+  context_len: 672
+  pred_len: 192
+  device: auto
+  per_core_batch_size: 64
+  return_quantiles: true
+  nan_policy: interp
+  make_positive: true
+  use_znorm: false
+  use_symmetric_averaging: true
+  eager_init: true
+features:
+  past_future:
+    - [general_ghi,   general_ghi_predict]
+    - [general_temp,  general_temp_predict]
+    # 数据里有 solargis 列时再加回：[GHI_solargis, ghi_solargis_predict]、[temp_solargis, temp_solargis_predict]
+  derived: {solar_elevation: true, clear_sky_power: true}
+  nwp_members:
+    enabled: false
+    cols: [SSRD_pos_1, SSRD_pos_2, SSRD_pos_3, SSRD_pos_4, SSRD_pos_5, SSRD_pos_6, SSRD_pos_7, SSRD_pos_8, SSRD_pos_9]
+    future_suffix: _predict
+    add_spread: true
+  past_only: []
+  target_transform: none               # 路线 A 不读
+variability: {signal: k_nwp, bins: 3, k_nwp_edges: [0.35, 0.75],
+              nwp_spread_edges: null, src_disagree_edges: null, recent_kt_std_edges: null,
+              ghi_col: general_ghi_predict}
+data:
+  issue_times_eval: all                # 路线 A 不读
+  issue_times_train: all               # 路线 A 不读
+  scored_steps: {short: [55, 151], ultra: [0, 16]}
+finetune:                              # 路线 B（计划 2）：LoRA 微调；路线 A 只读 enabled/inference_path
+  enabled: true
+  inference_path: evaluator            # evaluator | torch；enabled=true 时训练强制走 torch 路径
+  lora:
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+    target_modules: [query_proj, key_proj, value_proj, out_proj]   # timesfm3 3.0.2 真名；seq_attn/var_attn 都挂
+  unfreeze_output_head: true
+  lora_path: ${run.out_dir}/lora_weights.pt
+  routing_path: ${run.out_dir}/station_routing.json
+  loss:
+    type: pinball
+    levels: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    aux_nanwang_head: {enabled: false, weight: 0.5}   # 计划 3 消融，本计划不读
+  masks:
+    night: solar_elevation_le_0
+    curtailment_col: null
+    curtailment_autodetect: {enabled: false, plateau_ratio: 0.05, k_nwp_min: 0.7, min_run: 4}
+    missing: true
+  schedule:
+    lr: 1.0e-4
+    weight_decay: 0.01
+    epochs_max: 10
+    batch_size: 16
+    grad_clip: 1.0
+    precision: bf16                    # 只在 cuda 上生效；cpu 自动退 fp32
+    logging_steps: 20
+  split:                               # 只有 --parquet（原始行表）模式读这一段；--splits-dir 模式不读
+    train_start: null                  # null = 数据最早
+    val_blocks:                        # 验证块 [start, end) 整天，分散到不同季节（占位日期，须改成真实日期）
+      - ["2025-01-10", "2025-01-31"]
+      - ["2025-04-10", "2025-05-01"]
+      - ["2025-07-16", "2025-08-06"]
+    test_start: "2025-10-01"           # 尾段测试起点（占位日期，须改成真实日期）；各站不同时写 {station_id: 日期} 映射，
+                                       # 或改 null 并加 test_parquets: ["data/test/*.parquet"] 从现有测试集推（见 README）
+    test_end: null                     # null = 数据末尾
+    cal_days: 0                        # 不做 conformal，不留校准段
+    purge_days: 2                      # 块前剔除训练行天数，须 ≥ H=192 步折算（2 天）
+    embargo_days: 7                    # 块后额外剔除，块后共 purge+embargo = 9 天 = L+H
+  early_stop:
+    metric: nanwang_after_pstar
+    patience: 3
+  guards:
+    per_station_fallback_to_zeroshot: true
+    min_gain_pct: 0.0                  # LoRA 站得分须超零样本这么多才选 lora
+calibration:
+  enabled: false                       # 不做 conformal：不要校准段，早停与逐站路由按未校准分位上的点预测打分
+  table_path: ${run.out_dir}/calibration.parquet
+  levels: [0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99]
+  normalization: clear_sky             # clear_sky | model_spread | none
+  strata: {solar_elevation_edges: [20, 45], variability: true, lead_edges: [4, 8, 16, 55, 103]}
+  fit_steps: [[0, 16], [55, 151]]
+  window_days: 45
+  n_min_factor: 10
+  fallback: hierarchical               # 路线 A 不读
+  aci: {enabled: false, gamma: 0.01}   # 路线 A 不读
+decision:
+  physics: {night_zero: true, clear_sky_cap_ratio: 1.05, capacity_cap: true}
+  point:
+    default: median                    # 不校准时 p*/p*_L1 在原生 9 档分位上系统性偏高，所以取中位数；做 conformal 后再改回 p_star
+    by_step: []
+    floor_ratio: 0.2
+    tau_grid_step: 0.005
+    tail: flat                         # 目前只实现 flat；其它取值 model forward/recompute_points 会 raise
+    shrink_factor: null                # 仅当 default 或某条 by_step 规则的 method=global_shrink 时生效
+                                        # （p_star/p_star_l1 不读它）；backfill 报表会打印拟合值
+eval:
+  metrics: [nanwang_short_D+1, nanwang_ultra_short, nrmse, crps, coverage, pit]  # 路线 A 不读
+  buckets: [variability, solar_elevation, station, lead]                        # 路线 A 不读
+  report_dir: ${run.out_dir}/reports
+  batch_size: 64
+# stacking 段（计划 3：模型堆叠）本文件未覆盖，沿用 config.py DEFAULT_CFG 的默认值；整段路线 A 不读。
