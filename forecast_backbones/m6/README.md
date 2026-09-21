@@ -136,7 +136,8 @@ M6 的 `finetune.split` 不解析 `auto`，要用就抄 `split_resolved.yaml` �
 
 **训练与测试的站对不上**：只在测试集里、训练数据里没有的站，切分时忽略（manifest 的 `ignored_test_only_stations` 记下名单）；
 只在训练数据里、没有测试集的站，给占位 `test_start` = 该站最后一天 + 1 + `purge_days`，于是它没有测试行、末尾不剔除任何行，
-照常参加训练和验证（写进 `train_only_stations` 则全进训练）。这些站列在 `stations_without_test`，覆盖表的测试起点列显示"无测试集"，
+照常参加训练和验证（写进 `train_only_stations` 则全进训练）。`val_blocks: auto` 的区间终点只看有测试集的站，
+没有测试集的站晚于终点的数据不参与放块、照常进训练，免得验证块被拉进别的站的测试时段。这些站列在 `stations_without_test`，覆盖表的测试起点列显示"无测试集"，
 `split_resolved.yaml` 连同占位日期一起写下，原样重跑不变。M6 `make_splits` 同样处理。
 
 产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
