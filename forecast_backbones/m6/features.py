@@ -66,6 +66,7 @@ class StationMeta:
             d[c] = pd.to_numeric(d[c], errors="coerce")
         d["alt_m"] = d["alt_m"].fillna(0.0)
         self._rows = {int(r.station_id): r._asdict() for r in d.itertuples(index=False)}
+        self._by_name = {str(r["station"]): sid for sid, r in self._rows.items() if isinstance(r["station"], str)}
 
     @classmethod
     def from_csv(cls, path: str | Path) -> "StationMeta":
@@ -81,6 +82,28 @@ class StationMeta:
     def name(self, station_id) -> str:
         r = self.get(station_id)
         return str(r["station"]) if r is not None and isinstance(r["station"], str) else str(int(station_id))
+
+    def id_of(self, station_name) -> int | None:
+        """站名 → station_id；表里没有这个名字返回 None。"""
+        return self._by_name.get(str(station_name))
+
+    def ids(self) -> list[int]:
+        return sorted(self._rows)
+
+
+def attach_station_id(df: pd.DataFrame, meta: StationMeta, id_col: str = "station_id", name_col: str = "station") -> pd.DataFrame:
+    """给数据表补 station_id：已有 id_col 原样返回；只有站名列 name_col 时按 station_meta 映射；
+    名字在表里查不到、或两列都没有，直接报错（M6 的校准分层与路由都按 station_id 走，不能猜）。"""
+    if id_col in df.columns:
+        return df
+    if name_col not in df.columns:
+        raise ValueError(f"数据里既没有 {id_col!r} 也没有 {name_col!r}，无法确定站点（列：{list(df.columns)[:12]}…）")
+    names = df[name_col].astype(str)
+    unknown = sorted(set(names.unique()) - set(meta._by_name))
+    if unknown:
+        raise ValueError(f"这些站名在 station_meta 里没有对应的 station_id：{unknown}；"
+                         f"请在 station_meta.csv 加上（station_id,station,lat,lon,alt_m,cap_mw）")
+    return df.assign(**{id_col: names.map(meta._by_name).astype(np.int64)})
 
 
 def _day_mean(values: np.ndarray, ghi_clear: np.ndarray, min_clear: float) -> np.ndarray:

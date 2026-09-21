@@ -435,7 +435,7 @@ REQUIRED_SPLIT_KEYS = ("val_blocks", "test_start", "cal_days", "purge_days", "em
 
 
 def load_split_dict(split_yaml=None, m6_config=None, require_test_start: bool = True) -> dict:
-    """--split-yaml：顶层就是 split 字典；--m6-config：读 M6 model_config.yaml 的 finetune.split。二选一。
+    """--split-yaml：顶层就是 split 字典；--m6-config：读 M6 config/configs.yaml 的 finetune.split。二选一。
     两条路都要求 split 字典写全 REQUIRED_SPLIT_KEYS：CLI 不替用户默认 purge/embargo/cal 的天数。
     require_test_start=False（按站给 test_start 时）允许 yaml 里不写 test_start 或写 null。"""
     if (split_yaml is None) == (m6_config is None):
@@ -458,7 +458,7 @@ def load_split_dict(split_yaml=None, m6_config=None, require_test_start: bool = 
 
 
 def _m6_geometry(m6_config) -> dict:
-    """从 M6 model_config.yaml 里取 L/H/step_min（缺哪个就不给哪个），供 CLI 当默认值用。
+    """从 M6 config/configs.yaml 里取 L/H/step_min（缺哪个就不给哪个），供 CLI 当默认值用。
     这里直接读 yaml 而不 import forecast_backbones.m6.config：pipelines 不依赖任何具体模型目录。"""
     if m6_config is None:
         return {}

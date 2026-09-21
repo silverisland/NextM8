@@ -35,6 +35,7 @@ try:
     from .nanwang_callback import NanwangEvalCallback, score_split
     from .routing import decide_routing, save_routing
     from .lora import load_lora_state_dict, set_lora_enabled, trainable_summary
+    from .features import attach_station_id
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from config import load_config, deep_merge
@@ -42,6 +43,7 @@ except ImportError:
     from nanwang_callback import NanwangEvalCallback, score_split
     from routing import decide_routing, save_routing
     from lora import load_lora_state_dict, set_lora_enabled, trainable_summary
+    from features import attach_station_id
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
     from ...pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
@@ -97,6 +99,74 @@ def make_splits(ds_all, split: dict, shift_days: int = 0, L: int = 672, H: int =
     return ds_train, ds_cal, ds_val_all, ds_val_blocks, plan
 
 
+def _expand_paths(spec) -> list[str]:
+    """parquet 路径：单个路径 / 通配符 / 列表 → 排好序的文件列表；一个都没匹配到直接报错。"""
+    import glob as _glob
+    items = list(spec) if isinstance(spec, (list, tuple)) else [spec]
+    out = []
+    for it in items:
+        hit = sorted(_glob.glob(str(it)))
+        if not hit and Path(str(it)).exists():
+            hit = [str(it)]
+        if not hit:
+            raise FileNotFoundError(f"parquet 路径 {it!r} 没匹配到文件")
+        out.extend(hit)
+    return out
+
+
+def _dataset_with_station_id(paths, cfg: dict, station_meta, scratch_dir) -> UnifiedDataset:
+    """按 M6 口径建 UnifiedDataset（arrow 后端，make_splits/select 需要）。数据没有 station_id 列而只有站名列时，
+    按 station_meta 映射补上并落到 scratch_dir 下的临时 parquet 再装载（arrow 后端不能就地加列）。"""
+    ds_cfg = cfg["dataset"]; id_col = str(ds_cfg["station_id_col"])
+    import pyarrow.parquet as pq
+    cols = pq.read_schema(paths[0]).names
+    if id_col not in cols:
+        df = pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
+        df = attach_station_id(df, station_meta, id_col=id_col, name_col="station")
+        scratch = Path(scratch_dir); scratch.mkdir(parents=True, exist_ok=True)
+        tmp = scratch / f"{Path(paths[0]).stem}_with_{id_col}.parquet"
+        df.to_parquet(tmp, index=False)
+        print(f"[m6] 数据无 {id_col!r} 列：按 station_meta 从站名映射补上，写到 {tmp}")
+        paths = [str(tmp)]
+    return UnifiedDataset(paths if len(paths) > 1 else paths[0], timestamp_cols=[ds_cfg["ts_col"]], entity_cols=[],
+                          label_cols=[ds_cfg["label_col"]], timestamp_output="epoch_s", epoch_unit="s",
+                          for_hf_trainer=True)
+
+
+def _check_presplit_dir(splits_dir) -> Path:
+    d = Path(splits_dir)
+    need = ["train.parquet", "valid.parquet", "cal.parquet", "split_manifest.json"]
+    missing = [f for f in need if not (d / f).exists()]
+    if missing:
+        raise FileNotFoundError(f"{d} 缺 {missing}：M6 训练需要校准段，用 pipelines.time_splits 切分时 cal_days 须 ≥ 1")
+    return d
+
+
+def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir):
+    """读 pipelines.time_splits 落好的目录：train.parquet / valid.parquet（含 split_block）/ cal.parquet /
+    split_manifest.json。返回 (ds_train, ds_cal, ds_val_all, ds_val_blocks, manifest)。块序号沿用 manifest 的全局序号。"""
+    d = _check_presplit_dir(splits_dir)
+    man = json.loads((d / "split_manifest.json").read_text(encoding="utf-8"))
+    ds_train = _dataset_with_station_id([str(d / "train.parquet")], cfg, station_meta, scratch_dir)
+    ds_cal = _dataset_with_station_id([str(d / "cal.parquet")], cfg, station_meta, scratch_dir)
+    ds_val = _dataset_with_station_id([str(d / "valid.parquet")], cfg, station_meta, scratch_dir)
+    blk = np.asarray(ds_val.column("split_block")).astype(int) if "split_block" in ds_val.feature_cols \
+        else None
+    if blk is None:
+        raise ValueError(f"{d / 'valid.parquet'} 没有 split_block 列：不是 pipelines.time_splits 落的验证集")
+    n_blocks = len(man["plan"]["val_blocks"])
+    ds_val_blocks = []
+    for i in range(n_blocks):
+        idx = np.flatnonzero(blk == i)
+        if idx.size == 0:
+            raise ValueError(f"valid.parquet 里验证块 {i} 没有行（manifest 声明了 {n_blocks} 个块）")
+        ds_val_blocks.append(ds_val.select(idx))
+    for name, ds in (("train", ds_train), ("cal", ds_cal)):
+        if len(ds) == 0:
+            raise ValueError(f"{d / (name + '.parquet')} 为空")
+    return ds_train, ds_cal, ds_val, ds_val_blocks, man
+
+
 def build_training_args(cfg: dict, out_dir, max_steps=None) -> TrainingArguments:
     s = cfg["finetune"]["schedule"]
     cuda = torch.cuda.is_available()
@@ -121,7 +191,16 @@ def _station_table(zs: pd.DataFrame, lo: pd.DataFrame, routing: dict) -> pd.Data
     return t.sort_values("station_id").reset_index(drop=True)
 
 
-def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_steps=None) -> dict:
+def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, max_steps=None,
+             splits_dir=None) -> dict:
+    """两种喂数方式二选一：parquet_path（原始行表，按 finetune.split 在内存里切）或 splits_dir
+    （pipelines.time_splits 落好的 train/valid/cal.parquet + split_manifest.json，与 M1–M4 共用同一份切分）。"""
+    if (parquet_path is None) == (splits_dir is None):
+        raise ValueError("parquet_path 与 splits_dir 二选一")
+    if splits_dir is not None:
+        if shift_days:
+            raise ValueError("splits_dir 模式下 shift_days 无效：整体后移请在 pipelines.time_splits 切分时用 --shift-days")
+        _check_presplit_dir(splits_dir)           # 先于模型构造：缺文件不必先加载底座
     if out_dir is not None:
         config_path = deep_merge(_raw_override(config_path), {"run": {"out_dir": str(out_dir)}})
     cfg = load_config(config_path)
@@ -144,24 +223,33 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
     model = TransformersAdaptedM6Model(train_cfg)
     if model.backbone is None:
         model._ensure_backbone(model._resolve_device())
-    ds_all = UnifiedDataset(str(parquet_path), timestamp_cols=[cfg["dataset"]["ts_col"]], entity_cols=[],
-                            label_cols=[cfg["dataset"]["label_col"]], timestamp_output="epoch_s", epoch_unit="s",
-                            for_hf_trainer=True)
-    ds_train, ds_cal, ds_val, ds_val_blocks, plan = make_splits(
-        ds_all, ft["split"], shift_days, L=int(cfg["timesfm3"]["context_len"]), H=int(cfg["timesfm3"]["pred_len"]),
-        step_min=int(cfg["dataset"]["step_min"]), station_col=str(cfg["dataset"]["station_id_col"]))
-    # generated_by 放第一个键：同名的 split_manifest.json 也可能由 pipelines.time_splits 的 CLI 落，
-    # 两份 manifest 的字段集合不同，读的人先看这一行就知道该按哪套字段解析。
-    split_info = {"generated_by": "forecast_backbones.m6.train",
-                  "plan": plan.to_dict(), "shift_days": int(shift_days),
-                  "counts": {"train": len(ds_train), "cal": len(ds_cal), "val": len(ds_val),
-                             "val_blocks": [len(b) for b in ds_val_blocks]}}
+    scratch = out / ".data"
+    if splits_dir is not None:
+        ds_train, ds_cal, ds_val, ds_val_blocks, man = load_presplit(splits_dir, cfg, model.station_meta, scratch)
+        plan_dict, coverage_note = man["plan"], man.get("coverage_note")
+        split_info = {"generated_by": "forecast_backbones.m6.train", "source": "pipelines.time_splits",
+                      "splits_dir": str(Path(splits_dir).resolve()), "plan": plan_dict,
+                      "shift_days": int(man.get("shift_days", 0)),
+                      "counts": {"train": len(ds_train), "cal": len(ds_cal), "val": len(ds_val),
+                                 "val_blocks": [len(b) for b in ds_val_blocks]}}
+    else:
+        ds_all = _dataset_with_station_id(_expand_paths(parquet_path), cfg, model.station_meta, scratch)
+        ds_train, ds_cal, ds_val, ds_val_blocks, plan = make_splits(
+            ds_all, ft["split"], shift_days, L=int(cfg["timesfm3"]["context_len"]), H=int(cfg["timesfm3"]["pred_len"]),
+            step_min=int(cfg["dataset"]["step_min"]), station_col=str(cfg["dataset"]["station_id_col"]))
+        plan_dict, coverage_note = plan.to_dict(), (plan.reference if isinstance(plan, StationSplitPlan) else plan).coverage_note
+        # generated_by 放第一个键：同名的 split_manifest.json 也可能由 pipelines.time_splits 的 CLI 落，
+        # 两份 manifest 的字段集合不同，读的人先看这一行就知道该按哪套字段解析。
+        split_info = {"generated_by": "forecast_backbones.m6.train",
+                      "plan": plan_dict, "shift_days": int(shift_days),
+                      "counts": {"train": len(ds_train), "cal": len(ds_cal), "val": len(ds_val),
+                                 "val_blocks": [len(b) for b in ds_val_blocks]}}
     (out / "split_manifest.json").write_text(json.dumps(split_info, indent=2, ensure_ascii=False), encoding="utf-8")
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     print(f"[m6-lora] train={len(ds_train)} cal={len(ds_cal)} val={len(ds_val)} rows in {len(ds_val_blocks)} blocks "
-          f"{plan.to_dict()['val_blocks']}; trainable={trainable_summary(model.backbone.model)}")
-    if plan.coverage_note:
-        print(f"[m6-lora] 提示：{plan.coverage_note}")
+          f"{plan_dict['val_blocks']}; trainable={trainable_summary(model.backbone.model)}")
+    if coverage_note:
+        print(f"[m6-lora] 提示：{coverage_note}")
     best_path = out / "lora_weights.pt"
     cb = NanwangEvalCallback(model, ds_cal, ds_val_blocks, collate, train_cfg, best_path=best_path,
                              patience=int(ft["early_stop"]["patience"]), log_path=out / "train_log.json")
@@ -170,7 +258,7 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
     trainer.train()
     if cb.best_epoch is None or not best_path.exists():
         raise ValueError(
-            f"训练全程未产出任何可用的最优 LoRA 权重：验证块 {plan.to_dict()['val_blocks']} 上的南网短期打分"
+            f"训练全程未产出任何可用的最优 LoRA 权重：验证块 {plan_dict['val_blocks']} 上的南网短期打分"
             f"（NanwangEvalCallback 每个 epoch 对每块各调一次 score_split，取块均值）自始至终都是非有限值"
             f"（没有一块能凑出完整可评分的一天），cb.best_epoch={cb.best_epoch!r}，{best_path} 不存在。"
             f"请检查各验证块是否覆盖足够多的完整天。")
@@ -212,8 +300,10 @@ def train_m6(config_path, parquet_path, shift_days: int = 0, out_dir=None, max_s
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="M6 路线 B：LoRA 微调 + 站级回退 + 阶梯 4 报表")
-    ap.add_argument("--config", required=True); ap.add_argument("--parquet", required=True)
+    ap.add_argument("--config", default="forecast_backbones/m6/config/configs.yaml")
+    ap.add_argument("--parquet", default=None, help="原始行表（可通配符），按 config 的 finetune.split 在内存里切")
+    ap.add_argument("--splits-dir", default=None, help="pipelines.time_splits 落好的目录（train/valid/cal.parquet + manifest）")
     ap.add_argument("--out", default=None); ap.add_argument("--shift-days", type=int, default=0)
     ap.add_argument("--max-steps", type=int, default=None)
     a = ap.parse_args()
-    train_m6(a.config, a.parquet, shift_days=a.shift_days, out_dir=a.out, max_steps=a.max_steps)
+    train_m6(a.config, a.parquet, shift_days=a.shift_days, out_dir=a.out, max_steps=a.max_steps, splits_dir=a.splits_dir)

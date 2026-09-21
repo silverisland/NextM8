@@ -122,6 +122,17 @@ class TransformersAdaptedM6Model(nn.Module):
         if bool(t3.get("eager_init", True)):
             self._ensure_backbone(self._resolve_device())
 
+    @property
+    def config(self) -> dict:
+        """框架契约：train_script 训后把 trainer.model.config 落成 yaml；M6 的配置就是合并后的 cfg。"""
+        return self.cfg
+
+    @staticmethod
+    def compute_metrics(eval_pred) -> dict:
+        """框架契约：pipelines.train_model 把 model.compute_metrics 交给 HF Trainer。M6 的早停指标由
+        NanwangEvalCallback 在校准段+验证块上算（需要先拟合校准表），不在这里；这里只保证接口存在。"""
+        return {}
+
     # ------------------------------------------------------------------ 装载
     @staticmethod
     def _load_station_meta(path) -> StationMeta:

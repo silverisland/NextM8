@@ -35,7 +35,7 @@ def test_load_config_yaml_overrides(tmp_path):
     assert cfg["eval"]["report_dir"] == "runs/t/reports"
 
 def test_yaml_matches_defaults():
-    p = Path(__file__).resolve().parents[1] / "model_config.yaml"
+    p = Path(__file__).resolve().parents[1] / "config" / "configs.yaml"
     cfg = load_config(p)
     assert cfg == interpolate(DEFAULT_CFG)
 
@@ -77,7 +77,7 @@ def test_load_config_rejects_legacy_split_keys():
 def test_yaml_split_section_matches_defaults():
     from pathlib import Path
     import yaml
-    y = yaml.safe_load((Path(__file__).resolve().parents[1] / "model_config.yaml").read_text(encoding="utf-8"))
+    y = yaml.safe_load((Path(__file__).resolve().parents[1] / "config" / "configs.yaml").read_text(encoding="utf-8"))
     assert y["finetune"]["split"] == load_config(None)["finetune"]["split"]
 
 
