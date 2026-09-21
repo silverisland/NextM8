@@ -278,6 +278,26 @@ def test_dataset_with_station_id_maps_station_names(tmp_path):
         _dataset_with_station_id([str(bp)], cfg, meta, tmp_path / "scratch")
 
 
+
+def test_dataset_with_station_id_handles_int_and_text_station_files(tmp_path):
+    """两个站文件：一个站名存成整数 1001，一个存成文本 S1002；拼接前统一成文本，不再在写临时 parquet 时崩。"""
+    from forecast_backbones.m6.train import _dataset_with_station_id
+    from forecast_backbones.m6.features import StationMeta
+    from forecast_backbones.m6.config import load_config
+    from forecast_backbones.m6.tests.conftest import LAT, CAP
+    meta_csv = tmp_path / "station_meta.csv"
+    meta_csv.write_text("station_id,station,lat,lon,alt_m,cap_mw\n"
+                        + "".join(f"{s},{'1001' if s == 1001 else 'S' + str(s)},{LAT[s][0]},{LAT[s][1]},{LAT[s][2]},{CAP[s]}\n"
+                                  for s in (1001, 1002)), encoding="utf-8")
+    df = make_synthetic_frame(n_days=1, issue_every_min=360)
+    paths = []
+    for sid, name in ((1001, 1001), (1002, "S1002")):
+        part = df[df.station_id == sid].drop(columns=["station_id"]).assign(station=name)
+        pth = tmp_path / f"{sid}.parquet"; part.to_parquet(pth, index=False); paths.append(str(pth))
+    cfg = load_config({"dataset": {"station_meta": str(meta_csv)}})
+    ds = _dataset_with_station_id(paths, cfg, StationMeta.from_csv(meta_csv), tmp_path / "scratch")
+    assert sorted(set(np.asarray(ds.column("station_id")).astype(int))) == [1001, 1002] and len(ds) == len(df)
+
 def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
     """与 M1–M4 共用 pipelines.time_splits 落的目录：train/valid/cal.parquet + split_manifest.json。"""
     from pipelines.time_splits import SplitPlan, write_splits

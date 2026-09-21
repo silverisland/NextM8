@@ -499,6 +499,25 @@ def test_read_parquets_rejects_mismatched_columns(tmp_path):
         read_parquets([str(tmp_path / "nope*.parquet")])
 
 
+
+def test_read_parquets_unifies_station_types_across_files(tmp_path, capsys):
+    """一站一个文件时，有的文件站号存成整数、有的存成文本：统一成文本站号再拼，否则落盘时 pyarrow 报类型错。"""
+    spans = {"1001": ("2024-06-01", "2025-09-01"), "B": ("2025-03-01", "2026-01-20")}
+    _write_station_files(tmp_path, spans)
+    f = tmp_path / "train" / "1001.parquet"; x = pd.read_parquet(f); x["station"] = 1001; x.to_parquet(f, index=False)
+    df, _ = read_parquets([str(tmp_path / "train" / "*.parquet")])
+    assert set(df["station"]) == {"1001", "B"} and "类型不一致" in capsys.readouterr().out
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump(AUTO), encoding="utf-8")
+    man = main(["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "s.yaml"),
+                "--test-parquets", str(tmp_path / "test" / "*.parquet"), "--out-dir", str(tmp_path / "ds")])
+    tr = pd.read_parquet(tmp_path / "ds" / "train.parquet")
+    assert set(tr["station"]) == {"1001", "B"} and man["counts"]["train"] > 0
+
+    g = tmp_path / "train" / "B.parquet"; y = pd.read_parquet(g)
+    y["observe_power"] = y["observe_power"].map(lambda v: "x"); y.to_parquet(g, index=False)   # 非站号列类型不一致：报错
+    with pytest.raises(ValueError, match="列 'observe_power' 在各文件里类型不一致"):
+        read_parquets([str(tmp_path / "train" / "*.parquet")])
+
 # ---------------- 数据太短的站只进训练 ----------------
 SHORT = {**SPANS, "D": ("2025-07-20", "2025-09-10")}                 # D 测试起点前 52 天，且压着 8 月的自动块
 
