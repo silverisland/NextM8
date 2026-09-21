@@ -383,9 +383,10 @@ def verify_rows(plan, ts: np.ndarray, role: np.ndarray, block: np.ndarray, stati
 
 
 def suggest_val_blocks(days_by_station: dict, test_starts: dict, n_blocks: int, block_days: int, purge_days: int,
-                       embargo_days: int, cal_days: int, train_start=None) -> tuple[list, list]:
+                       embargo_days: int, cal_days: int, train_start=None, no_test=()) -> tuple[list, list]:
     """按数据自动放全站共用的验证块。days_by_station：{站: 有数据的日期数组}；test_starts：{站: 测试起点}。
     可用区间 = [所有站最早有数据的一天, 所有站里最晚的 测试起点 − 2×purge − cal_days)，等分成 n_blocks 段，
+    区间终点只看有测试集的站（no_test 里的站是占位起点，不把区间往后拉；它们在终点之后的数据不参与放块）；
     每段里挑一个 block_days 天的块，使"块内有数据且容得下这个块的站·天数"最大，同分取最靠段中心的；
     相邻两块至少隔 2×purge + embargo 天（两块的剔除区不重叠）。某段里最好的块也凑不够半块（block_days/2 个站·天）
     就不放块（这一段基本没有数据）。
@@ -412,7 +413,15 @@ def suggest_val_blocks(days_by_station: dict, test_starts: dict, n_blocks: int, 
     if not usable:
         raise ValueError("没有任何站在各自测试起点之前有可放验证块的数据")
     g0 = min(d[0] for d in usable.values())
-    g1 = max(lim[s] for s in usable)
+    no_test = {str(x) for x in no_test}
+    real = [s for s in usable if s not in no_test]
+    g1 = max(lim[s] for s in (real or usable))
+    notes = []
+    late = sorted(s for s in usable if usable[s][-1] >= g1)
+    if late:
+        notes.append(f"没有测试集的站 {late} 在 {g1} 之后的数据不参与放块（验证块只放在有测试集的站的可用区间里），这些数据照常进训练")
+        usable = {s: d[d < g1] for s, d in usable.items()}
+        usable = {s: d for s, d in usable.items() if d.size}
     span = int((g1 - g0) / one)
     if span < n * b:
         raise ValueError(f"可放验证块的区间 [{g0}, {g1}) 只有 {span} 天，放不下 {n} 块 × {b} 天："
@@ -423,10 +432,10 @@ def suggest_val_blocks(days_by_station: dict, test_starts: dict, n_blocks: int, 
         ind = np.zeros(span, dtype=np.int64)
         ind[((d - g0) / one).astype(np.int64)] = 1
         cs = np.concatenate([[0], np.cumsum(ind)])
-        score += (cs[starts + b] - cs[starts]) * ((starts + b) <= int((lim[s] - g0) / one))
+        score += (cs[starts + b] - cs[starts]) * ((starts + b) <= int((min(lim[s], g1) - g0) / one))
     edges = [round(k * span / n) for k in range(n + 1)]
     gap = 2 * int(purge_days) + int(embargo_days)
-    chosen, notes, prev_end = [], [], None
+    chosen, prev_end = [], None
     for k in range(n):
         cand = starts[(starts >= edges[k]) & (starts + b <= edges[k + 1])]
         if prev_end is not None:
@@ -464,7 +473,8 @@ def resolve_auto_blocks(ts: np.ndarray, station: np.ndarray, test_starts: dict, 
     blocks, notes = suggest_val_blocks(days, {s: starts[s] for s in days}, int(split["n_val_blocks"]),
                                        int(split["val_block_days"]), int(split["purge_days"]),
                                        int(split["embargo_days"]), int(split["cal_days"]),
-                                       train_start=split.get("train_start"))
+                                       train_start=split.get("train_start"),
+                                       no_test=[_station_key(x) for x in (split.get("stations_without_test") or [])])
     return [[a.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d")] for a, e in blocks], notes
 
 

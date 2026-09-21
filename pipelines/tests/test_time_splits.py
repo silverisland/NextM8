@@ -569,7 +569,7 @@ def test_single_test_start_with_threshold_switches_to_by_station(tmp_path):
 def test_unmatched_stations_are_ignored_or_kept_to_their_end(tmp_path, capsys):
     """E 有训练数据、没有测试文件 → 不留测试段、数据用到最后一天、照常参加验证；
     T 只有测试文件（测试起点早到一个验证块都容不下）→ 切分时忽略，不报错。"""
-    spans = {**SPANS, "E": ("2024-09-01", "2025-12-01")}
+    spans = {**SPANS, "E": ("2024-09-01", "2027-06-01")}                                  # E 的数据比所有站的测试起点都晚
     _write_station_files(tmp_path, spans)
     (tmp_path / "test" / "E.parquet").unlink()
     pd.DataFrame({"timestamp_win": pd.date_range("2024-07-01", periods=48, freq="60min"), "station": "T"}
@@ -582,11 +582,13 @@ def test_unmatched_stations_are_ignored_or_kept_to_their_end(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert "站 T 只在测试集里" in printed and "站 E 没有测试集" in printed
     assert man["ignored_test_only_stations"] == ["T"] and man["plan"]["stations_without_test"] == ["E"]
-    assert man["plan"]["test_start"]["E"] == "2025-12-03"                                  # 最后一天 11-30 + 1 + purge 2
+    assert man["plan"]["test_start"]["E"] == "2027-06-03"                                  # 最后一天 05-31 + 1 + purge 2
+    assert all(pd.Timestamp(e) <= pd.Timestamp("2026-01-16") for _, e in man["plan"]["val_blocks"])   # 不越过 B 的 01-20 − 4 天
+    assert "之后的数据不参与放块" in printed
     rep = {r["station"]: r for r in man["station_report"]}
     assert "T" not in rep and rep["E"]["test_start"] == "无测试集"
     assert rep["E"]["val_days"] > 0 and rep["E"]["test_days"] == 0
-    last = pd.Timestamp("2025-11-30 23:00")
+    last = pd.Timestamp("2027-05-31 23:00")
     tr = pd.concat([pd.read_parquet(tmp_path / "ds" / f) for f in ("train.parquet", "valid.parquet")])
     assert tr.loc[tr.station == "E", "timestamp_win"].max() == last                       # 末尾一行都没剔
 
