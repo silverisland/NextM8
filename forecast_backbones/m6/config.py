@@ -83,7 +83,8 @@ DEFAULT_CFG: dict = {
                                              "k_nwp_min": 0.7, "min_run": 4},
                   "missing": True},
         "schedule": {"lr": 1.0e-4, "weight_decay": 0.01, "epochs_max": 10, "batch_size": 16,
-                     "grad_clip": 1.0, "precision": "bf16", "logging_steps": 20},
+                     "grad_clip": 1.0, "precision": "bf16", "logging_steps": 20,
+                     "progress_bar": True},      # tqdm 进度条：训练步 + 每次验证推理；写日志文件嫌乱可关
         "split": {"train_start": None,                     # null = 数据最早
                   # 验证块列表 [start, end) 整天；分散到不同季节；块前 purge_days、块后 purge_days+embargo_days 的训练行剔除
                   "val_blocks": [["2025-01-10", "2025-01-31"], ["2025-04-10", "2025-05-01"], ["2025-07-16", "2025-08-06"]],

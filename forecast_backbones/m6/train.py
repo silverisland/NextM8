@@ -213,7 +213,7 @@ def build_training_args(cfg: dict, out_dir, max_steps=None) -> TrainingArguments
         num_train_epochs=float(s["epochs_max"]), learning_rate=float(s["lr"]), weight_decay=float(s["weight_decay"]),
         max_grad_norm=float(s["grad_clip"]), bf16=(str(s["precision"]) == "bf16" and cuda), use_cpu=not cuda,
         save_strategy="no", logging_steps=int(s.get("logging_steps", 20)), report_to=[],
-        remove_unused_columns=False, disable_tqdm=True, dataloader_pin_memory=cuda,
+        remove_unused_columns=False, disable_tqdm=not bool(s.get("progress_bar", True)), dataloader_pin_memory=cuda,
         max_steps=(-1 if max_steps is None else int(max_steps)), seed=int((cfg["run"].get("seeds") or [0])[0]),
         **{eval_strategy_kw: "no"})
 

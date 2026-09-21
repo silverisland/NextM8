@@ -68,7 +68,13 @@ class NanwangEvalCallback(TrainerCallback):
         self.best, self.best_epoch, self.bad_epochs, self.history = -np.inf, None, 0, []
 
     def _score(self) -> tuple[float, list[float]]:
-        per = [float(score_split(self.model, self.ds_cal, ds, self.collate, self.cfg)[0]) for ds in self.ds_val_blocks]
+        per, n = [], len(self.ds_val_blocks)
+        for i, ds in enumerate(self.ds_val_blocks):
+            self.model._progress_desc = f"[m6-lora] 验证块 {i + 1}/{n}"          # evaluate_model 的进度条标题
+            try:
+                per.append(float(score_split(self.model, self.ds_cal, ds, self.collate, self.cfg)[0]))
+            finally:
+                self.model._progress_desc = None
         finite = [s for s in per if np.isfinite(s)]
         return (float(np.mean(finite)) if finite else float("nan")), per
 
@@ -94,6 +100,7 @@ class NanwangEvalCallback(TrainerCallback):
               f"best={self.best:.4f}@{self.best_epoch} bad={self.bad_epochs}")
 
     def on_train_begin(self, args, state, control, **kwargs):
+        print(f"[m6-lora] 开训前先在 {len(self.ds_val_blocks)} 个验证块上打零样本基线分（不受 max_steps 限制）…", flush=True)
         self._record(0.0, self._score(), None)          # 零样本基线：LoRA B=0，等价零样本；永远是初始最优
         return control
 

@@ -17,6 +17,7 @@ import pandas as pd
 import torch
 import yaml
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 try:
     from .calibration import quantile_cols
@@ -54,8 +55,10 @@ def evaluate_model(model, test_dataset, HF_collate_fn, config) -> pd.DataFrame:
     loader = DataLoader(test_dataset, batch_size=bs, shuffle=False, collate_fn=HF_collate_fn)
     rows = []
     model.eval()
+    show = bool(((cfg.get("finetune") or {}).get("schedule") or {}).get("progress_bar", True))
+    desc = str(getattr(model, "_progress_desc", None) or "[m6] 推理")
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader, desc=desc, unit="batch", disable=not show, mininterval=2.0, dynamic_ncols=True):
             if isinstance(batch, dict) and "batch_dict" in batch:
                 bd, labels = batch["batch_dict"], batch.get("labels")
             else:

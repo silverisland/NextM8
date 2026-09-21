@@ -119,3 +119,17 @@ def test_callback_rejects_empty_block_list(tmp_path, tiny_evaluator):
         m = _model_b(tmp_path, tiny_evaluator)
     with pytest.raises(ValueError, match="ds_val_blocks"):
         NanwangEvalCallback(m, None, [], None, m.cfg, best_path=tmp_path / "b.pt", patience=1, log_path=tmp_path / "l.json")
+
+
+def test_progress_bar_shows_block_label_and_can_be_disabled(tmp_path, tiny_evaluator, capsys):
+    ds_cal, ds_val = _datasets()
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    cb = NanwangEvalCallback(m, None, [ds_val], collate, m.cfg, best_path=tmp_path / "b.pt", patience=1, log_path=tmp_path / "l.json")
+    cb._score()
+    assert "验证块 1/1" in capsys.readouterr().err and m._progress_desc is None
+    off = {**m.cfg, "finetune": {**m.cfg["finetune"], "schedule": {**m.cfg["finetune"]["schedule"], "progress_bar": False}}}
+    m.cfg = off
+    NanwangEvalCallback(m, None, [ds_val], collate, off, best_path=tmp_path / "b.pt", patience=1, log_path=tmp_path / "l.json")._score()
+    assert "验证块" not in capsys.readouterr().err
