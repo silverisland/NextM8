@@ -134,6 +134,16 @@ M6 的 `finetune.split` 不解析 `auto`，要用就抄 `split_resolved.yaml` �
 它们落在验证块日期里的行也是训练行。逐站覆盖表的"只进训练"列标出这些站；`split_resolved.yaml` 把最终名单写成 `train_only_stations`（去掉阈值），
 原样重跑结果不变。阈值需要数据，M6 的 `finetune.split` 只认 `train_only_stations` 名单（且须按站给 `test_start`）。
 
+**只训 LoRA、不做 conformal**：用 `config/lora_no_conformal.yaml`（`calibration.enabled: false`、`finetune.enabled: true`、
+点预测取中位数），可以直接喂 M1–M4 的切分目录，不需要 `cal.parquet`。早停与逐站路由按未校准分位上的中位数打分，
+不写 `calibration.parquet`，`ladder_lora.csv` 三行叫 `zeroshot_uncalibrated` / `lora_uncalibrated` / `routed_uncalibrated`。
+只进训练的短站没有验证分数，不进路由表，推理时按设计走零样本。
+
+```bash
+python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/lora_no_conformal.yaml \
+    --splits-dir data/splits/m1_m4_v1 --out runs/m6_lora_v1
+```
+
 **训练与测试的站对不上**：只在测试集里、训练数据里没有的站，切分时忽略（manifest 的 `ignored_test_only_stations` 记下名单）；
 只在训练数据里、没有测试集的站，给占位 `test_start` = 该站最后一天 + 1 + `purge_days`，于是它没有测试行、末尾不剔除任何行，
 照常参加训练和验证（写进 `train_only_stations` 则全进训练）。`val_blocks: auto` 的区间终点只看有测试集的站，

@@ -322,6 +322,50 @@ def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
         train_m6(cfg, splits_dir=str(splits), max_steps=1)
 
 
+
+def test_train_m6_without_conformal_uses_m1_m4_split(tmp_path, tiny_evaluator, monkeypatch):
+    """calibration.enabled=false：不做 conformal，不要 cal.parquet，直接用 M1–M4 的切分目录（cal_days 0）；
+    早停与逐站路由按未校准分位上的点预测打分，不写 calibration.parquet。"""
+    from pipelines.time_splits import SplitPlan, write_splits
+    _patch_tiny_backbone(monkeypatch, tiny_evaluator)
+    df, parquet, out, cfg = _inputs(tmp_path)
+    split = {**cfg["finetune"]["split"], "cal_days": 0}
+    splits = tmp_path / "splits"
+    write_splits(df, SplitPlan.from_dict(split), splits, source=str(parquet))
+    assert not (splits / "cal.parquet").exists()
+    with pytest.raises(FileNotFoundError, match="calibration.enabled: false"):
+        train_m6(cfg, splits_dir=str(splits), max_steps=1)                  # 默认做校准：缺 cal.parquet 报错并指出开关
+    nocal = {**cfg, "calibration": {"enabled": False}}
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+        res = train_m6(nocal, splits_dir=str(splits), max_steps=2)
+    for f in ("lora_weights.pt", "station_routing.json", "train_log.json", "split_manifest.json"):
+        assert (out / f).exists()
+    assert not (out / "calibration.parquet").exists()
+    assert list(res["ladder"]["variant"]) == ["zeroshot_uncalibrated", "lora_uncalibrated", "routed_uncalibrated"]
+    assert res["split"]["counts"]["cal"] == 0 and len(res["history"]) >= 2
+
+    ds = UnifiedDataset(str(parquet), timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"],
+                        timestamp_output="epoch_s", epoch_unit="s", for_hf_trainer=True)
+    with pytest.raises(ValueError, match="cal_days 须 ≥ 1"):
+        make_splits(ds, split)
+    tr, cal, val_all, blocks, _ = make_splits(ds, split, need_cal=False)      # 原始行表模式同样可以不要校准段
+    assert cal is None and len(tr) > 0 and len(blocks) == 1
+
+
+def test_lora_no_conformal_config_differs_from_default_only_where_intended():
+    from forecast_backbones.m6.config import load_config
+    base = load_config("forecast_backbones/m6/config/configs.yaml")
+    c = load_config("forecast_backbones/m6/config/lora_no_conformal.yaml")
+    assert c["finetune"]["enabled"] is True and c["calibration"]["enabled"] is False
+    assert c["decision"]["point"]["default"] == "median" and c["decision"]["point"]["by_step"] == []
+    assert c["features"]["past_future"] == [["general_ghi", "general_ghi_predict"], ["general_temp", "general_temp_predict"]]
+    for k in ("dataset", "timesfm3"):
+        assert c[k] == base[k], k
+    assert {**c["eval"], "report_dir": None} == {**base["eval"], "report_dir": None}
+    assert c["eval"]["report_dir"] == "runs/m6_lora_no_conformal/reports"
+    assert {k: v for k, v in c["finetune"].items() if k not in ("enabled", "split", "lora_path", "routing_path")} == \
+           {k: v for k, v in base["finetune"].items() if k not in ("enabled", "split", "lora_path", "routing_path")}
+
 def test_build_plan_rejects_unresolved_auto_blocks():
     from forecast_backbones.m6.train import build_plan
     split = {"train_start": None, "val_blocks": "auto", "n_val_blocks": 3, "val_block_days": 14, "test_start": "2025-10-01",

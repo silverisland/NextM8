@@ -62,6 +62,9 @@ class StationMeta:
             raise KeyError(f"station_meta 缺列: {missing}")
         d = df.copy()
         d["station_id"] = d["station_id"].astype(int)
+        # 站名一律按文本：全是数字的站名（如 1001）被 read_csv 读成整数/浮点时，归一成 '1001'，否则按名映射会漏掉它
+        d["station"] = d["station"].map(lambda x: x if isinstance(x, str) or pd.isna(x)
+                                        else (str(int(x)) if float(x) == int(float(x)) else str(x)))
         for c in ("lat", "lon", "alt_m", "cap_mw"):
             d[c] = pd.to_numeric(d[c], errors="coerce")
         d["alt_m"] = d["alt_m"].fillna(0.0)
@@ -70,7 +73,7 @@ class StationMeta:
 
     @classmethod
     def from_csv(cls, path: str | Path) -> "StationMeta":
-        return cls(pd.read_csv(path))
+        return cls(pd.read_csv(path, dtype={"station": str}))
 
     def get(self, station_id) -> dict | None:
         return self._rows.get(int(station_id))
