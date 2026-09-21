@@ -42,7 +42,7 @@
     timesfm3.make_positive      -> 是否把预测钳制在正值域（PV 功率建议 true，默认）
     timesfm3.use_znorm          -> 是否对每个样本做 z 归一化后预测再逆归一化（默认 false）
     timesfm3.use_symmetric_averaging -> 是否对 ±target 对称平均增强鲁棒性（默认 true）
-  例如 m5 的 model_config.yaml（与 m4 同构，是推理配置唯一真源）：
+  例如 m5 的 config/configs.yaml（与 m4 同构，是推理配置唯一真源；train_script.py 按这个路径自动定位）：
     dataset: {pv_col: observe_power}
     timesfm3:
       context_len: 672
@@ -140,8 +140,9 @@ def _merge(base: dict, override: dict) -> dict:
     return out
 
 
-class TransformersAdaptedTimesFM3Model(nn.Module):
-    """把 TimesFM-3 包成 pipeline 标准 nn.Module（推理侧，零样本/无 loss）。"""
+class TransformersAdaptedM5Model(nn.Module):
+    """把 TimesFM-3 包成 pipeline 标准 nn.Module（推理侧，零样本/无 loss）。
+    必须是本文件第一个 nn.Module 子类（registry 自动发现）；旧名 TransformersAdaptedTimesFM3Model 在文件末尾保留为别名。"""
 
     def __init__(self, model_config: Optional[dict] = None, **kwargs):
         super().__init__()
@@ -172,6 +173,7 @@ class TransformersAdaptedTimesFM3Model(nn.Module):
         self.use_symmetric_averaging = bool(t.get("use_symmetric_averaging", DEFAULT_CFG["timesfm3"]["use_symmetric_averaging"]))
         self._backbone = None
         self._backbone_device = None
+        self._warned_pairs = set()      # 已提示过缺列的协变量对，只提示一次
         if bool(t.get("eager_init",True)):
             self._ensure_backbone(self._resolve_device())
 
@@ -292,7 +294,10 @@ class TransformersAdaptedTimesFM3Model(nn.Module):
         pf = {}
         for hist_c, fut_c in self.past_future_cols:
             if hist_c not in batch_dict or fut_c not in batch_dict:
-                continue 
+                if (hist_c, fut_c) not in self._warned_pairs:
+                    print(f"[timesfm3] 协变量对 {(hist_c, fut_c)} 在 batch 里缺列，本次推理跳过（只提示一次）")
+                    self._warned_pairs.add((hist_c, fut_c))
+                continue
             h = self._col(batch_dict, hist_c)[:, -self.context_len:]
             f = self._col(batch_dict, fut_c)[:, : self.pred_len]
             pf[(hist_c, fut_c)] = np.concatenate([h, f], axis=1)                 # [B,864]
@@ -351,3 +356,7 @@ class TransformersAdaptedTimesFM3Model(nn.Module):
         # 仓库输出类没有 quantiles 字段，遵循约定放进 aux（隐形辅助输出）。
         aux = {"quantiles": quantiles} if quantiles is not None else None
         return TransformersAdaptedModelOutput(logits=logits, predictions=logits, aux=aux)
+
+
+# 兼容旧名：历史代码/配置按这个名字引用
+TransformersAdaptedTimesFM3Model = TransformersAdaptedM5Model

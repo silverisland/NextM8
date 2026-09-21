@@ -238,3 +238,63 @@ def test_build_plan_from_test_parquets(tmp_path):
     with pytest.raises(ValueError, match="删掉其一"):
         build_plan({**split, "test_start": "2025-06-28"})
     assert isinstance(build_plan({**split, "test_parquets": None, "test_start": "2025-06-28"}), SplitPlan)
+
+
+# ---------------- 框架契约 + 预切分目录 ----------------
+def test_m6_framework_contract_hooks(tmp_path):
+    from forecast_backbones.m6.transformer_trainer import M6_build_training_args
+    from forecast_backbones.m6.config import load_config
+    from pipelines.model_registry import import_model_class, build_evaluator
+    from forecast_backbones.m6.transformer_trainer import evaluate_model
+    assert import_model_class("m6") is TransformersAdaptedM6Model and build_evaluator("m6") is evaluate_model
+    cfg = {"finetune": {"schedule": {"batch_size": 4, "epochs_max": 1, "lr": 1e-3, "precision": "fp32"}}}
+    ta = M6_build_training_args(cfg, tmp_path / "run", max_steps=3)
+    assert ta.per_device_train_batch_size == 4 and ta.max_steps == 3 and str(ta.output_dir).startswith(str(tmp_path / "run"))
+    m = TransformersAdaptedM6Model({"timesfm3": {"eager_init": False}, "dataset": {"station_meta": str(write_station_meta(tmp_path))},
+                                    "calibration": {"enabled": False}})
+    assert m.config is m.cfg and m.config["run"]["model_name"] == "m6" and m.compute_metrics(None) == {}
+    assert (Path(__file__).resolve().parents[1] / "config" / "configs.yaml").exists()      # train_script 的自动定位路径
+    assert load_config(Path(__file__).resolve().parents[1] / "config" / "configs.yaml")["run"]["model_name"] == "m6"
+
+
+def test_dataset_with_station_id_maps_station_names(tmp_path):
+    from forecast_backbones.m6.train import _dataset_with_station_id
+    from forecast_backbones.m6.features import StationMeta
+    from forecast_backbones.m6.config import load_config
+    df = make_synthetic_frame(n_days=1, issue_every_min=360)
+    named = df.assign(station=df["station_id"].map(lambda s: f"S{s}")).drop(columns=["station_id"])
+    p = tmp_path / "named.parquet"; named.to_parquet(p, index=False)
+    meta = StationMeta.from_csv(write_station_meta(tmp_path))
+    cfg = load_config({"dataset": {"station_meta": str(tmp_path / "station_meta.csv")}})
+    ds = _dataset_with_station_id([str(p)], cfg, meta, tmp_path / "scratch")
+    assert sorted(set(np.asarray(ds.column("station_id")).astype(int))) == [1001, 1002] and len(ds) == len(df)
+    assert (tmp_path / "scratch" / "named_with_station_id.parquet").exists()
+    ds2 = _dataset_with_station_id([str(p)], cfg, meta, tmp_path / "scratch")           # 幂等
+    assert len(ds2) == len(ds)
+    bad = named.assign(station="Unknown"); bp = tmp_path / "bad.parquet"; bad.to_parquet(bp, index=False)
+    with pytest.raises(ValueError, match="没有对应的 station_id"):
+        _dataset_with_station_id([str(bp)], cfg, meta, tmp_path / "scratch")
+
+
+def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
+    """与 M1–M4 共用 pipelines.time_splits 落的目录：train/valid/cal.parquet + split_manifest.json。"""
+    from pipelines.time_splits import SplitPlan, write_splits
+    _patch_tiny_backbone(monkeypatch, tiny_evaluator)
+    df, parquet, out, cfg = _inputs(tmp_path)
+    splits = tmp_path / "splits"
+    man = write_splits(df, SplitPlan.from_dict(cfg["finetune"]["split"]), splits, source=str(parquet))
+    with pytest.raises(ValueError, match="二选一"):
+        train_m6(cfg, str(parquet), splits_dir=str(splits))
+    with pytest.raises(ValueError, match="shift_days 无效"):
+        train_m6(cfg, splits_dir=str(splits), shift_days=1)
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+        res = train_m6(cfg, splits_dir=str(splits), max_steps=2)
+    for f in ("lora_weights.pt", "station_routing.json", "calibration.parquet", "train_log.json", "split_manifest.json"):
+        assert (out / f).exists()
+    info = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
+    assert info["source"] == "pipelines.time_splits" and info["plan"] == man["plan"] and info["splits_dir"] == str(splits.resolve())
+    assert info["counts"]["train"] == man["counts"]["train"] and info["counts"]["val_blocks"] == [man["counts"]["val"]]
+    assert res["split"] == info and len(res["history"]) >= 2
+    (splits / "cal.parquet").unlink()
+    with pytest.raises(FileNotFoundError, match="cal_days"):
+        train_m6(cfg, splits_dir=str(splits), max_steps=1)

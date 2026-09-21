@@ -70,3 +70,19 @@ def test_variability_bins_all_nan_falls_back_to_middle_bin():
     s = np.array([np.nan, np.nan, np.nan])
     b = variability_bins(s, edges=None, n_bins=3)
     assert b.tolist() == [1, 1, 1]
+
+
+# ---------------- 站名 → station_id 映射（框架数据只有 station 名字列时） ----------------
+def test_station_meta_id_of_and_attach_station_id(tmp_path):
+    from forecast_backbones.m6.features import StationMeta, attach_station_id
+    from .conftest import write_station_meta, CAP
+    meta = StationMeta.from_csv(write_station_meta(tmp_path))                     # 站名 S1001 / S1002
+    assert meta.id_of("S1001") == 1001 and meta.id_of("nope") is None and meta.ids() == sorted(CAP)
+    df = pd.DataFrame({"station": ["S1001", "S1002", "S1001"], "x": [1, 2, 3]})
+    out = attach_station_id(df, meta)
+    assert out["station_id"].tolist() == [1001, 1002, 1001] and "station_id" not in df.columns   # 不改原表
+    assert attach_station_id(out, meta) is out                                       # 已有列原样返回
+    with pytest.raises(ValueError, match="没有对应的 station_id"):
+        attach_station_id(pd.DataFrame({"station": ["S1001", "S9"]}), meta)
+    with pytest.raises(ValueError, match="既没有"):
+        attach_station_id(pd.DataFrame({"x": [1]}), meta)

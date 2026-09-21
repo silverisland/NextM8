@@ -1,4 +1,4 @@
-# forecast_backbones/m6/model_config.yaml —— M6 推理配置真源；消融 = 改字段
+# forecast_backbones/m6/config/configs.yaml —— M6 配置真源（train_script.py 按 <模型目录>/config/configs.yaml 自动定位）；消融 = 改字段
 run:
   model_name: m6
   seeds: [0, 1, 2]

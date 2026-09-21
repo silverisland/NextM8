@@ -90,6 +90,17 @@ def evaluate_model(model, test_dataset, HF_collate_fn, config) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def M6_build_training_args(model_config, result_dir, max_steps=None):
+    """框架契约（train_script.build_train_args）：model_config 是 yaml 顶层 dict 或路径，result_dir 是本次 run 目录。
+    M6 的训练不走 pipelines.train_model（需要校准段、按块早停、训后路由），train_script 对 m6 直接调 train.train_m6；
+    这里只把 TrainingArguments 的构造按同一签名暴露出来。"""
+    try:                                          # 延迟导入：train 反过来 import 本模块
+        from .train import build_training_args
+    except ImportError:
+        from train import build_training_args
+    return build_training_args(load_config(model_config), result_dir, max_steps)
+
+
 def fit_calibrator_from_result(result_df: pd.DataFrame, cfg: dict) -> Calibrator:
     long = result_to_long(result_df, cfg["calibration"]["fit_steps"], MODEL_LEVELS)
     return Calibrator(CalibrationConfig.from_cfg(cfg)).fit(long)
@@ -322,7 +333,7 @@ def backfill_and_report(config_path, parquet_path, cal_start, cal_end, val_start
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="M6 路线 A：回填 + 校准 + 阶梯报表")
-    ap.add_argument("--config", default="forecast_backbones/m6/model_config.yaml")
+    ap.add_argument("--config", default="forecast_backbones/m6/config/configs.yaml")
     ap.add_argument("--parquet", required=True)
     ap.add_argument("--cal-start", required=True); ap.add_argument("--cal-end", required=True)
     ap.add_argument("--val-start", required=True); ap.add_argument("--val-end", required=True)

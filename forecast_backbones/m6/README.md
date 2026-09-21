@@ -8,7 +8,7 @@
     #    可以给更长的范围（决定评估/落盘覆盖的区间），拟合窗口会自动收窄到最后 45 天。
     #    parquet 路径含通配符时给引号，避免被 shell 展开：
     python -m forecast_backbones.m6.transformer_trainer \
-        --config forecast_backbones/m6/model_config.yaml --parquet 'data/clean/*.parquet' \
+        --config forecast_backbones/m6/config/configs.yaml --parquet 'data/clean/*.parquet' \
         --cal-start 2025-06-01 --cal-end 2025-07-16 --val-start 2025-07-16 --val-end 2025-09-01
     # 产物：
     #   REPORT（人读）  runs/m6_baseline/reports/{ladder.csv, diagnostics.json}
@@ -16,7 +16,7 @@
     #     n_rows_val、n_rows_cal、var_bin_hist、stations_scored、shrink_factor——同样内容也会打印一遍。
     #   STATE（机读）   runs/m6_baseline/{calibration.parquet, calibration.parquet.json,
     #                                     decision_state.json, result_cal.parquet, result_val.parquet}
-    # 3. 之后正常推理：model_config.yaml 的 calibration.table_path 指向上一步的 calibration.parquet，
+    # 3. 之后正常推理：config/configs.yaml 的 calibration.table_path 指向上一步的 calibration.parquet，
     #    registry 用 model_name=m6 构建即可，logits 即提交曲线。
     # 注意：--out 覆盖 run.out_dir 时，只有形如 ${run.out_dir}/... 的字面量才会跟着重新插值；
     #       calibration.table_path 若被改写成一个不含 ${run.out_dir} 的字面量路径，不会跟着 --out 走。
@@ -35,6 +35,20 @@ calibrate → enforce_monotone → physics_clip → select_point，同一套 lev
 测试：`python -m pytest forecast_backbones/m6/tests -q`（不需要 timesfm3；真实底座的冒烟测试见
 `tests/test_real_backbone.py`，本机缺 timesfm3 与本地权重时自动跳过，不影响本目录当前测试全绿；
 训练机上安装了 timesfm3 且权重路径存在时才会真正运行）。
+
+## 框架契约（与 train_script.py / pipelines.model_registry 对齐）
+
+- `transformer_models.py`：第一个 nn.Module 子类 `TransformersAdaptedM6Model`，构造签名 `Model(model_config)`；
+  `model.config` 是合并后的 cfg（train_script 训后落盘用）；`compute_metrics` 是空实现（M6 的早停指标由回调算）。
+- `transformer_trainer.py`：`evaluate_model(model, test_dataset, HF_collate_fn, config)` 与 `M6_build_training_args(model_config, result_dir)`。
+- 默认配置在 `config/configs.yaml`（train_script 按 `<模型目录>/config/configs.yaml` 自动定位；不再有根目录 `model_config.yaml`）。
+- 训练入口：train_script 里 `--model_name m6` 走独立分支直接调 `train.train_m6(config, splits_dir=DATASET_PATH, out_dir=RUN_PATH)`，
+  不拆进 `pipelines.train_model`（M6 需要校准段、按块早停、训后路由与校准表拟合）。`DATASET_PATH` 是
+  `pipelines.time_splits` 落的目录（`train/valid/cal.parquet + split_manifest.json`，`cal_days ≥ 1`），与 M1–M4 共用同一份切分。
+- 站标识：M6 内部按整数 `station_id` 走（校准分层、路由、坐标）。数据只有站名列 `station` 时，训练入口按
+  `station_meta.csv` 的 `station` 列自动映射补 `station_id`（查不到的站名直接报错，请先补表），映射后的副本落在 `out_dir/.data/`。
+- M5 同规：`TransformersAdaptedM5Model`（旧名 `TransformersAdaptedTimesFM3Model` 保留为别名）+ `transformer_trainer.evaluate_model`
+  + `config/configs.yaml`；M5 不训练，没有 build_training_args。
 
 ## 备注
 
@@ -74,12 +88,17 @@ calibrate → enforce_monotone → physics_clip → select_point，同一套 lev
 `timesfm3.torch.util.update_running_stats._m6_eps_patched` 确实为真，检查不过直接 `RuntimeError`（导入期就拦下来，不是训练到
 一半才发现某个 timesfm3 build 把这个函数改了名字）。
 
-训练（一折）：
+训练（一折），两种喂数方式二选一：
 ```
-python -m forecast_backbones.m6.train --config forecast_backbones/m6/model_config.yaml \
+# a) 原始行表，按 config 的 finetune.split 在内存里切
+python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/configs.yaml \
     --parquet "/path/to/*.parquet" --out runs/m6_lora_f0
+# b) pipelines.time_splits 切好的目录（与 M1–M4 同一份切分；train_script.py --model_name m6 走的就是这条）
+python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/configs.yaml \
+    --splits-dir dataset/<name> --out runs/m6_lora_f0
 ```
-`model_config.yaml` 里先把 `finetune.enabled: true`、`finetune.split` 改成真实日期；滚动第二折加 `--shift-days N`，输出目录换 `_f1`。`--max-steps` 只用于冒烟。
+`config/configs.yaml` 里先把 `finetune.enabled: true`、`finetune.split` 改成真实日期；滚动第二折加 `--shift-days N`（只对 a 有效，
+b 的整体后移在切分时给），输出目录换 `_f1`。`--max-steps` 只用于冒烟。
 
 `finetune.split` 现在是验证块列表：`val_blocks` 若干个 `[start, end)` 整天区间（分散到不同季节），`test_start`/`test_end` 尾段测试，
 `cal_days` 校准段（固定放在 `test_start − purge_days` 之前），`purge_days`（块前剔除训练行）与 `embargo_days`（块后额外剔除）。
@@ -87,7 +106,7 @@ python -m forecast_backbones.m6.train --config forecast_backbones/m6/model_confi
 `purge_days + embargo_days` 须 ≥ L + H 折算天数（默认 9 天）——前 H 步保证块后训练行的标签不与块标签重叠，
 再往后的 L 步保证这些训练行 7 天的上下文不含块的标签。早停指标是各块南网短期得分的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`；
 切分事实落在 `out_dir/split_manifest.json`（`generated_by: forecast_backbones.m6.train`）。给 M1–M4 生成同一规则的 `train/valid/cal/test.parquet`：
-`python -m pipelines.time_splits --parquet RAW.parquet --out-dir dataset/<name> --m6-config forecast_backbones/m6/model_config.yaml`
+`python -m pipelines.time_splits --parquet RAW.parquet --out-dir dataset/<name> --m6-config forecast_backbones/m6/config/configs.yaml`
 （`--m6-config` 时 L/H/step_min 默认取该 yaml 的 `timesfm3.context_len` / `timesfm3.pred_len` / `dataset.step_min`，
 显式给的 `--L/--H/--step-min` 仍然胜出；这条路落的 manifest 是 `generated_by: pipelines.time_splits`）。
 默认日期是占位示例，训练前改成真实日期；`--shift-days N` 把全部边界整体后移 N 天做第二折。
