@@ -51,8 +51,26 @@ def clock_pseudo_geometry(ts: np.ndarray, day_start: str = "06:15", day_end: str
     return elev.reshape(shape), ghi.reshape(shape)
 
 
+def norm_station_name(x):
+    """站名归一成文本：去首尾空格；1002、1002.0、"1002.0" 都成 "1002"；缺值返回 None。"""
+    if x is None or (not isinstance(x, str) and pd.isna(x)):
+        return None
+    t = str(x).strip()
+    if t == "":
+        return None
+    try:
+        f = float(t)
+        if np.isfinite(f) and f == int(f):
+            return str(int(f))
+    except ValueError:
+        pass
+    return t
+
+
 class StationMeta:
-    """station_meta.csv：station_id, station, lat, lon, alt_m, cap_mw。缺值为 NaN。"""
+    """station_meta.csv：station_id, station, lat, lon, alt_m, cap_mw（列序随意）。缺值为 NaN。
+    station_id 是 M6 内部整数编号；station 是数据站列里的值。按站查编号见 resolve：先按 station 列的站名找，
+    找不到且是纯数字时按 station_id 找。"""
 
     COLS = ("station_id", "station", "lat", "lon", "alt_m", "cap_mw")
 
@@ -67,9 +85,8 @@ class StationMeta:
             raise ValueError(f"station_meta 的 station_id 必须是整数编号，这些不是：{bad[:10]}。"
                              f"站名（数据站列里的值，如 雅砻江、1001）写在 station 列；station_id 自己编一个不重复的整数即可")
         d["station_id"] = ids.astype(int)
-        # 站名一律按文本：全是数字的站名（如 1001）被 read_csv 读成整数/浮点时，归一成 '1001'，否则按名映射会漏掉它
-        d["station"] = d["station"].map(lambda x: x if isinstance(x, str) or pd.isna(x)
-                                        else (str(int(x)) if float(x) == int(float(x)) else str(x)))
+        # 站名一律按文本：去空格；全是数字的站名（如 1001）被读成整数/浮点或写成 1001.0 时归一成 '1001'
+        d["station"] = d["station"].map(norm_station_name)
         for c in ("lat", "lon", "alt_m", "cap_mw"):
             d[c] = pd.to_numeric(d[c], errors="coerce")
         d["alt_m"] = d["alt_m"].fillna(0.0)
@@ -85,7 +102,13 @@ class StationMeta:
 
     @classmethod
     def from_csv(cls, path: str | Path) -> "StationMeta":
-        return cls(pd.read_csv(path, dtype={"station": str}))
+        """UTF-8（含 Excel 的带 BOM 版）或 GBK（中文 Windows 下 Excel 另存的 CSV）都能读。"""
+        try:
+            df = pd.read_csv(path, dtype={"station": str}, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            df = pd.read_csv(path, dtype={"station": str}, encoding="gbk")
+        df.columns = [str(c).strip() for c in df.columns]
+        return cls(df)
 
     def get(self, station_id) -> dict | None:
         return self._rows.get(int(station_id))
@@ -98,9 +121,31 @@ class StationMeta:
         r = self.get(station_id)
         return str(r["station"]) if r is not None and isinstance(r["station"], str) else str(int(station_id))
 
+    def resolve(self, values) -> tuple[dict, list, list]:
+        """数据站列的取值 → station_id。返回 (映射 {归一后的值: id}, 找不到的值, 冲突说明)。
+        先按 station 列的站名找；找不到且是纯数字时按 station_id 找。若那个编号所在行的站名也出现在数据里
+        （即它已被另一个站按名认领），记为冲突，不静默合并两个站。"""
+        vals = sorted({v for v in (norm_station_name(x) for x in values) if v is not None})
+        claimed = {self._by_name[v]: v for v in vals if v in self._by_name}
+        mapping, unknown, conflicts = {}, [], []
+        for v in vals:
+            if v in self._by_name:
+                mapping[v] = self._by_name[v]
+            elif v.lstrip("-").isdigit() and int(v) in self._rows:
+                sid = int(v)
+                if sid in claimed:
+                    conflicts.append(f"数据里的站 {v!r} 按编号对上 station_id={sid}，但这个编号已属于站名 {claimed[sid]!r}"
+                                     f"：请给 {claimed[sid]!r} 换一个不重复的 station_id")
+                else:
+                    mapping[v] = sid
+            else:
+                unknown.append(v)
+        return mapping, unknown, conflicts
+
     def id_of(self, station_name) -> int | None:
-        """站名 → station_id；表里没有这个名字返回 None。"""
-        return self._by_name.get(str(station_name))
+        """站名（或纯数字编号）→ station_id；查不到或有冲突返回 None。"""
+        mapping, _, _ = self.resolve([station_name])
+        return mapping.get(norm_station_name(station_name))
 
     def ids(self) -> list[int]:
         return sorted(self._rows)
@@ -113,12 +158,16 @@ def attach_station_id(df: pd.DataFrame, meta: StationMeta, id_col: str = "statio
         return df
     if name_col not in df.columns:
         raise ValueError(f"数据里既没有 {id_col!r} 也没有 {name_col!r}，无法确定站点（列：{list(df.columns)[:12]}…）")
-    names = df[name_col].astype(str)
-    unknown = sorted(set(names.unique()) - set(meta._by_name))
+    names = df[name_col].map(norm_station_name)
+    mapping, unknown, conflicts = meta.resolve(names.dropna().unique())
+    if conflicts:
+        raise ValueError("站点编号冲突：" + "；".join(conflicts))
+    if names.isna().any():
+        unknown = unknown + ["<空站名>"]
     if unknown:
-        raise ValueError(f"这些站名在 station_meta 里没有对应的 station_id：{unknown}；"
-                         f"请在 station_meta.csv 加上（station_id,station,lat,lon,alt_m,cap_mw）")
-    return df.assign(**{id_col: names.map(meta._by_name).astype(np.int64)})
+        raise ValueError(f"这些站在 station_meta 里找不到：{unknown}。查找规则：先按 station 列的站名找，"
+                         f"找不到且是纯数字时按 station_id 列找；请在 station_meta.csv 补上这些站")
+    return df.assign(**{id_col: names.map(mapping).astype(np.int64)})
 
 
 def _day_mean(values: np.ndarray, ghi_clear: np.ndarray, min_clear: float) -> np.ndarray:

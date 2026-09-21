@@ -274,7 +274,7 @@ def test_dataset_with_station_id_maps_station_names(tmp_path):
     ds2 = _dataset_with_station_id([str(p)], cfg, meta, tmp_path / "scratch")           # 幂等
     assert len(ds2) == len(ds)
     bad = named.assign(station="Unknown"); bp = tmp_path / "bad.parquet"; bad.to_parquet(bp, index=False)
-    with pytest.raises(ValueError, match="没有对应的 station_id"):
+    with pytest.raises(ValueError, match="找不到"):
         _dataset_with_station_id([str(bp)], cfg, meta, tmp_path / "scratch")
 
 
@@ -324,7 +324,7 @@ def test_dataset_with_text_station_id_column_maps_through_station_meta(tmp_path)
     assert sorted(set(np.asarray(ds2.column("station_id")).astype(int))) == [1001, 1002]
     bad = df.assign(station_id=df["station_id"].map({1001: "雅砻江", 1002: "没这个站"}))
     r = tmp_path / "bad_id.parquet"; bad.to_parquet(r, index=False)
-    with pytest.raises(ValueError, match="没这个站.*没有对应的 station_id|没有对应的 station_id.*没这个站"):
+    with pytest.raises(ValueError, match="找不到.*没这个站"):
         _dataset_with_station_id([str(r)], cfg, meta, tmp_path / "scratch")
 
 def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
