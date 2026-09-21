@@ -496,3 +496,70 @@ def test_read_parquets_rejects_mismatched_columns(tmp_path):
     assert len(df) == 1 and paths == [str(tmp_path / "a.parquet")]
     with pytest.raises(FileNotFoundError):
         read_parquets([str(tmp_path / "nope*.parquet")])
+
+
+# ---------------- 数据太短的站只进训练 ----------------
+SHORT = {**SPANS, "D": ("2025-07-20", "2025-09-10")}                 # D 测试起点前 52 天，且压着 8 月的自动块
+
+
+def test_short_station_is_train_only_and_does_not_move_auto_blocks(tmp_path, capsys):
+    _write_station_files(tmp_path, SHORT)
+    cfg = {**AUTO, "min_station_days_for_val": 90}
+    (tmp_path / "auto.yaml").write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+    base = ["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "auto.yaml"),
+            "--test-parquets", str(tmp_path / "test" / "*.parquet")]
+    man = main(base + ["--out-dir", str(tmp_path / "ds")])
+    assert "站 D 测试起点前只有 52 天数据" in capsys.readouterr().out
+    # 放块与没有 D 时完全一样：D 不参与放块
+    ref_blocks, _ = suggest_val_blocks({s: _days(a, b) for s, (a, b) in SPANS.items()},
+                                       {s: pd.Timestamp(b) for s, (a, b) in SPANS.items()}, 4, 14, 2, 7, 0)
+    assert man["plan"]["val_blocks"] == [[a.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d")] for a, e in ref_blocks]
+    assert man["plan"]["train_only_stations"] == ["D"]
+    rep = {r["station"]: r for r in man["station_report"]}
+    assert rep["D"]["train_only"] is True and rep["D"]["val_days"] == 0 and rep["D"]["val_blocks"] == []
+    assert rep["D"]["train_days"] == 50 and rep["D"]["dropped_days"] == 2                  # 只剔测试起点前 purge 2 天
+    assert all(not rep[s]["train_only"] and rep[s]["val_days"] > 0 for s in SPANS)
+    tr = pd.read_parquet(tmp_path / "ds" / "train.parquet"); va = pd.read_parquet(tmp_path / "ds" / "valid.parquet")
+    d_tr = tr[tr["station"] == "D"]["timestamp_win"]
+    assert ((d_tr >= "2025-08-01") & (d_tr < "2025-08-15")).any()                          # 验证块日期里的 D 行仍是训练
+    assert (va["station"] != "D").all() and d_tr.max() < pd.Timestamp("2025-09-08")
+    # split_resolved.yaml 写死名单、去掉阈值，原样重跑逐字节一致
+    resolved = yaml.safe_load((tmp_path / "ds" / "split_resolved.yaml").read_text(encoding="utf-8"))
+    assert resolved["train_only_stations"] == ["D"] and "min_station_days_for_val" not in resolved
+    main(["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "ds" / "split_resolved.yaml"),
+          "--out-dir", str(tmp_path / "ds2")])
+    for f in ("train.parquet", "valid.parquet"):
+        pd.testing.assert_frame_equal(pd.read_parquet(tmp_path / "ds" / f), pd.read_parquet(tmp_path / "ds2" / f))
+
+
+def test_explicit_train_only_stations_and_errors(tmp_path):
+    _write_station_files(tmp_path)
+    run = lambda cfg, extra=(): (
+        (tmp_path / "c.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8"),
+        main(["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "c.yaml"),
+              "--test-parquets", str(tmp_path / "test" / "*.parquet"), "--dry-run", *extra]))[1]
+    man = run({**FIXED, "train_only_stations": ["C"]})                                   # 固定块 + 点名
+    rep = {r["station"]: r for r in man["station_report"]}
+    assert rep["C"]["train_only"] and rep["C"]["val_days"] == 0 and rep["A"]["val_days"] > 0
+    with pytest.raises(ValueError, match="训练数据里没有"):
+        run({**FIXED, "train_only_stations": ["Z"]})
+    with pytest.raises(ValueError, match="没有站可以做验证"):
+        run({**AUTO, "min_station_days_for_val": 10_000})
+    with pytest.raises(ValueError, match="train_only_stations 需要按站切分"):
+        SplitPlan.from_dict({**SPLIT, "train_only_stations": ["A"]})
+    with pytest.raises(ValueError, match="split_resolved.yaml"):
+        SplitPlan.from_dict({**SPLIT, "min_station_days_for_val": 90})
+    with pytest.raises(ValueError, match="没有 test_start"):
+        StationSplitPlan.from_dict({**FIXED, "train_only_stations": ["Q"]}, {"A": "2025-10-01"})
+
+
+def test_single_test_start_with_threshold_switches_to_by_station(tmp_path):
+    df = pd.concat([_frame(stations=("A",)),
+                    _frame("2025-09-01", "2025-12-01", stations=("S",))], ignore_index=True)   # S 测试起点前只有 30 天
+    raw = tmp_path / "raw.parquet"; df.to_parquet(raw, index=False)
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump({**SPLIT, "min_station_days_for_val": 60}), encoding="utf-8")
+    man = main(["--parquet", str(raw), "--split-yaml", str(tmp_path / "s.yaml"), "--out-dir", str(tmp_path / "ds")])
+    assert man["by_station"] is True and man["plan"]["test_start"] == {"A": "2025-10-01", "S": "2025-10-01"}
+    rep = {r["station"]: r for r in man["station_report"]}
+    assert rep["S"]["train_only"] and rep["S"]["train_days"] == 28 and rep["S"]["test_days"] == 61
+    assert rep["A"]["val_days"] == 28 and not rep["A"]["train_only"]
