@@ -82,7 +82,7 @@ def test_station_meta_id_of_and_attach_station_id(tmp_path):
     out = attach_station_id(df, meta)
     assert out["station_id"].tolist() == [1001, 1002, 1001] and "station_id" not in df.columns   # 不改原表
     assert attach_station_id(out, meta) is out                                       # 已有列原样返回
-    with pytest.raises(ValueError, match="没有对应的 station_id"):
+    with pytest.raises(ValueError, match="找不到"):
         attach_station_id(pd.DataFrame({"station": ["S1001", "S9"]}), meta)
     with pytest.raises(ValueError, match="既没有"):
         attach_station_id(pd.DataFrame({"x": [1]}), meta)
@@ -119,3 +119,32 @@ def test_station_meta_rejects_text_or_duplicate_station_id(tmp_path):
         StationMeta.from_csv(p)
     p.write_text("station_id,station,lat,lon,alt_m,cap_mw\n1,雅砻江,30,101,0,50\n2.0,1002,30,101,0,60\n", encoding="utf-8")
     assert StationMeta.from_csv(p).id_of("雅砻江") == 1 and StationMeta.from_csv(p).id_of("1002") == 2
+
+
+
+def test_station_lookup_by_name_then_by_numeric_code(tmp_path):
+    """数据站列的值先按站表 station 列（站名）找；找不到且是纯数字时，按 station_id 列（编号）找。"""
+    import pandas as pd
+    from forecast_backbones.m6.features import StationMeta, attach_station_id
+    p = tmp_path / "m.csv"
+    p.write_text("station_id,station,lat,lon,cap_mw,alt_m\n1002,甲站,30,101,,0\n1003,乙站,30,101,,0\n7,雅砻江,30,101,,0\n",
+                 encoding="utf-8")
+    meta = StationMeta.from_csv(p)
+    out = attach_station_id(pd.DataFrame({"station": ["1002", 1003, "雅砻江", " 1002 ", "1003.0"]}), meta)
+    assert out["station_id"].tolist() == [1002, 1003, 7, 1002, 1003]
+    assert attach_station_id(pd.DataFrame({"station": ["甲站"]}), meta)["station_id"].tolist() == [1002]
+    assert meta.id_of("1003") == 1003 and meta.id_of("雅砻江") == 7 and meta.id_of("没这个站") is None
+    with pytest.raises(ValueError, match="找不到.*'1004'"):
+        attach_station_id(pd.DataFrame({"station": ["1004"]}), meta)
+    p.write_text("station_id,station,lat,lon,cap_mw,alt_m\n1002,甲站,30,101,,0\n1003,雅砻江,30,101,,0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="'1003'.*雅砻江.*换一个"):                # 雅砻江的自编号撞上了数据里的站 1003
+        attach_station_id(pd.DataFrame({"station": ["1003", "雅砻江"]}), StationMeta.from_csv(p))
+
+
+def test_station_meta_reads_excel_encodings_and_messy_names(tmp_path):
+    from forecast_backbones.m6.features import StationMeta
+    text = "station_id,station,lat,lon,alt_m,cap_mw\n1,雅砻江 ,30,101,0,50\n2,1002.0,30,101,0,60\n"
+    for enc in ("utf-8-sig", "gbk"):
+        p = tmp_path / f"m_{enc}.csv"; p.write_bytes(text.encode(enc))
+        m = StationMeta.from_csv(p)
+        assert m.id_of("雅砻江") == 1 and m.id_of("1002") == 2 and m.name(1) == "雅砻江", enc
