@@ -298,6 +298,35 @@ def test_dataset_with_station_id_handles_int_and_text_station_files(tmp_path):
     ds = _dataset_with_station_id(paths, cfg, StationMeta.from_csv(meta_csv), tmp_path / "scratch")
     assert sorted(set(np.asarray(ds.column("station_id")).astype(int))) == [1001, 1002] and len(ds) == len(df)
 
+
+def test_dataset_with_text_station_id_column_maps_through_station_meta(tmp_path):
+    """数据自带的 station_id 列是文本（站名，如 雅砻江）：按 station_meta 映射成整数编号，
+    否则 collate 会丢掉文本列，所有行静默落成同一个站 0。文本存的纯数字编号直接转整数。"""
+    from forecast_backbones.m6.train import _dataset_with_station_id
+    from forecast_backbones.m6.features import StationMeta
+    from forecast_backbones.m6.config import load_config
+    from forecast_backbones.m6.tests.conftest import LAT, CAP
+    meta_csv = tmp_path / "station_meta.csv"
+    meta_csv.write_text("station_id,station,lat,lon,alt_m,cap_mw\n"
+                        + "".join(f"{s},{'雅砻江' if s == 1001 else '1002'},{LAT[s][0]},{LAT[s][1]},{LAT[s][2]},{CAP[s]}\n"
+                                  for s in (1001, 1002)), encoding="utf-8")
+    meta = StationMeta.from_csv(meta_csv)
+    cfg = load_config({"dataset": {"station_meta": str(meta_csv)}})
+    df = make_synthetic_frame(n_days=1, issue_every_min=360)
+    named = df.assign(station_id=df["station_id"].map({1001: "雅砻江", 1002: "1002"}))
+    p = tmp_path / "named_id.parquet"; named.to_parquet(p, index=False)
+    ds = _dataset_with_station_id([str(p)], cfg, meta, tmp_path / "scratch")
+    got = pd.DataFrame({"sid": np.asarray(ds.column("station_id")).astype(int)})
+    assert sorted(set(got["sid"])) == [1001, 1002] and len(ds) == len(df)
+    digits = df.assign(station_id=df["station_id"].astype(str))                    # 文本存的整数编号
+    q = tmp_path / "digit_id.parquet"; digits.to_parquet(q, index=False)
+    ds2 = _dataset_with_station_id([str(q)], cfg, meta, tmp_path / "scratch")
+    assert sorted(set(np.asarray(ds2.column("station_id")).astype(int))) == [1001, 1002]
+    bad = df.assign(station_id=df["station_id"].map({1001: "雅砻江", 1002: "没这个站"}))
+    r = tmp_path / "bad_id.parquet"; bad.to_parquet(r, index=False)
+    with pytest.raises(ValueError, match="没这个站.*没有对应的 station_id|没有对应的 station_id.*没这个站"):
+        _dataset_with_station_id([str(r)], cfg, meta, tmp_path / "scratch")
+
 def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
     """与 M1–M4 共用 pipelines.time_splits 落的目录：train/valid/cal.parquet + split_manifest.json。"""
     from pipelines.time_splits import SplitPlan, write_splits

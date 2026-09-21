@@ -47,11 +47,11 @@ except ImportError:
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
     from ...pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
-                                          load_test_starts, station_keys, reconcile_test_starts, concat_parquets)
+                                          load_test_starts, station_keys, reconcile_test_starts, concat_parquets, _arrow_kind)
 except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
     from pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
-                                       load_test_starts, station_keys, reconcile_test_starts, concat_parquets)
+                                       load_test_starts, station_keys, reconcile_test_starts, concat_parquets, _arrow_kind)
 
 
 def build_plan(split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15,
@@ -133,14 +133,30 @@ def _dataset_with_station_id(paths, cfg: dict, station_meta, scratch_dir) -> Uni
     按 station_meta 映射补上并落到 scratch_dir 下的临时 parquet 再装载（arrow 后端不能就地加列）。"""
     ds_cfg = cfg["dataset"]; id_col = str(ds_cfg["station_id_col"])
     import pyarrow.parquet as pq
-    cols = pq.read_schema(paths[0]).names
-    if id_col not in cols:
-        df = concat_parquets(paths, station_col="station")
-        df = attach_station_id(df, station_meta, id_col=id_col, name_col="station")
+    schemas = [pq.read_schema(p) for p in paths]
+    cols = schemas[0].names
+    # 数据自带的 station_id 列是文本（站名，或文本存的数字）：collate 会丢掉文本列，所有行会静默落成站 0，所以先转成整数编号
+    text_id = id_col in cols and any(_arrow_kind(sc.field(id_col).type) == "文本" for sc in schemas if id_col in sc.names)
+    if id_col not in cols or text_id:
+        name_col = id_col if text_id else "station"
+        df = concat_parquets(paths, station_col=name_col)
+        if text_id:
+            vals = pd.Series(station_keys(df[id_col].to_numpy()), index=df.index)
+            as_int = pd.to_numeric(vals, errors="coerce")
+            if as_int.notna().all():
+                df[id_col] = as_int.astype(np.int64)
+                how = f"{id_col!r} 列是文本存的整数编号：直接转成整数"
+            else:
+                df = attach_station_id(df.drop(columns=[id_col]).assign(_station_name=vals), station_meta,
+                                       id_col=id_col, name_col="_station_name").drop(columns=["_station_name"])
+                how = f"{id_col!r} 列是站名文本：按 station_meta 的 station 列映射成整数编号"
+        else:
+            df = attach_station_id(df, station_meta, id_col=id_col, name_col="station")
+            how = f"数据无 {id_col!r} 列：按 station_meta 从站名映射补上"
         scratch = Path(scratch_dir); scratch.mkdir(parents=True, exist_ok=True)
         tmp = scratch / f"{Path(paths[0]).stem}_with_{id_col}.parquet"
         df.to_parquet(tmp, index=False)
-        print(f"[m6] 数据无 {id_col!r} 列：按 station_meta 从站名映射补上，写到 {tmp}")
+        print(f"[m6] {how}，写到 {tmp}")
         paths = [str(tmp)]
     return UnifiedDataset(paths if len(paths) > 1 else paths[0], timestamp_cols=[ds_cfg["ts_col"]], entity_cols=[],
                           label_cols=[ds_cfg["label_col"]], timestamp_output="epoch_s", epoch_unit="s",

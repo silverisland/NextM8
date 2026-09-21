@@ -61,13 +61,25 @@ class StationMeta:
         if missing:
             raise KeyError(f"station_meta 缺列: {missing}")
         d = df.copy()
-        d["station_id"] = d["station_id"].astype(int)
+        ids = pd.to_numeric(d["station_id"], errors="coerce")
+        bad = d.loc[ids.isna() | (ids != ids.round()), "station_id"].astype(str).tolist()
+        if bad:
+            raise ValueError(f"station_meta 的 station_id 必须是整数编号，这些不是：{bad[:10]}。"
+                             f"站名（数据站列里的值，如 雅砻江、1001）写在 station 列；station_id 自己编一个不重复的整数即可")
+        d["station_id"] = ids.astype(int)
         # 站名一律按文本：全是数字的站名（如 1001）被 read_csv 读成整数/浮点时，归一成 '1001'，否则按名映射会漏掉它
         d["station"] = d["station"].map(lambda x: x if isinstance(x, str) or pd.isna(x)
                                         else (str(int(x)) if float(x) == int(float(x)) else str(x)))
         for c in ("lat", "lon", "alt_m", "cap_mw"):
             d[c] = pd.to_numeric(d[c], errors="coerce")
         d["alt_m"] = d["alt_m"].fillna(0.0)
+        dup = sorted(d.loc[d["station_id"].duplicated(), "station_id"].astype(int).unique().tolist())
+        if dup:
+            raise ValueError(f"station_meta 里 station_id 重复：{dup}")
+        names = d["station"].dropna()
+        dup = sorted(names[names.duplicated()].astype(str).unique().tolist())
+        if dup:
+            raise ValueError(f"station_meta 里 station 重复：{dup}（一个站名只能对应一个 station_id）")
         self._rows = {int(r.station_id): r._asdict() for r in d.itertuples(index=False)}
         self._by_name = {str(r["station"]): sid for sid, r in self._rows.items() if isinstance(r["station"], str)}
 
