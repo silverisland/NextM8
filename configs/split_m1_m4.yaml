@@ -1,24 +1,36 @@
 # configs/split_m1_m4.yaml —— M1–M4 的 train / valid 时间轴切分配置
+#
 # 用法（在仓库根目录执行）：
-#   python -m pipelines.time_splits --parquet data/train_all.parquet --out-dir data/splits/m1_m4_v1 \
-#       --split-yaml configs/split_m1_m4.yaml --test-parquets "data/test/*.parquet"
-# 每站的测试起点由 --test-parquets 从现有测试集推出，所以这里不写 test_start。
+#   1) 先只看报告，不写文件：
+#      python -m pipelines.time_splits --parquet "data/train/*.parquet" \
+#          --split-yaml configs/split_m1_m4.yaml --test-parquets "data/test/*.parquet" --dry-run
+#   2) 报告没问题再落盘：
+#      python -m pipelines.time_splits --parquet "data/train/*.parquet" \
+#          --split-yaml configs/split_m1_m4.yaml --test-parquets "data/test/*.parquet" \
+#          --out-dir data/splits/m1_m4_v1
+#   落盘后 data/splits/m1_m4_v1/split_resolved.yaml 记下这次实际用到的固定日期；
+#   以后只传 --split-yaml data/splits/m1_m4_v1/split_resolved.yaml（不带 --test-parquets）即可复现同一切分。
+#
+# 每站的测试起点由 --test-parquets 从现有测试集推出（该站测试集里最早一天），这里不写 test_start。
 # 日期一律写成 "YYYY-MM-DD"，表示当天 00:00。
 
 # 训练数据最早从哪天开始用；null = 用全部历史
 train_start: null
 
-# 验证块列表，每块 [开始日, 结束日)，左闭右开，至少 2 天，块之间不能重叠。
-# 下面三块是占位日期，必须按你数据的实际范围改：
-#   - 分散到不同季节（冬 / 春 / 夏），每块 3 周左右；
-#   - 验证行是从 --parquet 的训练数据里切出来的，块要落在各站训练数据有数据的日期上；
-#     某站在某块里没有数据不会报错，只是该站在这一块没有验证行（manifest 的 stations.<站>.val_blocks 可查）；
-#   - 每一块的结束日至少比某站的测试起点早 4 天（= 2 × purge_days；cal_days > 0 时再加 cal_days），
-#     否则那个站跳过这一块（终端和 split_manifest.json 里会注明）；没有任何站容得下的块直接报错。
-val_blocks:
-  - ["2025-01-10", "2025-01-31"]
-  - ["2025-04-10", "2025-05-01"]
-  - ["2025-07-16", "2025-08-06"]
+# 验证块。auto = 按各站实际数据自动放块，全站共用同一批日历日期：
+#   可用区间 = [所有站最早有数据的一天, 所有站里最晚的"测试起点 − 4 天")，等分成 n_val_blocks 段，
+#   每段挑一个 val_block_days 天的块，使块里有数据的站·天数最大（同分取段中间）；
+#   跨度短的站只参加落在它数据段里的块，终端的逐站覆盖表会列出每站参加了哪些块、训练/验证占比。
+# 也可以手写固定日期列表 [[开始日, 结束日), ...]，左闭右开，至少 2 天，块之间不能重叠：
+#   val_blocks:
+#     - ["2025-01-10", "2025-01-24"]
+#     - ["2025-04-10", "2025-04-24"]
+val_blocks: auto
+n_val_blocks: 4          # 块数；4 块大致一季一块。跨度普遍不到一年时可改 3
+val_block_days: 14       # 每块天数。每块额外剔除块前 2 天、块后 9 天的训练行，块越多越长，训练数据越少
+
+# 有站一行验证数据都没有时：false = 报错并列出这些站；true = 放行，这些站的数据全部进训练
+allow_stations_without_val: false
 
 # 测试段终点；null = 到数据末尾。测试集用你现有的文件，保持 null 即可
 test_end: null

@@ -122,6 +122,13 @@ M6 配置里对应写 `finetune.split.test_start: {1001: "2025-06-28", 1002: "20
 跳过情况记在 manifest 的 `plan.skipped_val_blocks` 与终端输出里；一个站一个块都容不下、或一个块没有任何站容得下、
 或训练数据里有站没给 `test_start`，都直接报错。`valid.parquet` 的 `split_block` 与 `train_log.json` 里的块序号一律是全局序号。
 
+**各站跨度不一（有的不到一年）**：切分配置写 `val_blocks: auto` + `n_val_blocks` + `val_block_days`，CLI 按各站实际数据自动放
+全站共用的日历块（可用区间等分成 n 段，每段取"块内有数据的站·天"最多的位置）。每次切分都打印逐站覆盖表
+（数据起止、测试起点、参加/跳过的块、训练/验证天数与占比，也写进 manifest 的 `station_report`）；有站一行验证数据都没有时报错，
+除非配置里写 `allow_stations_without_val: true`。`--dry-run` 只打印不落盘；`--parquet` 直接收通配符（一站一个文件时不必先拼表，
+各文件列须一致）。落盘目录里的 `split_resolved.yaml` 是这次实际用到的固定日期（含每站 `test_start` 映射），原样 `--split-yaml` 即可复现；
+M6 的 `finetune.split` 不解析 `auto`，要用就抄 `split_resolved.yaml` 里的 `val_blocks`。M1–M4 的模板见仓库根目录 `configs/split_m1_m4.yaml`。
+
 产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
 `station_routing.json`（逐站 `lora|zeroshot`，输给零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
 `calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：

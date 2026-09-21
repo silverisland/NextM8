@@ -298,3 +298,11 @@ def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
     (splits / "cal.parquet").unlink()
     with pytest.raises(FileNotFoundError, match="cal_days"):
         train_m6(cfg, splits_dir=str(splits), max_steps=1)
+
+
+def test_build_plan_rejects_unresolved_auto_blocks():
+    from forecast_backbones.m6.train import build_plan
+    split = {"train_start": None, "val_blocks": "auto", "n_val_blocks": 3, "val_block_days": 14, "test_start": "2025-10-01",
+             "test_end": None, "cal_days": 1, "purge_days": 2, "embargo_days": 7}
+    with pytest.raises(ValueError, match="split_resolved.yaml"):
+        build_plan(split)
