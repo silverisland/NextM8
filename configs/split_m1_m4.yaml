@@ -1,0 +1,32 @@
+# configs/split_m1_m4.yaml —— M1–M4 的 train / valid 时间轴切分配置
+# 用法（在仓库根目录执行）：
+#   python -m pipelines.time_splits --parquet data/train_all.parquet --out-dir data/splits/m1_m4_v1 \
+#       --split-yaml configs/split_m1_m4.yaml --test-parquets "data/test/*.parquet"
+# 每站的测试起点由 --test-parquets 从现有测试集推出，所以这里不写 test_start。
+# 日期一律写成 "YYYY-MM-DD"，表示当天 00:00。
+
+# 训练数据最早从哪天开始用；null = 用全部历史
+train_start: null
+
+# 验证块列表，每块 [开始日, 结束日)，左闭右开，至少 2 天，块之间不能重叠。
+# 下面三块是占位日期，必须按你数据的实际范围改：
+#   - 分散到不同季节（冬 / 春 / 夏），每块 3 周左右；
+#   - 落在所有站的训练数据范围之内；
+#   - 最后一块的结束日至少比"测试开始最早的那个站"的测试起点早 2 天，
+#     否则那个站会跳过这一块（终端和 split_manifest.json 里会注明）。
+val_blocks:
+  - ["2025-01-10", "2025-01-31"]
+  - ["2025-04-10", "2025-05-01"]
+  - ["2025-07-16", "2025-08-06"]
+
+# 测试段终点；null = 到数据末尾。测试集用你现有的文件，保持 null 即可
+test_end: null
+
+# 校准段天数。M1–M4 不做 conformal 校准，写 0，不生成 cal.parquet
+cal_days: 0
+
+# 验证块和测试起点之前剔除的训练行天数，至少 2 天（= 预测长度 192 步）
+purge_days: 2
+
+# 验证块之后额外剔除的天数。purge_days + embargo_days 至少 9 天（= 历史 672 步 + 预测 192 步）
+embargo_days: 7
