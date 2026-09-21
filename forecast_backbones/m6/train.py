@@ -47,11 +47,11 @@ except ImportError:
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
     from ...pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
-                                          load_test_starts, station_keys, reconcile_test_starts)
+                                          load_test_starts, station_keys, reconcile_test_starts, concat_parquets)
 except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
     from pipelines.time_splits import (SplitPlan, StationSplitPlan, assign_rows, verify_rows, has_cal,
-                                       load_test_starts, station_keys, reconcile_test_starts)
+                                       load_test_starts, station_keys, reconcile_test_starts, concat_parquets)
 
 
 def build_plan(split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15,
@@ -131,7 +131,7 @@ def _dataset_with_station_id(paths, cfg: dict, station_meta, scratch_dir) -> Uni
     import pyarrow.parquet as pq
     cols = pq.read_schema(paths[0]).names
     if id_col not in cols:
-        df = pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
+        df = concat_parquets(paths, station_col="station")
         df = attach_station_id(df, station_meta, id_col=id_col, name_col="station")
         scratch = Path(scratch_dir); scratch.mkdir(parents=True, exist_ok=True)
         tmp = scratch / f"{Path(paths[0]).stem}_with_{id_col}.parquet"

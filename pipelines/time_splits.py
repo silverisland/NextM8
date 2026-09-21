@@ -706,16 +706,62 @@ def expand_paths(specs, what: str = "--parquet") -> list[str]:
     return sorted(dict.fromkeys(paths))
 
 
-def read_parquets(specs) -> tuple[pd.DataFrame, list[str]]:
-    """读若干 parquet 拼成一张表（一站一个文件时用）。各文件列集合必须一致，否则报错（不静默补 NaN）。"""
-    paths = expand_paths(specs, "--parquet")
+def _arrow_kind(t) -> str:
+    """parquet 列类型归大类：同一大类里的差别（int32/float64、list<float>/list<double>）pandas 拼接能兼容。"""
+    import pyarrow as pa
+    if pa.types.is_null(t):
+        return "null"
+    if pa.types.is_string(t) or pa.types.is_large_string(t):
+        return "文本"
+    if pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_boolean(t) or pa.types.is_decimal(t):
+        return "数值"
+    if pa.types.is_timestamp(t) or pa.types.is_date(t):
+        return "时间"
+    if pa.types.is_list(t) or pa.types.is_large_list(t) or pa.types.is_fixed_size_list(t):
+        return "数组"
+    return str(t)
+
+
+STATION_COLS = ("station_id", "station")
+
+
+def concat_parquets(paths, station_col=None) -> pd.DataFrame:
+    """读若干 parquet 拼成一张表（一站一个文件时用）。各文件列集合必须一致，否则报错（不静默补 NaN）。
+    同一列在各文件里类型大类不一致时：站标识列（station_col，缺省 station_id / station）统一成文本站号
+    （station_keys：1001 与 1001.0 都成 '1001'）再拼；其他列直接报错并指明列与文件，
+    否则 pandas 拼出混类型的 object 列，落盘时 pyarrow 才报 ArrowTypeError。"""
+    paths = [str(x) for x in paths]
+    schemas = [pq.read_schema(p) for p in paths]
+    cols0 = set(schemas[0].names)
+    for pth, sc in zip(paths[1:], schemas[1:]):
+        if set(sc.names) != cols0:
+            raise ValueError(f"{pth} 的列与 {paths[0]} 不一致：多出 {sorted(set(sc.names) - cols0)}，"
+                             f"缺少 {sorted(cols0 - set(sc.names))}")
     frames = [pd.read_parquet(p) for p in paths]
-    cols0 = set(frames[0].columns)
-    for pth, f in zip(paths[1:], frames[1:]):
-        if set(f.columns) != cols0:
-            raise ValueError(f"{pth} 的列与 {paths[0]} 不一致：多出 {sorted(set(f.columns) - cols0)}，"
-                             f"缺少 {sorted(cols0 - set(f.columns))}")
-    return (frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)), paths
+    if len(frames) == 1:
+        return frames[0]
+    station_like = {station_col} if station_col is not None else set(STATION_COLS)
+    for c in schemas[0].names:
+        kinds: dict = {}
+        for pth, sc in zip(paths, schemas):
+            k = _arrow_kind(sc.field(c).type)
+            if k != "null":
+                kinds.setdefault(k, []).append(pth)
+        if len(kinds) <= 1:
+            continue
+        detail = "；".join(f"{k} {len(v)} 个文件，如 {Path(v[0]).name}" for k, v in kinds.items())
+        if c in station_like and set(kinds) <= {"文本", "数值"}:
+            print(f"[time_splits] 站标识列 {c!r} 在各文件里类型不一致（{detail}）：统一转成文本站号后再拼接")
+            frames = [f.assign(**{c: station_keys(f[c].to_numpy())}) for f in frames]
+            continue
+        raise ValueError(f"列 {c!r} 在各文件里类型不一致（{detail}）：请先把这一列在所有文件里统一成同一种类型")
+    return pd.concat(frames, ignore_index=True)
+
+
+def read_parquets(specs, station_col=None) -> tuple[pd.DataFrame, list[str]]:
+    """--parquet（可含通配符）→ (拼好的表, 文件列表)。拼接规则见 concat_parquets。"""
+    paths = expand_paths(specs, "--parquet")
+    return concat_parquets(paths, station_col=station_col), paths
 
 
 def load_test_starts(test_parquets, ts_col: str = "timestamp_win", station_col=None) -> dict:
@@ -797,7 +843,7 @@ def main(argv=None) -> dict:
     pick = lambda flag, key, fallback: flag if flag is not None else geom.get(key, fallback)
     L, H, step_min = pick(a.L, "L", 672), pick(a.H, "H", 192), pick(a.step_min, "step_min", 15)
 
-    df, paths = read_parquets(a.parquet)
+    df, paths = read_parquets(a.parquet, station_col=a.station_col)
     if a.ts_col not in df.columns:
         raise ValueError(f"数据里没有时间列 {a.ts_col!r}")
     ts = _ts_array(df[a.ts_col])
