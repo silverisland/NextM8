@@ -6,7 +6,9 @@
   块前 purge_days（≥ H 折算天数）：训练行标签不伸进块；
   块后 purge_days + embargo_days 合计须 ≥ L + H 折算天数（默认 2 + 7 = 9 天 = 672 + 192 步）：
   前 H 步保证训练行标签不与块标签重叠，再往后的 L 步保证训练行 7 天上下文不含块的标签。
-校准段固定放在 test_start − purge 之前 cal_days 天；训练行到校准段前 purge 为止。"""
+校准段固定放在 test_start − purge 之前 cal_days 天；训练行到校准段前 purge 为止。
+验证块是全站共用的日历日期（同一天不会一站当训练、另一站当验证）；val_blocks: auto 时按各站实际数据自动放块
+（suggest_val_blocks），落盘后 split_resolved.yaml 记下实际用到的固定日期，原样传回即可复现。"""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +40,12 @@ def _dt64(t: pd.Timestamp) -> np.datetime64:
     return pd.Timestamp(t).to_datetime64().astype("datetime64[ns]")
 
 
+def _reject_auto(split: dict) -> None:
+    if isinstance(split.get("val_blocks"), str):
+        raise ValueError(f"val_blocks={split['val_blocks']!r} 须先按数据解析成固定日期：pipelines.time_splits 的命令行会自动做，"
+                         f"解析结果写在输出目录的 split_resolved.yaml（M6 等直接读配置的地方请抄那里的 val_blocks）")
+
+
 @dataclass(frozen=True)
 class SplitPlan:
     val_blocks: tuple                       # ((start, end), ...) 半开、整天、已排序、不重叠
@@ -50,9 +58,14 @@ class SplitPlan:
     L: int = 672
     H: int = 192
     step_min: int = 15
+    allow_stations_without_val: bool = False   # True：落盘时允许个别站一行验证数据都没有（其数据全进训练）
 
     @classmethod
-    def from_dict(cls, split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15) -> "SplitPlan":
+    def from_dict(cls, split: dict, shift_days: int = 0, L: int = 672, H: int = 192, step_min: int = 15,
+                  allow_empty_blocks: bool = False) -> "SplitPlan":
+        """allow_empty_blocks 只给 StationSplitPlan 用：某站一个块都容不下且 allow_stations_without_val 为真时，
+        该站的 plan 没有验证块（只剩训练/测试的划分）。"""
+        _reject_auto(split)
         legacy = [k for k in LEGACY_KEYS if k in split]
         if legacy:
             raise ValueError(f"split 含旧键 {legacy}：请改为 val_blocks=[[start,end],...] + test_start/test_end + "
@@ -72,7 +85,7 @@ class SplitPlan:
         if cal < 0:
             raise ValueError(f"cal_days={cal} 不能为负")
         raw = list(split.get("val_blocks") or [])
-        if not raw:
+        if not raw and not allow_empty_blocks:
             raise ValueError("val_blocks 为空：至少需要一个验证块 [start, end)")
         blocks = []
         for i, pair in enumerate(raw):
@@ -91,10 +104,13 @@ class SplitPlan:
         if test_end is not None and test_end <= test_start:
             raise ValueError(f"test_end={test_end.date()} 不晚于 test_start={test_start.date()}")
         train_start = (_day(split["train_start"], "train_start") + sh) if split.get("train_start") else None
-        if train_start is not None and blocks[0][0] < train_start:
+        if train_start is not None and blocks and blocks[0][0] < train_start:
             raise ValueError(f"第一个验证块起点 {blocks[0][0].date()} 早于 train_start {train_start.date()}："
                              f"val_blocks 必须落在训练数据区间之内")
-        plan = cls(tuple(blocks), test_start, test_end, cal, purge, embargo, train_start, int(L), int(H), int(step_min))
+        plan = cls(tuple(blocks), test_start, test_end, cal, purge, embargo, train_start, int(L), int(H), int(step_min),
+                   bool(split.get("allow_stations_without_val", False)))
+        if not blocks:
+            return plan
         c = plan.cal_interval
         guard = c[0] if c is not None else test_start - plan.purge
         last_end = blocks[-1][1]
@@ -136,7 +152,7 @@ class SplitPlan:
     @property
     def coverage_note(self) -> str | None:
         quarters = {(s.year, (s.month - 1) // 3 + 1) for s, _ in self.val_blocks}
-        if len(quarters) >= 2:
+        if len(quarters) >= 2 or not quarters:
             return None
         return ("全部验证块落在同一日历季度：早停与选型只看到一个季节的行为，建议把验证块分散到不同季节"
                 f"（当前 {sorted(quarters)}）")
@@ -179,6 +195,7 @@ class SplitPlan:
                 "test_start": iso(self.test_start), "test_end": iso(self.test_end),
                 "cal_days": self.cal_days, "purge_days": self.purge_days, "embargo_days": self.embargo_days,
                 "L": self.L, "H": self.H, "step_min": self.step_min,
+                "allow_stations_without_val": self.allow_stations_without_val,
                 "train_exclusions": [[iso(a), iso(b)] for a, b in self.train_exclusions],
                 "inputs_disjoint_after": self.inputs_disjoint_after, "coverage_note": self.coverage_note}
 
@@ -230,6 +247,7 @@ class StationSplitPlan:
     @classmethod
     def from_dict(cls, split: dict, test_starts: dict, shift_days: int = 0, L: int = 672, H: int = 192,
                   step_min: int = 15) -> "StationSplitPlan":
+        _reject_auto(split)
         if not test_starts:
             raise ValueError("test_starts 为空：按站切分至少要给一个站的 test_start")
         starts = {_station_key(k): _day(v, f"test_start[{k}]") for k, v in test_starts.items()}
@@ -245,13 +263,14 @@ class StationSplitPlan:
         plans, index, skipped = {}, {}, {}
         for st, t0 in starts.items():
             keep = _feasible_blocks(raw_blocks, t0, ref.cal_days, ref.purge_days)
-            if not keep:
+            if not keep and not ref.allow_stations_without_val:
                 raise ValueError(f"站 {st} 的 test_start={t0.date()} 太早，一个验证块都容不下"
                                  f"（块结束 + purge {ref.purge_days} 天须 ≤ test_start − purge − cal_days {ref.cal_days} 天）：\n"
-                                 f"请把该站的验证块提前，或换更晚的测试段")
+                                 f"请把该站的验证块提前、改用 val_blocks: auto，或写 allow_stations_without_val: true")
             sub = {**base, "val_blocks": [[str(raw_blocks[i][0].date()), str(raw_blocks[i][1].date())] for i in keep],
                    "test_start": t0}
-            plans[st] = SplitPlan.from_dict(sub, shift_days=shift_days, L=L, H=H, step_min=step_min)
+            plans[st] = SplitPlan.from_dict(sub, shift_days=shift_days, L=L, H=H, step_min=step_min,
+                                            allow_empty_blocks=True)
             index[st] = tuple(keep)
             skipped[st] = [i for i in range(len(raw_blocks)) if i not in keep]
         return cls(ref, plans, index, skipped)
@@ -332,6 +351,115 @@ def verify_rows(plan, ts: np.ndarray, role: np.ndarray, block: np.ndarray, stati
     verify_leak_free(t[role == "train"], tv, t[role == "cal"] if plan.cal_interval is not None else None, plan)
 
 
+def suggest_val_blocks(days_by_station: dict, test_starts: dict, n_blocks: int, block_days: int, purge_days: int,
+                       embargo_days: int, cal_days: int, train_start=None) -> tuple[list, list]:
+    """按数据自动放全站共用的验证块。days_by_station：{站: 有数据的日期数组}；test_starts：{站: 测试起点}。
+    可用区间 = [所有站最早有数据的一天, 所有站里最晚的 测试起点 − 2×purge − cal_days)，等分成 n_blocks 段，
+    每段里挑一个 block_days 天的块，使"块内有数据且容得下这个块的站·天数"最大，同分取最靠段中心的；
+    相邻两块至少隔 2×purge + embargo 天（两块的剔除区不重叠）。某段里最好的块也凑不够半块（block_days/2 个站·天）
+    就不放块（这一段基本没有数据）。
+    返回 (blocks, notes)：blocks = [(start, end), ...]，notes = 需要提示用户的话。"""
+    n, b = int(n_blocks), int(block_days)
+    if n < 1:
+        raise ValueError(f"n_val_blocks={n} 须 ≥ 1")
+    if b < 2:
+        raise ValueError(f"val_block_days={b} 须 ≥ 2")
+    one = np.timedelta64(1, "D")
+    lim = {str(s): np.datetime64(pd.Timestamp(t).date(), "D") - np.timedelta64(2 * int(purge_days) + int(cal_days), "D")
+           for s, t in test_starts.items()}
+    ts0 = None if train_start is None else np.datetime64(pd.Timestamp(train_start).date(), "D")
+    usable = {}
+    for s, d in days_by_station.items():
+        if str(s) not in lim:
+            raise ValueError(f"站 {s} 没有 test_start")
+        d = np.unique(np.asarray(d).astype("datetime64[D]"))
+        d = d[d < lim[str(s)]]
+        if ts0 is not None:
+            d = d[d >= ts0]
+        if d.size:
+            usable[str(s)] = d
+    if not usable:
+        raise ValueError("没有任何站在各自测试起点之前有可放验证块的数据")
+    g0 = min(d[0] for d in usable.values())
+    g1 = max(lim[s] for s in usable)
+    span = int((g1 - g0) / one)
+    if span < n * b:
+        raise ValueError(f"可放验证块的区间 [{g0}, {g1}) 只有 {span} 天，放不下 {n} 块 × {b} 天："
+                         f"减少 n_val_blocks 或 val_block_days")
+    starts = np.arange(0, span - b + 1)
+    score = np.zeros(starts.size, dtype=np.int64)
+    for s, d in usable.items():
+        ind = np.zeros(span, dtype=np.int64)
+        ind[((d - g0) / one).astype(np.int64)] = 1
+        cs = np.concatenate([[0], np.cumsum(ind)])
+        score += (cs[starts + b] - cs[starts]) * ((starts + b) <= int((lim[s] - g0) / one))
+    edges = [round(k * span / n) for k in range(n + 1)]
+    gap = 2 * int(purge_days) + int(embargo_days)
+    chosen, notes, prev_end = [], [], None
+    for k in range(n):
+        cand = starts[(starts >= edges[k]) & (starts + b <= edges[k + 1])]
+        if prev_end is not None:
+            cand = cand[cand >= prev_end + gap]
+        seg = f"[{g0 + edges[k] * one}, {g0 + edges[k + 1] * one})"
+        if cand.size == 0 or score[cand].max() < math.ceil(b / 2):
+            notes.append(f"第 {k + 1} 段 {seg} 里可用数据不到半块，这一段不放验证块")
+            continue
+        best = cand[score[cand] == score[cand].max()]
+        centre = (edges[k] + edges[k + 1] - b) / 2
+        a = int(best[np.argmin(np.abs(best - centre))])
+        chosen.append((a, a + b)); prev_end = a + b
+    if not chosen:
+        raise ValueError("自动放块失败：每一段都没有可用数据")
+    if len(chosen) < n:
+        notes.append(f"要求 {n} 块，实际放了 {len(chosen)} 块")
+    blocks = [(pd.Timestamp(g0 + a * one), pd.Timestamp(g0 + e * one)) for a, e in chosen]
+    return blocks, notes
+
+
+def resolve_auto_blocks(ts: np.ndarray, station: np.ndarray, test_starts: dict, split: dict) -> tuple[list, list]:
+    """val_blocks: auto → 固定日期列表 [[start, end], ...]（字符串）。需要 split 里的 n_val_blocks / val_block_days。"""
+    missing = [k for k in ("n_val_blocks", "val_block_days") if k not in split]
+    if missing:
+        raise ValueError(f"val_blocks: auto 需要同时写 {missing}")
+    t = np.asarray(ts).astype("datetime64[ns]")
+    st = station_keys(station)
+    ok = ~np.isnat(t)
+    day = t[ok].astype("datetime64[D]"); st = st[ok]
+    days = {s: day[st == s] for s in sorted(set(st.tolist()))}
+    starts = {_station_key(k): v for k, v in test_starts.items()}
+    lacking = sorted(set(days) - set(starts))
+    if lacking:
+        raise ValueError(f"这些站没有 test_start：{lacking}（每个站都必须给出自己的测试起点）")
+    blocks, notes = suggest_val_blocks(days, {s: starts[s] for s in days}, int(split["n_val_blocks"]),
+                                       int(split["val_block_days"]), int(split["purge_days"]),
+                                       int(split["embargo_days"]), int(split["cal_days"]),
+                                       train_start=split.get("train_start"))
+    return [[a.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d")] for a, e in blocks], notes
+
+
+def station_report(ts: np.ndarray, station: np.ndarray, role: np.ndarray, block: np.ndarray, plan) -> pd.DataFrame:
+    """逐站覆盖：数据起止、测试起点、参加的验证块、各角色天数（有该角色行的日期数）、训练/验证占测试前行数的比例。"""
+    day = np.asarray(ts).astype("datetime64[D]")
+    rows = []
+    for s in sorted(set(station.tolist())):
+        m = station == s
+        d, r, bk = day[m], role[m], block[m]
+        ok = ~np.isnat(d)
+        nd = lambda mask: int(np.unique(d[mask & ok]).size)
+        t0 = plan.plans[s].test_start if isinstance(plan, StationSplitPlan) else plan.test_start
+        pre = int((r != "test").sum())
+        rows.append({"station": s, "data_start": str(d[ok].min()) if ok.any() else None,
+                     "data_end": str(d[ok].max()) if ok.any() else None,
+                     "test_start": pd.Timestamp(t0).strftime("%Y-%m-%d"),
+                     "val_blocks": sorted(int(x) for x in set(bk[r == "val"].tolist())),
+                     "skipped_blocks": list(plan.skipped_blocks.get(s, [])) if isinstance(plan, StationSplitPlan) else [],
+                     "train_days": nd(r == "train"), "val_days": nd(r == "val"), "cal_days": nd(r == "cal"),
+                     "dropped_days": nd(r == "dropped"), "test_days": nd(r == "test"),
+                     "train_share": round(float((r == "train").sum()) / pre, 3) if pre else 0.0,
+                     "val_share": round(float((r == "val").sum()) / pre, 3) if pre else 0.0})
+    return pd.DataFrame(rows)
+
+
 def verify_leak_free(ts_train, ts_val_blocks, ts_cal, plan: SplitPlan) -> None:
     """独立于 assign 的算术复核（按实际行，不按块边界）：
     标签侧：训练行 t 的标签 (t, t+H] 不得与任何验证行 / 校准行的标签 (v, v+H] 相交，即
@@ -378,15 +506,23 @@ def _station_col(df: pd.DataFrame, station_col=None):
     return "station_id" if "station_id" in df.columns else ("station" if "station" in df.columns else None)
 
 
-def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
-                 source=None, shift_days: int = 0, station_col=None) -> dict:
-    """按 plan（SplitPlan 或 StationSplitPlan）把原始行表落成 train/valid[/cal]/test.parquet（按时间稳定排序）
-    + split_manifest.json。返回 manifest。按站切分时站标识列取 station_col，缺省自动认 station_id / station。"""
-    out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
-    ts = pd.to_datetime(df[ts_col])
+def _ts_array(col: pd.Series) -> np.ndarray:
+    ts = pd.to_datetime(col)
     if getattr(ts.dt, "tz", None) is not None:
         ts = ts.dt.tz_localize(None)
-    ts = ts.to_numpy().astype("datetime64[ns]")
+    return ts.to_numpy().astype("datetime64[ns]")
+
+
+def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
+                 source=None, shift_days: int = 0, station_col=None, write: bool = True) -> dict:
+    """按 plan（SplitPlan 或 StationSplitPlan）把原始行表落成 train/valid[/cal]/test.parquet（按时间稳定排序）
+    + split_manifest.json。返回 manifest（含逐站覆盖 station_report）。按站切分时站标识列取 station_col，
+    缺省自动认 station_id / station。write=False 只算不落盘（--dry-run）。
+    有站一行验证数据都没有时报错，除非 plan.allow_stations_without_val。"""
+    out = Path(out_dir) if out_dir is not None else None
+    if write:
+        out.mkdir(parents=True, exist_ok=True)
+    ts = _ts_array(df[ts_col])
     st_col = _station_col(df, station_col)
     if isinstance(plan, StationSplitPlan) and st_col is None:
         raise ValueError("按站切分需要站标识列：数据里没有 station_id / station，请用 station_col 指定")
@@ -397,18 +533,30 @@ def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
     station = None if station is None else station[order]
     verify_rows(plan, ts, role, block, station)
     val_ts = [ts[(role == "val") & (block == i)] for i in range(len(plan.val_blocks))]
+    ref = plan.reference if isinstance(plan, StationSplitPlan) else plan
+    report = station_report(ts, station, role, block, plan) if station is not None else None
+    if report is not None and not ref.allow_stations_without_val:
+        bad = report[report["val_days"] == 0]
+        if len(bad):
+            detail = "；".join(f"{r.station}（数据 {r.data_start}…{r.data_end}，测试起点 {r.test_start}）"
+                              for r in bad.itertuples(index=False))
+            raise ValueError(f"这些站一行验证数据都没有：{detail}。它们的数据段不落在任何验证块里。"
+                             f"办法：val_blocks 改成 auto 按数据自动放块、调整块日期，"
+                             f"或在切分配置里写 allow_stations_without_val: true（这些站的数据全部进训练）")
 
     files = {"train": "train.parquet", "val": "valid.parquet", "cal": "cal.parquet", "test": "test.parquet"}
     counts = {}
     for r, name in files.items():
         m = role == r
         if r == "cal" and not has_cal(plan):
-            (out / name).unlink(missing_ok=True)        # 同一目录改用无校准段重切：删掉上一轮留下的 cal.parquet
+            if write:
+                (out / name).unlink(missing_ok=True)    # 同一目录改用无校准段重切：删掉上一轮留下的 cal.parquet
             continue
-        part = df[m].reset_index(drop=True)
-        if r == "val":
-            part = part.assign(split_block=block[m].astype(np.int64))
-        part.to_parquet(out / name, index=False)
+        if write:
+            part = df[m].reset_index(drop=True)
+            if r == "val":
+                part = part.assign(split_block=block[m].astype(np.int64))
+            part.to_parquet(out / name, index=False)
         counts[r] = int(m.sum())
     counts["dropped"] = int((role == "dropped").sum())
     months = lambda t: sorted({str(x)[:7] for x in t.astype("datetime64[M]")})
@@ -420,14 +568,16 @@ def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
             vc = grp.value_counts()
             stations[str(s)] = {r: int(vc.get(r, 0)) for r in counts if r != "dropped"}
             stations[str(s)]["val_blocks"] = sorted(int(b) for b in set(block[(station == s) & (role == "val")].tolist()))
-    ref = plan.reference if isinstance(plan, StationSplitPlan) else plan
-    manifest = {"generated_by": "pipelines.time_splits", "source": None if source is None else str(source),
+    manifest = {"generated_by": "pipelines.time_splits",
+                "source": None if source is None else ([str(x) for x in source] if isinstance(source, (list, tuple)) else str(source)),
                 "shift_days": int(shift_days), "ts_col": ts_col, "station_col": st_col,
                 "by_station": isinstance(plan, StationSplitPlan),
                 "plan": plan.to_dict(), "counts": counts,
                 "blocks": blocks, "stations": stations, "n_nat": int(np.isnat(ts).sum()),
-                "inputs_disjoint_after": ref.inputs_disjoint_after, "coverage_note": ref.coverage_note}
-    (out / "split_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+                "inputs_disjoint_after": ref.inputs_disjoint_after, "coverage_note": ref.coverage_note,
+                "station_report": [] if report is None else report.to_dict("records")}
+    if write:
+        (out / "split_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 
@@ -468,14 +618,33 @@ def _m6_geometry(m6_config) -> dict:
     return {k: int(v) for k, v in got.items() if v is not None}
 
 
-def load_test_starts(test_parquets, ts_col: str = "timestamp_win", station_col=None) -> dict:
-    """从若干测试集 parquet（可含通配符）推每站的 test_start：该站最早起报时刻所在的整天。返回 {station: 'YYYY-MM-DD'}。"""
+def expand_paths(specs, what: str = "--parquet") -> list[str]:
+    """路径 / 通配符 / 列表 → 去重后按字典序排好的文件列表；任何一项没匹配到文件直接报错。"""
+    items = list(specs) if isinstance(specs, (list, tuple)) else [specs]
     paths = []
-    for pat in test_parquets:
+    for pat in items:
         hit = sorted(glob.glob(str(pat)))
         if not hit:
-            raise FileNotFoundError(f"--test-parquets {pat!r} 没匹配到文件")
+            raise FileNotFoundError(f"{what} {pat!r} 没匹配到文件")
         paths.extend(hit)
+    return sorted(dict.fromkeys(paths))
+
+
+def read_parquets(specs) -> tuple[pd.DataFrame, list[str]]:
+    """读若干 parquet 拼成一张表（一站一个文件时用）。各文件列集合必须一致，否则报错（不静默补 NaN）。"""
+    paths = expand_paths(specs, "--parquet")
+    frames = [pd.read_parquet(p) for p in paths]
+    cols0 = set(frames[0].columns)
+    for pth, f in zip(paths[1:], frames[1:]):
+        if set(f.columns) != cols0:
+            raise ValueError(f"{pth} 的列与 {paths[0]} 不一致：多出 {sorted(set(f.columns) - cols0)}，"
+                             f"缺少 {sorted(cols0 - set(f.columns))}")
+    return (frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)), paths
+
+
+def load_test_starts(test_parquets, ts_col: str = "timestamp_win", station_col=None) -> dict:
+    """从若干测试集 parquet（可含通配符）推每站的 test_start：该站最早起报时刻所在的整天。返回 {station: 'YYYY-MM-DD'}。"""
+    paths = expand_paths(test_parquets, "--test-parquets")
     starts: dict = {}
     for p in paths:
         cols = pq.read_schema(p).names
@@ -505,49 +674,112 @@ def load_test_starts_file(path) -> dict:
     return {_station_key(k): str(v) for k, v in data.items()}
 
 
+def _resolved_yaml(plan, source_yaml, n_files: int, shift_days: int) -> str:
+    """实际用到的固定切分配置：val_blocks / test_start 都是具体日期（已含 --shift-days），原样 --split-yaml 即可复现。"""
+    d = plan.to_dict()
+    ref = plan.reference if isinstance(plan, StationSplitPlan) else plan
+    out = {"train_start": d["train_start"], "val_blocks": d["val_blocks"], "test_start": d["test_start"],
+           "test_end": d["test_end"], "cal_days": ref.cal_days, "purge_days": ref.purge_days,
+           "embargo_days": ref.embargo_days}
+    if ref.allow_stations_without_val:
+        out["allow_stations_without_val"] = True
+    head = (f"# 由 pipelines.time_splits 生成：源配置 {source_yaml}，数据 {n_files} 个文件"
+            + (f"，已含 --shift-days {shift_days}" if shift_days else "") + "。\n"
+            "# val_blocks / test_start 是这次实际用到的固定日期；原样 --split-yaml 本文件（不带 --test-parquets）即可复现同一切分。\n")
+    return head + yaml.safe_dump(out, allow_unicode=True, sort_keys=False)
+
+
 def main(argv=None) -> dict:
     ap = argparse.ArgumentParser(description="按时间轴切 train/valid[/cal]/test.parquet（验证块 purge/embargo，见 split_manifest.json）")
-    ap.add_argument("--parquet", required=True); ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--parquet", required=True, nargs="+", help="原始行表（可通配符、可多个；一站一个文件时直接给通配符）")
+    ap.add_argument("--out-dir", default=None, help="输出目录；--dry-run 时可不给")
     ap.add_argument("--split-yaml", default=None); ap.add_argument("--m6-config", default=None)
     ap.add_argument("--ts-col", default="timestamp_win"); ap.add_argument("--shift-days", type=int, default=0)
     # 默认 None：解析后按 显式 flag > --m6-config 里的几何 > 内置默认 的顺序定 L/H/step_min
     ap.add_argument("--L", type=int, default=None); ap.add_argument("--H", type=int, default=None)
     ap.add_argument("--step-min", type=int, default=None)
-    # 按站不同 test_start：二选一给出；此时 split 里的 test_start 可不写/为 null（写了非空值会报错，避免两处冲突）
+    # 按站不同 test_start：--test-parquets / --test-start-by-station / 切分配置里 test_start 写 {站: 日期}，三选一
     ap.add_argument("--test-parquets", nargs="+", default=None,
                     help="现有测试集 parquet（可通配符，可多个）；每站 test_start = 该站在这些文件里最早起报时刻所在的整天")
     ap.add_argument("--test-start-by-station", default=None, help="yaml/json 映射文件 {station: 'YYYY-MM-DD'}")
     ap.add_argument("--station-col", default=None, help="站标识列名；缺省自动认 station_id / station")
+    ap.add_argument("--dry-run", action="store_true", help="只打印验证块与逐站覆盖报告，不写任何文件")
     a = ap.parse_args(argv)
+    if a.out_dir is None and not a.dry_run:
+        raise ValueError("缺 --out-dir（只看报告请加 --dry-run）")
     if a.test_parquets is not None and a.test_start_by_station is not None:
         raise ValueError("--test-parquets 与 --test-start-by-station 二选一")
-    by_station = a.test_parquets is not None or a.test_start_by_station is not None
-    split = load_split_dict(a.split_yaml, a.m6_config, require_test_start=not by_station)
+    flags = a.test_parquets is not None or a.test_start_by_station is not None
+    split = load_split_dict(a.split_yaml, a.m6_config, require_test_start=not flags)
     geom = _m6_geometry(a.m6_config)
     pick = lambda flag, key, fallback: flag if flag is not None else geom.get(key, fallback)
     L, H, step_min = pick(a.L, "L", 672), pick(a.H, "H", 192), pick(a.step_min, "step_min", 15)
-    if by_station:
-        if split.get("test_start") is not None:
-            raise ValueError(f"split 里已写 test_start={split['test_start']!r}，又按站给了 test_start：删掉其一")
-        starts = (load_test_starts(a.test_parquets, a.ts_col, a.station_col) if a.test_parquets is not None
-                  else load_test_starts_file(a.test_start_by_station))
+
+    df, paths = read_parquets(a.parquet)
+    if a.ts_col not in df.columns:
+        raise ValueError(f"数据里没有时间列 {a.ts_col!r}")
+    ts = _ts_array(df[a.ts_col])
+    st_col = _station_col(df, a.station_col)
+    station = station_keys(df[st_col].to_numpy()) if st_col is not None else None
+
+    t0 = split.get("test_start")
+    if flags and t0 is not None:
+        raise ValueError(f"split 里已写 test_start={t0!r}，又按站给了 test_start：删掉其一")
+    if a.test_parquets is not None:
+        starts = load_test_starts(a.test_parquets, a.ts_col, a.station_col)
+    elif a.test_start_by_station is not None:
+        starts = load_test_starts_file(a.test_start_by_station)
+    elif isinstance(t0, dict):
+        starts = {_station_key(k): str(v) for k, v in t0.items()}
+    else:
+        starts = None
+    if starts is not None and station is None:
+        raise ValueError("按站给了 test_start，但数据里没有站标识列（station_id / station），请用 --station-col 指定")
+
+    if isinstance(split.get("val_blocks"), str):
+        if split["val_blocks"] != "auto":
+            raise ValueError(f"val_blocks 只能是日期列表或 auto，收到 {split['val_blocks']!r}")
+        if a.shift_days:
+            raise ValueError("val_blocks: auto 不能与 --shift-days 同用：第二折请用第一折落的 split_resolved.yaml 再加 --shift-days")
+        if starts is not None:
+            per, st_auto = starts, station
+        elif station is not None:
+            per, st_auto = {s: t0 for s in set(station.tolist())}, station
+        else:
+            per, st_auto = {"__all__": t0}, np.full(len(ts), "__all__")
+        blocks, notes = resolve_auto_blocks(ts, st_auto, per, split)
+        split = {**split, "val_blocks": blocks}
+        print(f"[time_splits] val_blocks: auto → {blocks}")
+        for n in notes:
+            print(f"[time_splits] 提示：{n}")
+
+    if starts is not None:
         plan = StationSplitPlan.from_dict(split, starts, shift_days=a.shift_days, L=L, H=H, step_min=step_min)
     else:
         plan = SplitPlan.from_dict(split, shift_days=a.shift_days, L=L, H=H, step_min=step_min)
-    df = pd.read_parquet(a.parquet)
-    man = write_splits(df, plan, a.out_dir, ts_col=a.ts_col, source=a.parquet, shift_days=a.shift_days,
-                       station_col=a.station_col)
+    man = write_splits(df, plan, a.out_dir, ts_col=a.ts_col, source=paths, shift_days=a.shift_days,
+                       station_col=a.station_col, write=not a.dry_run)
     c = man["counts"]
     print(f"[time_splits] train={c['train']} val={c['val']} cal={c.get('cal', 0)} test={c['test']} dropped={c['dropped']} "
-          f"n_nat={man['n_nat']} → {a.out_dir}")
+          f"n_nat={man['n_nat']}" + (" （dry-run，未写文件）" if a.dry_run else f" → {a.out_dir}"))
     for b in man["blocks"]:
         print(f"[time_splits] val block {b['index']}: [{b['start']}, {b['end']}) rows={b['rows']} months={b['months']}")
-    if by_station:
-        for st, t0 in man["plan"]["test_start"].items():
-            skip = man["plan"]["skipped_val_blocks"].get(st, [])
-            print(f"[time_splits] 站 {st}: test_start={t0}" + (f" 跳过验证块 {skip}" if skip else ""))
+    if man["station_report"]:
+        rep_df = pd.DataFrame(man["station_report"]).rename(columns={
+            "station": "站", "data_start": "数据起", "data_end": "数据止", "test_start": "测试起点", "val_blocks": "参加的块", "skipped_blocks": "跳过的块(测试太早)",
+            "train_days": "训练天", "val_days": "验证天", "cal_days": "校准天", "dropped_days": "剔除天", "test_days": "测试天",
+            "train_share": "训练占比", "val_share": "验证占比"})
+        if not has_cal(plan):
+            rep_df = rep_df.drop(columns=["校准天"])
+        print("[time_splits] 逐站覆盖（天数 = 有该角色行的日期数；占比 = 占测试前行数）：")
+        print(rep_df.to_string(index=False))
     if man["coverage_note"]:
         print(f"[time_splits] 提示：{man['coverage_note']}")
+    if not a.dry_run:
+        src = a.split_yaml or f"{a.m6_config} 的 finetune.split"
+        (Path(a.out_dir) / "split_resolved.yaml").write_text(_resolved_yaml(plan, src, len(paths), a.shift_days),
+                                                             encoding="utf-8")
+        print(f"[time_splits] 实际用到的固定切分配置 → {Path(a.out_dir) / 'split_resolved.yaml'}")
     return man
 
 
