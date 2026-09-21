@@ -100,3 +100,22 @@ def test_station_meta_numeric_station_names_map(tmp_path):
     assert StationMeta(pd.read_csv(p)).id_of("1002") == 2                       # 不经 from_csv、列已是整数也一样
     out = attach_station_id(pd.DataFrame({"station": [1001, "1002"]}), meta)
     assert out["station_id"].tolist() == [1, 2]
+
+
+
+def test_station_meta_rejects_text_or_duplicate_station_id(tmp_path):
+    """station_id 是 M6 内部整数编号；雅砻江这类站名写在 station 列。写错位置时给出能照做的报错。"""
+    import pandas as pd
+    from forecast_backbones.m6.features import StationMeta
+    p = tmp_path / "m.csv"
+    p.write_text("station_id,station,lat,lon,alt_m,cap_mw\n雅砻江,雅砻江,30,101,0,50\n1002,1002,30,101,0,60\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="必须是整数编号.*雅砻江.*station 列"):
+        StationMeta.from_csv(p)
+    p.write_text("station_id,station,lat,lon,alt_m,cap_mw\n1,雅砻江,30,101,0,50\n1,1002,30,101,0,60\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="station_id 重复"):
+        StationMeta.from_csv(p)
+    p.write_text("station_id,station,lat,lon,alt_m,cap_mw\n1,雅砻江,30,101,0,50\n2,雅砻江,30,101,0,60\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="station 重复"):
+        StationMeta.from_csv(p)
+    p.write_text("station_id,station,lat,lon,alt_m,cap_mw\n1,雅砻江,30,101,0,50\n2.0,1002,30,101,0,60\n", encoding="utf-8")
+    assert StationMeta.from_csv(p).id_of("雅砻江") == 1 and StationMeta.from_csv(p).id_of("1002") == 2
