@@ -129,6 +129,11 @@ M6 配置里对应写 `finetune.split.test_start: {1001: "2025-06-28", 1002: "20
 各文件列须一致）。落盘目录里的 `split_resolved.yaml` 是这次实际用到的固定日期（含每站 `test_start` 映射），原样 `--split-yaml` 即可复现；
 M6 的 `finetune.split` 不解析 `auto`，要用就抄 `split_resolved.yaml` 里的 `val_blocks`。M1–M4 的模板见仓库根目录 `configs/split_m1_m4.yaml`。
 
+**数据太短的站只进训练**：`min_station_days_for_val: N`（测试起点前有数据的天数 < N 的站）与 `train_only_stations: [站名, ...]`（手动点名）
+取并集。这些站不参加验证、没有校准段、不参与自动放块，除测试起点前 `purge_days` 天（防止训练标签伸进它自己的测试段）外全部进 `train.parquet`；
+它们落在验证块日期里的行也是训练行。逐站覆盖表的"只进训练"列标出这些站；`split_resolved.yaml` 把最终名单写成 `train_only_stations`（去掉阈值），
+原样重跑结果不变。阈值需要数据，M6 的 `finetune.split` 只认 `train_only_stations` 名单（且须按站给 `test_start`）。
+
 产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
 `station_routing.json`（逐站 `lora|zeroshot`，输给零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
 `calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：

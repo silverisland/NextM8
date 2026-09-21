@@ -29,7 +29,14 @@ val_blocks: auto
 n_val_blocks: 4          # 块数；4 块大致一季一块。跨度普遍不到一年时可改 3
 val_block_days: 14       # 每块天数。每块额外剔除块前 2 天、块后 9 天的训练行，块越多越长，训练数据越少
 
-# 有站一行验证数据都没有时：false = 报错并列出这些站；true = 放行，这些站的数据全部进训练
+# 数据太短的站只进训练：测试起点前有数据的天数（有行的日期数）少于这个值的站，
+# 不参加验证、不参与自动放块，除测试起点前 purge_days 天外全部数据进 train。0 = 关闭
+min_station_days_for_val: 90
+
+# 手动点名只进训练的站（站名与数据里的 station 列一致），与上面的阈值取并集
+train_only_stations: []
+
+# 其余站里仍有站一行验证数据都没有时：false = 报错并列出这些站；true = 放行，这些站的数据全部进训练
 allow_stations_without_val: false
 
 # 测试段终点；null = 到数据末尾。测试集用你现有的文件，保持 null 即可
