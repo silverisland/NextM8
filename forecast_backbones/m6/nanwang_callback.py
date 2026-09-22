@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 # forecast_backbones/m6/nanwang_callback.py
 """训练期南网口径打分 + 早停（spec §5.2 第 3 步）。不走 HF compute_metrics（labels 是 dict，
-Trainer 的 eval loop 拼不起来），而是独立回调：每个 epoch 末 cal 段推理拟合 δ → val 段推理 → 校准 → p* →
-夜间归零 → NanwangMetric.short_d1_daily → 均值即 nanwang_after_pstar。epoch 0 先记零样本基线并存为初始最优，
-所以保存的权重在 val 上永远不输零样本（全体口径）；逐站回退在 train.py 训后做。"""
+Trainer 的 eval loop 拼不起来），而是独立回调：每 eval_every_steps 个优化器步（未设则每个 epoch 末）cal 段推理拟合 δ →
+各验证块推理 → 校准 → p* → 夜间归零 → NanwangMetric.short_d1_daily → 块均值即 nanwang_after_pstar。
+训练开始先记零样本基线并存为初始最优，所以保存的权重在验证日上永远不输零样本（全体口径）；逐站回退在 train.py 训后做。
+验证只推理南网短期指标用到的行（每站每个起报日一行），分数与推理全部行相同。
+多卡时只在主进程打分、存盘、写日志，是否早停广播给所有进程。"""
 from __future__ import annotations
 
 import json
@@ -18,27 +20,61 @@ from transformers import TrainerCallback
 try:
     from .transformer_trainer import evaluate_model, fit_calibrator_from_result, recompute_points
     from .lora import lora_state_dict
+    from .rows import SHORT_ISSUE_TIME, scored_row_index, day_row_index
+    from . import _dist
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from transformer_trainer import evaluate_model, fit_calibrator_from_result, recompute_points
     from lora import lora_state_dict
+    from rows import SHORT_ISSUE_TIME, scored_row_index, day_row_index
+    import _dist
 try:
     from ...pipelines.nanwang_metric import NanwangMetric
 except ImportError:
     from pipelines.nanwang_metric import NanwangMetric
 
+DAILY_COLS = ["station_id", "station", "date", "accuracy_pct"]
+TABLE_COLS = ["station_id", "station", "accuracy_pct", "n_days"]
 
-def score_split(model, ds_cal, ds_val, collate, cfg) -> tuple[float, pd.DataFrame, object]:
-    """ds_cal 上拟合校准表 → ds_val 上按 decision.point 取点 → 南网短期日准确率。ds_cal=None 时不校准，
-    点预测在未校准的原生分位上取，返回的校准表为 None。返回 (块内均值, 逐站表, 校准表)。"""
-    if getattr(model, "calibrator", None) is not None:
-        raise ValueError("score_split 需要未挂 calibrator 的模型（训练模型应输出原始分位，校准在这里拟合）")
+
+def fit_split_calibrator(model, ds_cal, collate, cfg):
+    """ds_cal 上推理并拟合校准表；ds_cal=None（不做 conformal）返回 None。"""
+    if ds_cal is None:
+        return None
     was_training = bool(model.training)
     try:
-        calib = None                                  # ds_cal=None：不做 conformal，点预测直接取未校准分位
-        if ds_cal is not None:
-            res_cal = evaluate_model(model, ds_cal, collate, cfg)
-            calib = fit_calibrator_from_result(res_cal, cfg)
+        return fit_calibrator_from_result(evaluate_model(model, ds_cal, collate, cfg), cfg)
+    finally:
+        model.train(was_training)
+
+
+def _val_rows(ds_val, cfg, scored_rows_only: bool, day_parity):
+    station_col, ts_col = str(cfg["dataset"]["station_id_col"]), str(cfg["dataset"]["ts_col"])
+    if scored_rows_only:
+        return scored_row_index(ds_val, station_col, ts_col, parity=day_parity)
+    if day_parity is not None:
+        return day_row_index(ds_val, ts_col, day_parity)
+    return None
+
+
+def score_split(model, ds_cal, ds_val, collate, cfg, *, calib=None, scored_rows_only: bool = True,
+                day_parity=None) -> tuple[float, pd.DataFrame, object, pd.DataFrame]:
+    """ds_cal 上拟合校准表 → ds_val 上按 decision.point 取点 → 南网短期日准确率。ds_cal=None 时不校准，
+    点预测在未校准的原生分位上取，返回的校准表为 None。calib：同一模型状态下已拟合好的校准表，给了就不再推理 ds_cal。
+    scored_rows_only：只推理指标用到的行（每站每个起报日一行），分数与推理全部行相同，推理量约为 1/96。
+    day_parity：只用这一奇偶的起报日打分（0 偶数日 / 1 奇数日；None 全部）。
+    返回 (日准确率均值, 逐站表, 校准表, 逐站逐日表[station_id, station, date, accuracy_pct])。"""
+    if getattr(model, "calibrator", None) is not None:
+        raise ValueError("score_split 需要未挂 calibrator 的模型（训练模型应输出原始分位，校准在这里拟合）")
+    if calib is None:
+        calib = fit_split_calibrator(model, ds_cal, collate, cfg)
+    was_training = bool(model.training)
+    try:
+        idx = _val_rows(ds_val, cfg, scored_rows_only, day_parity)
+        if idx is not None:
+            if len(idx) == 0:
+                return float("nan"), pd.DataFrame(columns=TABLE_COLS), calib, pd.DataFrame(columns=DAILY_COLS)
+            ds_val = torch.utils.data.Subset(ds_val, idx.tolist())
         res_val = evaluate_model(model, ds_val, collate, cfg)
         gccap = {model.station_meta.name(int(s)): float(c) for s, c in
                  res_val.drop_duplicates("station_id")[["station_id", "cap"]].itertuples(index=False)}
@@ -49,30 +85,43 @@ def score_split(model, ds_cal, ds_val, collate, cfg) -> tuple[float, pd.DataFram
             g = sd.groupby("station")["accuracy_pct"].agg(["mean", "count"]).reset_index()
             table = pd.DataFrame({"station_id": g["station"].map(name_to_id).astype(int), "station": g["station"],
                                   "accuracy_pct": g["mean"].astype(float), "n_days": g["count"].astype(int)})
+            daily = pd.DataFrame({"station_id": sd["station"].map(name_to_id).astype(int), "station": sd["station"],
+                                  "date": pd.to_datetime(sd["date"]), "accuracy_pct": sd["accuracy_pct"].astype(float)})
             score = float(sd["accuracy_pct"].mean())
         else:
-            table = pd.DataFrame(columns=["station_id", "station", "accuracy_pct", "n_days"]); score = float("nan")
-        return score, table, calib
+            table, daily, score = pd.DataFrame(columns=TABLE_COLS), pd.DataFrame(columns=DAILY_COLS), float("nan")
+        return score, table, calib, daily
     finally:
         model.train(was_training)
 
 
 class NanwangEvalCallback(TrainerCallback):
-    """ds_val_blocks：验证块数据集列表；每块各自 score_split，块均值（等权、跳过非有限）作早停指标，逐块分数记入 history。"""
+    """ds_val_blocks：验证块数据集列表；每块各自打分，块均值（等权、跳过非有限）作早停指标，逐块分数记入 history。
+    eval_every_steps：每多少个优化器步打一次分，训练的最后一步必打；None = 每个 epoch 末打。patience 按打分次数计。
+    day_parity：只用这一奇偶的起报日打分（0 偶数日；None 全部），另一半留给训后的逐站路由。"""
 
-    def __init__(self, model, ds_cal, ds_val_blocks, collate, cfg, best_path, patience: int, log_path):
+    def __init__(self, model, ds_cal, ds_val_blocks, collate, cfg, best_path, patience: int, log_path,
+                 eval_every_steps: int | None = None, day_parity: int | None = None):
         if not isinstance(ds_val_blocks, (list, tuple)) or len(ds_val_blocks) == 0:
             raise ValueError("ds_val_blocks 须是非空列表（每个元素一个验证块数据集）")
         self.model, self.ds_cal, self.ds_val_blocks, self.collate, self.cfg = model, ds_cal, list(ds_val_blocks), collate, cfg
         self.best_path, self.log_path, self.patience = Path(best_path), Path(log_path), int(patience)
-        self.best, self.best_epoch, self.bad_epochs, self.history = -np.inf, None, 0, []
+        self.eval_every_steps = int(eval_every_steps) if eval_every_steps else None
+        self.day_parity = None if day_parity is None else int(day_parity)
+        self.best, self.best_epoch, self.best_step, self.bad_evals, self.history = -np.inf, None, None, 0, []
 
     def _score(self) -> tuple[float, list[float]]:
         per, n = [], len(self.ds_val_blocks)
+        self.model._progress_desc = "[m6-lora] 校准段"
+        try:
+            calib = fit_split_calibrator(self.model, self.ds_cal, self.collate, self.cfg)     # 各块共用同一张校准表
+        finally:
+            self.model._progress_desc = None
         for i, ds in enumerate(self.ds_val_blocks):
             self.model._progress_desc = f"[m6-lora] 验证块 {i + 1}/{n}"          # evaluate_model 的进度条标题
             try:
-                per.append(float(score_split(self.model, self.ds_cal, ds, self.collate, self.cfg)[0]))
+                per.append(float(score_split(self.model, None, ds, self.collate, self.cfg, calib=calib,
+                                             day_parity=self.day_parity)[0]))
             finally:
                 self.model._progress_desc = None
         finite = [s for s in per if np.isfinite(s)]
@@ -82,28 +131,47 @@ class NanwangEvalCallback(TrainerCallback):
         self.best_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(lora_state_dict(self.model.backbone.model), self.best_path)
 
-    def _record(self, epoch: float, scored: tuple[float, list[float]], control):
+    def _record(self, step: int, epoch: float, scored: tuple[float, list[float]]) -> bool:
+        """记一次打分；返回是否已连续 patience 次没有超过最优。"""
         score, per = scored
         if np.isfinite(score) and score > self.best:
-            self.best, self.best_epoch, self.bad_epochs = score, float(epoch), 0
+            self.best, self.best_epoch, self.best_step, self.bad_evals = score, float(epoch), int(step), 0
             self._save_best()
         else:
-            self.bad_epochs += 1
-            if self.bad_epochs >= self.patience and control is not None:
-                control.should_training_stop = True
-        self.history.append({"epoch": float(epoch), "nanwang_after_pstar": score, "blocks": per,
-                             "best": self.best, "bad_epochs": self.bad_epochs})
+            self.bad_evals += 1
+        self.history.append({"step": int(step), "epoch": float(epoch), "nanwang_after_pstar": score, "blocks": per,
+                             "best": self.best, "bad_evals": self.bad_evals})
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text(json.dumps({"history": self.history, "best": self.best, "best_epoch": self.best_epoch,
-                                             "patience": self.patience}, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"[m6-lora] epoch {epoch:g}: nanwang_after_pstar={score:.4f} blocks={[round(s, 4) for s in per]} "
-              f"best={self.best:.4f}@{self.best_epoch} bad={self.bad_epochs}")
+                                             "best_step": self.best_step, "patience": self.patience,
+                                             "eval_every_steps": self.eval_every_steps, "day_parity": self.day_parity},
+                                            indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[m6-lora] step {step} (epoch {epoch:.3g}): nanwang_after_pstar={score:.4f} "
+              f"blocks={[round(s, 4) for s in per]} best={self.best:.4f}@step {self.best_step} "
+              f"bad={self.bad_evals}/{self.patience}", flush=True)
+        return self.bad_evals >= self.patience
+
+    def _evaluate(self, state, control):
+        stop = self._record(int(state.global_step or 0), float(state.epoch or 0.0), self._score()) if _dist.is_main() else False
+        if _dist.broadcast_from_main(stop) and control is not None:
+            control.should_training_stop = True
 
     def on_train_begin(self, args, state, control, **kwargs):
-        print(f"[m6-lora] 开训前先在 {len(self.ds_val_blocks)} 个验证块上打零样本基线分（不受 max_steps 限制）…", flush=True)
-        self._record(0.0, self._score(), None)          # 零样本基线：LoRA B=0，等价零样本；永远是初始最优
+        if _dist.is_main():
+            days = {None: "全部起报日", 0: "偶数起报日", 1: "奇数起报日"}[self.day_parity]
+            print(f"[m6-lora] 开训前先在 {len(self.ds_val_blocks)} 个验证块上打零样本基线分（{days}，"
+                  f"每站每天只推理 {SHORT_ISSUE_TIME} 前最晚的一行）…", flush=True)
+            self._record(0, 0.0, self._score())         # 零样本基线：LoRA B=0，等价零样本；永远是初始最优，不触发早停
+        _dist.barrier()                                 # 其余进程等主进程打完基线
+        return control
+
+    def on_step_end(self, args, state, control, **kwargs):
+        every = self.eval_every_steps
+        if every and (state.global_step % every == 0 or state.global_step >= state.max_steps):
+            self._evaluate(state, control)
         return control
 
     def on_epoch_end(self, args, state, control, **kwargs):
-        self._record(float(state.epoch or 0.0), self._score(), control)
+        if not self.eval_every_steps:
+            self._evaluate(state, control)
         return control
