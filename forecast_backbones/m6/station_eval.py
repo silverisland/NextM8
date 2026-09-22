@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # forecast_backbones/m6/station_eval.py
 """训练产物目录 → 推理模型；单站测试 parquet → 预测结果表。供 eval_shell/m6_station_script.py 逐站评测用。
-产物目录即 train_m6 的 out_dir：model_config.yaml、model.safetensors（旧 run 为 lora_weights.pt）、
-station_routing.json，calibration.enabled 时还有 calibration.parquet 与同名 .json。
+产物目录即 train_m6 的 out_dir：model_config.yaml、model.safetensors（旧 run 为 lora_weights.pt），
+calibration.enabled 时还有 calibration.parquet 与同名 .json。全部站都用这份 LoRA + output_head，模型全部冻结。
 推理与训练期验证走同一条路：_dataset_with_station_id 建数据集（文本站号按 station_meta 转整数）→ evaluate_model。"""
 from __future__ import annotations
 
@@ -30,14 +30,14 @@ except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
     from pipelines.time_splits import station_keys
 
-ROUTING_FILE = "station_routing.json"
 LEGACY_WEIGHTS_FILE = "lora_weights.pt"
 RESULT_COLS = ["timestamp_win", "station", "observe_power_predict", "observe_power_future"]
 
 
 def load_trained_model(run_dir, config=None, device=None, batch_size=None, progress_bar=False):
     """run_dir：train_m6 的 out_dir。config：不用 run_dir/model_config.yaml 时给训练用的 yaml。
-    权重、路由表、校准表都从 run_dir 读，缺任何一个直接报错（不静默退回零样本或未校准）。返回 (model, cfg)。"""
+    权重、校准表都从 run_dir 读，缺任何一个直接报错（不静默退回零样本或未校准）。
+    返回的模型全部参数 requires_grad=False、全部子模块 eval 态（dropout 关闭）。返回 (model, cfg)。"""
     try:
         from .transformer_models import TransformersAdaptedM6Model
     except ImportError:
@@ -49,13 +49,10 @@ def load_trained_model(run_dir, config=None, device=None, batch_size=None, progr
     weights = run_dir / WEIGHTS_FILE
     if not weights.exists() and (run_dir / LEGACY_WEIGHTS_FILE).exists():
         weights = run_dir / LEGACY_WEIGHTS_FILE
-    routing = run_dir / ROUTING_FILE
-    missing = [str(p) for p in (weights, routing) if not p.exists()]
-    if missing:
-        raise FileNotFoundError(f"{run_dir} 缺训练产物 {missing}")
+    if not weights.exists():
+        raise FileNotFoundError(f"{run_dir} 缺训练产物 {weights.name}（旧 run 为 {LEGACY_WEIGHTS_FILE}）")
     over = {"run": {"out_dir": str(run_dir)},
-            "finetune": {"enabled": True, "lora_path": str(weights), "routing_path": str(routing),
-                         "schedule": {"progress_bar": bool(progress_bar)}}}
+            "finetune": {"enabled": True, "lora_path": str(weights), "schedule": {"progress_bar": bool(progress_bar)}}}
     if device:
         over["timesfm3"] = {"device": str(device)}
     if batch_size:
@@ -69,6 +66,7 @@ def load_trained_model(run_dir, config=None, device=None, batch_size=None, progr
         model._ensure_backbone(model._resolve_device())
     if not model.lora_loaded:
         raise RuntimeError(f"LoRA 权重 {weights} 没有加载上")
+    model.requires_grad_(False)
     model.eval()
     return model, cfg
 

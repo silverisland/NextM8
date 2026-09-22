@@ -10,7 +10,7 @@ pytest.importorskip("timesfm3")
 from pipelines.transformer_dataset import UnifiedDataset
 from forecast_backbones.m6 import nanwang_callback as nc
 from forecast_backbones.m6.nanwang_callback import score_split, NanwangEvalCallback
-from forecast_backbones.m6.rows import scored_row_index, day_parity
+from forecast_backbones.m6.rows import scored_row_index
 from forecast_backbones.m6.lora import LoRALinear
 from .conftest import make_synthetic_frame, CAP
 from .test_model_route_b import _model_b
@@ -30,13 +30,12 @@ def test_score_split_returns_station_table_and_restores_train_mode(tmp_path, tin
         m = _model_b(tmp_path, tiny_evaluator)
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     m.train()
-    score, table, calib, daily = score_split(m, ds_cal, ds_val, collate, m.cfg)
+    score, table, calib = score_split(m, ds_cal, ds_val, collate, m.cfg)
     assert m.training is True                                           # 恢复
     assert np.isfinite(score) and 0 <= score <= 100
     assert set(table.columns) >= {"station_id", "station", "accuracy_pct", "n_days"} and set(table["station_id"]) == set(CAP)
     assert calib is not None and calib.last_stats is not None
-    assert list(daily.columns) == ["station_id", "station", "date", "accuracy_pct"] and len(daily) == table["n_days"].sum()
-    assert np.isclose(daily["accuracy_pct"].mean(), score)
+    assert np.isclose((table["accuracy_pct"] * table["n_days"]).sum() / table["n_days"].sum(), score)
 
 
 def test_score_split_rejects_model_with_calibrator(tmp_path, tiny_evaluator):
@@ -53,7 +52,7 @@ def test_score_split_rejects_model_with_calibrator(tmp_path, tiny_evaluator):
 def _cb(tmp_path, m, patience, scores, monkeypatch, n_blocks=1, **kw):
     """scores：每次 _score 调用依次消费 n_blocks 个分数。"""
     it = iter(scores)
-    monkeypatch.setattr(nc, "score_split", lambda *a, **k: (next(it), None, None, None))
+    monkeypatch.setattr(nc, "score_split", lambda *a, **k: (next(it), None, None))
     return NanwangEvalCallback(m, None, [None] * n_blocks, None, m.cfg, best_path=tmp_path / "best.pt", patience=patience,
                                log_path=tmp_path / "log.json", **kw)
 
@@ -163,7 +162,7 @@ def test_score_split_infers_only_rows_the_metric_uses_and_scores_identically(tmp
     fast = score_split(m, None, ds_val, collate, m.cfg)
     full = score_split(m, None, ds_val, collate, m.cfg, scored_rows_only=False)
     assert seen == [2, len(ds_val)]
-    assert fast[0] == full[0] and fast[1].equals(full[1]) and fast[3].equals(full[3])
+    assert fast[0] == full[0] and fast[1].equals(full[1])
 
 
 def test_scored_row_index_falls_back_to_latest_row_before_issue_time():
@@ -176,32 +175,15 @@ def test_scored_row_index_falls_back_to_latest_row_before_issue_time():
     assert len(ts) == 4 and all(t.hour == 9 for t in ts)                               # 2 站 × 2 天
 
 
-def test_day_parity_splits_scored_days_into_two_halves(tmp_path, tiny_evaluator):
-    _, ds_val = _two_val_days()
-    even = scored_row_index(ds_val, "station_id", "timestamp_win", parity=0)
-    odd = scored_row_index(ds_val, "station_id", "timestamp_win", parity=1)
-    both = scored_row_index(ds_val, "station_id", "timestamp_win")
-    assert len(even) == len(odd) == 2 and sorted(np.concatenate([even, odd])) == list(both)
-    assert day_parity([pd.Timestamp("2025-06-10"), pd.Timestamp("2025-06-11 23:45")]).tolist() == [1, 0]
-    with pytest.warns(UserWarning):
-        m = _model_b(tmp_path, tiny_evaluator)
-    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
-    s_all, _, _, d_all = score_split(m, None, ds_val, collate, m.cfg)
-    s0, _, _, d0 = score_split(m, None, ds_val, collate, m.cfg, day_parity=0)
-    s1, _, _, d1 = score_split(m, None, ds_val, collate, m.cfg, day_parity=1)
-    assert set(d0["date"]) == {pd.Timestamp("2025-06-11")} and set(d1["date"]) == {pd.Timestamp("2025-06-10")}
-    assert pd.concat([d0, d1]).sort_values(["date", "station_id"]).reset_index(drop=True).equals(
-        d_all.sort_values(["date", "station_id"]).reset_index(drop=True))
-    assert np.isclose(s_all, pd.concat([d0, d1])["accuracy_pct"].mean())
-
-
 def test_score_split_with_no_rows_left_returns_nan(tmp_path, tiny_evaluator):
-    _, ds_val = _datasets()                                                            # 只有 06-10（奇数日）
+    df = make_synthetic_frame(n_days=1, issue_every_min=60, seed=0)
+    ds_val = UnifiedDataset(df[df["timestamp_win"].dt.hour > 10].reset_index(drop=True), timestamp_cols=["timestamp_win"],
+                            entity_cols=[], label_cols=["observe_power_future"], for_hf_trainer=True)   # 当天没有 10:00 前的行
     with pytest.warns(UserWarning):
         m = _model_b(tmp_path, tiny_evaluator)
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
-    score, table, calib, daily = score_split(m, None, ds_val, collate, m.cfg, day_parity=0)
-    assert np.isnan(score) and table.empty and daily.empty and calib is None
+    score, table, calib = score_split(m, None, ds_val, collate, m.cfg)
+    assert np.isnan(score) and table.empty and calib is None
 
 
 def test_calibration_is_fitted_once_per_evaluation_and_shared_by_blocks(tmp_path, tiny_evaluator, monkeypatch):
@@ -209,11 +191,11 @@ def test_calibration_is_fitted_once_per_evaluation_and_shared_by_blocks(tmp_path
         m = _model_b(tmp_path, tiny_evaluator)
     fits, seen = [], []
     monkeypatch.setattr(nc, "fit_split_calibrator", lambda *a, **k: fits.append(1) or "CALIB")
-    monkeypatch.setattr(nc, "score_split", lambda *a, **k: (seen.append((k["calib"], k["day_parity"])), (70.0, None, None, None))[1])
+    monkeypatch.setattr(nc, "score_split", lambda *a, **k: (seen.append(k["calib"]), (70.0, None, None))[1])
     cb = NanwangEvalCallback(m, "DS_CAL", [None, None, None], None, m.cfg, best_path=tmp_path / "b.pt", patience=1,
-                             log_path=tmp_path / "l.json", day_parity=0)
+                             log_path=tmp_path / "l.json")
     assert cb._score() == (70.0, [70.0, 70.0, 70.0])
-    assert fits == [1] and seen == [("CALIB", 0)] * 3
+    assert fits == [1] and seen == ["CALIB"] * 3
 
 
 def test_step_mode_evaluates_every_n_steps_and_on_last_step(tmp_path, tiny_evaluator, monkeypatch):

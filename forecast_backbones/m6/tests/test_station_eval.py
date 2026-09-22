@@ -10,12 +10,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 pytest.importorskip("timesfm3")
 from forecast_backbones.m6.station_eval import load_trained_model, predict_station, scale_history_tail, station_key
 from forecast_backbones.m6.train import train_m6
 from forecast_backbones.m6.calibration import quantile_cols
 from forecast_backbones.m6.decision import MODEL_LEVELS
+from forecast_backbones.m6.transformer_models import TransformersAdaptedM6Model
 from .conftest import make_synthetic_frame
 from .test_train import _patch_tiny_backbone, _inputs
 
@@ -24,14 +26,23 @@ QCOLS = quantile_cols(MODEL_LEVELS)
 
 
 def _trained_run(tmp_path, tiny_evaluator, monkeypatch):
-    """训一个 2 步的 run，再把产物目录整体搬走、删掉原目录：之后只许从新位置读。"""
+    """训一个 2 步的 run，再把产物目录整体搬走、删掉原目录：之后只许从新位置读。
+    之后建的模型各自从 checkpoint 重新加载一份底座（与服务器上评测一样），不复用训练时改过的那份。"""
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+    with pytest.warns(UserWarning, match="LoRA 权重"):
         train_m6(cfg, str(parquet), max_steps=2)
     moved = tmp_path / "moved_run"
     shutil.copytree(out, moved)
     shutil.rmtree(out)
+    from timesfm3 import ModelConfig, TimesFM3Evaluator
+    ckpt = tiny_evaluator.config.checkpoint_path
+
+    def _fresh(self, want):
+        self._backbone = TimesFM3Evaluator(ModelConfig(checkpoint_path=ckpt, per_core_batch_size=4, device="cpu"))
+        self._backbone_device = "cpu"
+        self._attach_torch_path()
+    monkeypatch.setattr(TransformersAdaptedM6Model, "_ensure_backbone", _fresh)
     return df, moved
 
 
@@ -53,8 +64,9 @@ def test_trained_run_dir_is_self_contained_and_matches_training(tmp_path, tiny_e
         assert f.metadata()["root"] == "backbone.model"
     assert keys and all(k.endswith((".lora_A", ".lora_B")) or k.startswith("output_head.") for k in keys)
 
+    (run / "station_routing.json").write_text('{"1001": "zeroshot", "1002": "zeroshot"}')   # 旧 run 的路由表：不再读
     model, cfg = load_trained_model(run, device="cpu", batch_size=8)
-    assert model.lora_loaded and model.calibrator is not None and model.station_routing
+    assert model.lora_loaded and model.calibrator is not None
     assert cfg["finetune"]["lora_path"] == str(run / "model.safetensors")
     assert cfg["calibration"]["table_path"] == str(run / "calibration.parquet") and cfg["eval"]["batch_size"] == 8
 
@@ -63,7 +75,7 @@ def test_trained_run_dir_is_self_contained_and_matches_training(tmp_path, tiny_e
     assert st == "S1001" and set(res["station"]) == {"S1001"} and set(res["station_id"]) == {1001}
     assert len(res) == len(src) and (res["timestamp_win"].to_numpy() == src["timestamp_win"].to_numpy()).all()
     assert not any((tmp_path / "scratch").iterdir())                       # 临时 parquet 推理完即删
-    # 与训练收尾时同一个模型（最优 LoRA + 路由）在验证集上的原生分位逐行一致
+    # 与训练收尾时同一个模型（最优 LoRA）在验证集上的原生分位逐行一致：全部站都走 LoRA
     ref = pd.read_parquet(run / "result_val_lora.parquet")
     ref = ref[ref["station_id"] == 1001].sort_values("timestamp_win").reset_index(drop=True)
     assert len(ref) == len(res)
@@ -79,11 +91,30 @@ def test_load_trained_model_refuses_incomplete_run(tmp_path, tiny_evaluator, mon
     with pytest.raises(FileNotFoundError, match="校准表"):
         load_trained_model(run, device="cpu")
     (run / "calibration.bak").rename(run / "calibration.parquet")
-    (run / "station_routing.json").unlink()
-    with pytest.raises(FileNotFoundError, match="station_routing.json"):
+    (run / "model.safetensors").unlink()
+    with pytest.raises(FileNotFoundError, match="model.safetensors"):
         load_trained_model(run, device="cpu")
     with pytest.raises(FileNotFoundError, match="--config"):
         load_trained_model(tmp_path / "nowhere", device="cpu")
+
+
+def test_loaded_model_is_fully_frozen_and_inference_changes_nothing(tmp_path, tiny_evaluator, monkeypatch):
+    df, run = _trained_run(tmp_path, tiny_evaluator, monkeypatch)
+    model, _ = load_trained_model(run, device="cpu")
+    params = list(model.parameters())
+    assert params and not any(p.requires_grad for p in params)
+    assert not any(m.training for m in model.modules())                     # LoRA dropout 等全部关闭
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    _station_file(df, tmp_path / "station=S1001.parquet")
+    _station_file(df, tmp_path / "station=S1002.parquet", station_id=1002, name="S1002")
+    _, a = predict_station(model, tmp_path / "station=S1001.parquet")
+    predict_station(model, tmp_path / "station=S1002.parquet")
+    _, b = predict_station(model, tmp_path / "station=S1001.parquet")
+    after = model.state_dict()
+    assert before.keys() == after.keys() and all(torch.equal(before[k], after[k]) for k in before)   # 权重与 buffer 都没动
+    for c in QCOLS:
+        np.testing.assert_array_equal(np.stack(a[c]), np.stack(b[c]))     # 中间推理别的站，结果逐位不变
+    assert not any(p.requires_grad for p in model.parameters()) and not any(m.training for m in model.modules())
 
 
 def test_old_run_with_pt_weights_and_training_yaml(tmp_path, tiny_evaluator, monkeypatch):
@@ -172,7 +203,7 @@ def _run_eval_sh(env_over, tmp_path):
 
 def test_eval_m6_sh_parallel_workers_skip_and_fail(tmp_path):
     ckpt = tmp_path / "run"; ckpt.mkdir()
-    for f in ("model_config.yaml", "model.safetensors", "station_routing.json"):
+    for f in ("model_config.yaml", "model.safetensors"):
         (ckpt / f).write_text("x")
     data = tmp_path / "test"; data.mkdir()
     for st in ("1001", "1002", "bad"):
@@ -197,8 +228,8 @@ def test_eval_m6_sh_parallel_workers_skip_and_fail(tmp_path):
     assert p.returncode == 0                                                  # 剩 2 站、2 个 worker 各一站，都已有 summary
     assert all("OK=0 FAIL=0 SKIP=1" in (out / "logs" / f"worker_{i}.log").read_text(encoding="utf-8") for i in (0, 1))
 
-    (ckpt / "station_routing.json").unlink()
+    (ckpt / "model.safetensors").unlink()
     p = _run_eval_sh(env, tmp_path)
-    assert p.returncode == 1 and "station_routing.json" in p.stderr
+    assert p.returncode == 1 and "model.safetensors" in p.stderr
     p = _run_eval_sh({k: v for k, v in env.items() if k != "CKPT_DIR"}, tmp_path)
     assert p.returncode == 1 and "CKPT_DIR" in p.stderr

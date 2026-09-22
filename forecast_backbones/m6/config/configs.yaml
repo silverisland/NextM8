@@ -57,7 +57,6 @@ finetune:                              # 路线 B（计划 2）：LoRA 微调；
     target_modules: [query_proj, key_proj, value_proj, out_proj]   # timesfm3 3.0.2 真名；seq_attn/var_attn 都挂
   unfreeze_output_head: true
   lora_path: ${run.out_dir}/model.safetensors
-  routing_path: ${run.out_dir}/station_routing.json
   loss:
     type: pinball
     levels: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -93,15 +92,6 @@ finetune:                              # 路线 B（计划 2）：LoRA 微调；
   early_stop:
     metric: nanwang_after_pstar
     patience: 3                        # 按验证次数计
-  guards:
-    per_station_fallback_to_zeroshot: true
-    min_gain_pct: 0.0                  # LoRA 站得分须超零样本这么多才选 lora
-    split_val_days: true               # 早停选权重只用偶数起报日、逐站路由只用奇数起报日；false = 两者共用全部验证日
-    bootstrap:                         # 逐站对配对天重抽 n 次，LoRA−零样本 均值差的 alpha 分位 > min_gain_pct 才选 lora
-      n: 2000                          # 0 = 只比均值差
-      alpha: 0.1
-      min_days: 5                      # 配对天数不足的站走零样本
-      seed: 0
 calibration:
   enabled: true
   table_path: ${run.out_dir}/calibration.parquet

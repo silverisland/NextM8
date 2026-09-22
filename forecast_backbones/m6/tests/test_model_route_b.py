@@ -9,13 +9,12 @@ from .conftest import make_synthetic_frame, write_station_meta
 from .test_model_route_a import _batch
 
 
-def _model_b(tmp_path, evaluator, *, finetune=True, inference_path="torch", lora_path=None, routing_path=None, **over):
+def _model_b(tmp_path, evaluator, *, finetune=True, inference_path="torch", lora_path=None, **over):
     cfg = {"timesfm3": {"eager_init": False},
            "dataset": {"station_meta": str(write_station_meta(tmp_path))},
            "calibration": {"enabled": False},
            "finetune": {"enabled": finetune, "inference_path": inference_path,
-                        "lora_path": lora_path or str(tmp_path / "no_such_lora.pt"),
-                        "routing_path": routing_path or str(tmp_path / "no_such_routing.json")}}
+                        "lora_path": lora_path or str(tmp_path / "no_such_lora.pt")}}
     for k, v in over.items():
         cfg.setdefault(k, {}).update(v)
     m = TransformersAdaptedM6Model(cfg)
@@ -63,7 +62,6 @@ def test_finetune_enabled_warns_when_lora_missing_and_matches_zero_shot(tmp_path
         m = _model_b(tmp_path, tiny_evaluator)
     msgs = [str(w.message) for w in record.list]
     assert any("LoRA 权重" in s for s in msgs)
-    assert any("站级路由" in s for s in msgs)                            # routing_path 同样缺失，对称告警
     assert m.lora_loaded is False
     assert any(isinstance(x, LoRALinear) for x in m.backbone.model.modules())
     m_zs = _model_b(tmp_path, tiny_evaluator, finetune=False, inference_path="torch")
@@ -119,12 +117,10 @@ def test_lora_weights_load_from_lora_path(tmp_path, tiny_evaluator, frame, fname
     # 新 evaluator 副本：同一权重目录再加载一次，避免共享已改的 module
     from timesfm3 import ModelConfig, TimesFM3Evaluator
     e2 = TimesFM3Evaluator(ModelConfig(checkpoint_path=tiny_evaluator.config.checkpoint_path, per_core_batch_size=4, device="cpu"))
-    from forecast_backbones.m6.routing import save_routing
-    rp = tmp_path / "routing.json"; save_routing(rp, {})                 # 路由表也齐全：与 lora_path 一起零 warning
     import warnings
     with warnings.catch_warnings():
-        warnings.simplefilter("error")                                   # 权重、路由都齐全就不许 warn
-        m2 = _model_b(tmp_path, e2, lora_path=str(p), routing_path=str(rp))
+        warnings.simplefilter("error")                                   # 权重齐全就不许 warn
+        m2 = _model_b(tmp_path, e2, lora_path=str(p))
     assert m2.lora_loaded is True
     with torch.no_grad():
         assert np.allclose(m2(bd).aux["quantiles"].numpy(), ref, atol=1e-5)

@@ -9,7 +9,7 @@
 #   - 配置同样只改运行时副本，不改仓库里的 yaml。
 #
 # 多卡：每张卡一个进程、各持一份模型、各吃不同的训练批，每步共 卡数 × batch_size 行。
-#       验证打分、存最优权重、训后逐站路由与报表只在主进程（第一张卡）做，这期间其余卡等待。
+#       验证打分、存最优权重与报表只在主进程（第一张卡）做，这期间其余卡等待。
 #       训完主进程还要把验证集全部行推理一遍写 result_val_lora.parquet，只用第一张卡。
 #
 # 用法：
@@ -230,7 +230,7 @@ if [ $rc -ne 0 ]; then
   echo "❌ M6 训练失败 (exit=$rc)，日志: $LOG_FILE" >&2
   exit 1
 fi
-for f in model.safetensors model_config.yaml station_routing.json train_log.json; do
+for f in model.safetensors model_config.yaml train_log.json; do
   [ -f "$RUN_DIR/$f" ] || { echo "❌ 训练结束但缺少 $RUN_DIR/$f" >&2; exit 1; }
 done
 echo "✅ M6 完成: $RUN_DIR/model.safetensors（推理配置 $RUN_DIR/model_config.yaml）"

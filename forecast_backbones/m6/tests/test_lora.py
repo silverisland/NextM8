@@ -1,7 +1,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from forecast_backbones.m6.lora import (LoRALinear, inject_lora, set_lora_enabled, freeze_all_but_lora,
+from forecast_backbones.m6.lora import (LoRALinear, inject_lora, freeze_all_but_lora,
                                         lora_state_dict, load_lora_state_dict, trainable_summary)
 
 
@@ -52,19 +52,6 @@ def test_inject_raises_on_no_match_after_partial_injection():
     with pytest.raises(ValueError, match="bogus"):
         inject_lora(m, ["bogus"], 2, 4, 0.0)                         # 试图挂不存在的目标→应报错
     assert inject_lora(m, ["query_proj"], 2, 4, 0.0) == []           # 重复挂相同目标→返回 []（幂等）
-
-
-def test_enable_toggle_and_effect():
-    torch.manual_seed(0)
-    m = _Toy(); x = torch.randn(4, 8); y0 = m(x).detach()
-    inject_lora(m, ["query_proj"], 2, 4, 0.0)
-    with torch.no_grad():
-        m.layers[0].query_proj.lora_B.fill_(0.5)
-    assert not torch.allclose(m(x), y0)
-    assert set_lora_enabled(m, False) == 2
-    assert torch.allclose(m(x), y0)
-    set_lora_enabled(m, True)
-    assert not torch.allclose(m(x), y0)
 
 
 def test_freeze_and_trainable_summary():

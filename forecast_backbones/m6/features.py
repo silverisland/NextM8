@@ -153,7 +153,7 @@ class StationMeta:
 
 def attach_station_id(df: pd.DataFrame, meta: StationMeta, id_col: str = "station_id", name_col: str = "station") -> pd.DataFrame:
     """给数据表补 station_id：已有 id_col 原样返回；只有站名列 name_col 时按 station_meta 映射；
-    名字在表里查不到、或两列都没有，直接报错（M6 的校准分层与路由都按 station_id 走，不能猜）。"""
+    名字在表里查不到、或两列都没有，直接报错（M6 的校准分层按 station_id 走，不能猜）。"""
     if id_col in df.columns:
         return df
     if name_col not in df.columns:

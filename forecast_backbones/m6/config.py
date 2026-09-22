@@ -75,7 +75,6 @@ DEFAULT_CFG: dict = {
                  "target_modules": ["query_proj", "key_proj", "value_proj", "out_proj"]},
         "unfreeze_output_head": True,
         "lora_path": "${run.out_dir}/model.safetensors",        # 训练产物（LoRA + output_head）；推理时存在即加载
-        "routing_path": "${run.out_dir}/station_routing.json",  # 逐站 lora|zeroshot 路由表；存在即按表选路
         "loss": {"type": "pinball", "levels": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
                  "aux_nanwang_head": {"enabled": False, "weight": 0.5}},   # 辅助头：计划 3 消融，本计划不读
         "masks": {"night": "solar_elevation_le_0", "curtailment_col": None,
@@ -97,12 +96,6 @@ DEFAULT_CFG: dict = {
                   "cal_days": 45,                           # 校准段 = [test_start − purge − cal_days, test_start − purge)
                   "purge_days": 2, "embargo_days": 7},      # 2 天 ≥ H=192 步；块后 2+7=9 天 = L+H
         "early_stop": {"metric": "nanwang_after_pstar", "patience": 3},   # patience 按验证次数计
-        "guards": {"per_station_fallback_to_zeroshot": True, "min_gain_pct": 0.0,
-                   # 早停选权重只用偶数起报日、逐站路由只用奇数起报日；false = 两者共用全部验证日
-                   "split_val_days": True,
-                   # 逐站对配对天重抽 n 次，LoRA−零样本 均值差的 alpha 分位 > min_gain_pct 且配对天数 ≥ min_days 才选 lora；
-                   # n = 0 只比均值差
-                   "bootstrap": {"n": 2000, "alpha": 0.1, "min_days": 5, "seed": 0}},
     },
     "calibration": {
         "enabled": True,

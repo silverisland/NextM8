@@ -5,23 +5,20 @@
   2. HF Trainer：损失走模型 compute_loss（pinball 9 档 + 夜间/缺失掩码），LoRA + output_head 可训；
      训练预算 finetune.schedule.max_steps 个优化器步，训练行按 sampling 随机抽
   3. NanwangEvalCallback：开训前零样本基线，之后每 eval_every_steps 步对每个验证块 cal→δ、块→校准→p*→南网短期，
-     块均值作早停指标 + 最优权重；guards.split_val_days 时只用偶数起报日
-  4. 训后：加载最优 LoRA；零样本 vs LoRA 逐站按天配对 bootstrap（split_val_days 时只用奇数起报日）→ station_routing.json
-  5. 路由后的模型重拟合校准表 → calibration.parquet（与推理时一致）
-  6. 报表：reports/ladder_lora.csv（阶梯第 4 步，全部验证日）、reports/station_ladder.csv；
+     块均值作早停指标 + 最优权重
+  4. 训后：加载最优 LoRA，重拟合校准表 → calibration.parquet（与推理时一致）；推理时全部站都用这份 LoRA
+  5. 报表：reports/ladder_lora.csv（零样本 vs LoRA，全部验证日）、reports/station_ladder.csv（逐站）；
      权重：model.safetensors（LoRA + output_head，键名相对 backbone.model）；推理配置：model_config.yaml
      状态：train_log.json、split_manifest.json
 用 HF Trainer 而不是 pipelines.transformer_trainer.train_model：后者 import 的 transformer_utils 本仓库没有，
 语义（forward 返 loss、collate 出 batch_dict/labels）在这里逐条保持一致。
 
 多卡：用 accelerate launch / torchrun 起多个进程（train_m6.sh 默认用全部可见 GPU）。每个进程各持一份模型、
-各吃不同的训练批（每步共 进程数×batch_size 行）；验证打分、存盘、训后路由与报表只在主进程做，其余进程训完即返回。
+各吃不同的训练批（每步共 进程数×batch_size 行）；验证打分、存盘与报表只在主进程做，其余进程训完即返回。
 
-训练模型的构造必须是真正的零样本起点：把 finetune.lora_path / routing_path 都改指向 run.out_dir 下一个
-从不写入的 `.fresh/` 哨兵路径，而不是直接用 cfg 里解析出的真实 model.safetensors / station_routing.json——
-后两者是本函数自己的输出路径，若同一 out_dir 曾跑过一次训练，构造期会静默把上一轮的 LoRA 权重和路由表
-读回来，epoch 0 记录的"零样本基线"和训练期的逐站前向就都不再是零样本/无路由的了。哨兵路径只影响构造期
-的装载判断，不影响本函数最终把新产物写到 out/model.safetensors、out/station_routing.json 的行为。"""
+训练模型的构造必须是真正的零样本起点：finetune.lora_path 改指向 run.out_dir 下一个从不写入的 `.fresh/`
+哨兵路径，而不是 cfg 里解析出的真实 model.safetensors——那是本函数自己的输出路径，若同一 out_dir 曾跑过
+一次训练，构造期会静默把上一轮的 LoRA 权重读回来，零样本基线就不再是零样本。"""
 from __future__ import annotations
 
 import argparse
@@ -40,20 +37,18 @@ try:
     from .config import DEFAULT_CFG, load_config, deep_merge, dump_config
     from .transformer_trainer import _raw_override, evaluate_model
     from .nanwang_callback import NanwangEvalCallback, score_split
-    from .routing import route_by_days, save_routing
-    from .lora import load_lora_state_dict, load_lora_weights, set_lora_enabled, trainable_summary
+    from .lora import load_lora_state_dict, load_lora_weights, trainable_summary
     from .features import attach_station_id
-    from .rows import StationDaySampler, day_parity
+    from .rows import StationDaySampler
     from . import _dist
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from config import DEFAULT_CFG, load_config, deep_merge, dump_config
     from transformer_trainer import _raw_override, evaluate_model
     from nanwang_callback import NanwangEvalCallback, score_split
-    from routing import route_by_days, save_routing
-    from lora import load_lora_state_dict, load_lora_weights, set_lora_enabled, trainable_summary
+    from lora import load_lora_state_dict, load_lora_weights, trainable_summary
     from features import attach_station_id
-    from rows import StationDaySampler, day_parity
+    from rows import StationDaySampler
     import _dist
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
@@ -237,12 +232,10 @@ def build_training_args(cfg: dict, out_dir, max_steps=None) -> TrainingArguments
         **{eval_strategy_kw: "no"})
 
 
-def _station_table(zs: pd.DataFrame, lo: pd.DataFrame, routing: dict, detail: pd.DataFrame | None = None) -> pd.DataFrame:
+def _station_table(zs: pd.DataFrame, lo: pd.DataFrame) -> pd.DataFrame:
     t = zs.rename(columns={"accuracy_pct": "acc_zeroshot"})[["station_id", "station", "acc_zeroshot"]].merge(
-        lo.rename(columns={"accuracy_pct": "acc_lora"})[["station_id", "acc_lora"]], on="station_id", how="outer")
-    t["route"] = t["station_id"].astype(int).map(routing).fillna("zeroshot")
-    if detail is not None:
-        t = t.merge(detail.drop(columns=["route"]), on="station_id", how="left")
+        lo.rename(columns={"accuracy_pct": "acc_lora"})[["station_id", "acc_lora", "n_days"]], on="station_id", how="outer")
+    t["gain"] = t["acc_lora"] - t["acc_zeroshot"]
     return t.sort_values("station_id").reset_index(drop=True)
 
 
@@ -263,16 +256,12 @@ class _M6Trainer(Trainer):
         return super()._get_train_sampler()
 
 
-def _on_days(daily: pd.DataFrame, parity) -> pd.DataFrame:
-    return daily if parity is None or not len(daily) else daily[day_parity(daily["date"]) == int(parity)]
-
-
 def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, max_steps=None,
              splits_dir=None) -> dict:
     """两种喂数方式二选一：parquet_path（原始行表，按 finetune.split 在内存里切）或 splits_dir
     （pipelines.time_splits 落好的 train/valid/cal.parquet + split_manifest.json，与 M1–M4 共用同一份切分）。
-    calibration.enabled=false：不做 conformal——不要校准段，早停与逐站路由按未校准分位上的点预测
-    （decision.point 配置）打分，不写 calibration.parquet，阶梯报表三行改叫 *_uncalibrated。
+    calibration.enabled=false：不做 conformal——不要校准段，早停按未校准分位上的点预测
+    （decision.point 配置）打分，不写 calibration.parquet，阶梯报表两行改叫 *_uncalibrated。
     max_steps：覆盖 finetune.schedule.max_steps，0 = 不限步数。多卡时非主进程训完即返回 {}。"""
     if (parquet_path is None) == (splits_dir is None):
         raise ValueError("parquet_path 与 splits_dir 二选一")
@@ -287,7 +276,7 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
     ft = cfg["finetune"]
     if not ft["enabled"]:
         raise ValueError("train_m6 需要 finetune.enabled=true")
-    sch, guards = ft["schedule"], ft["guards"]
+    sch = ft["schedule"]
     sampling = str(sch.get("sampling") or "random")
     if sampling not in SAMPLING:
         raise ValueError(f"finetune.schedule.sampling={sampling!r} 不在 {SAMPLING}")
@@ -297,13 +286,10 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
         from .transformer_models import TransformersAdaptedM6Model
     except ImportError:
         from transformer_models import TransformersAdaptedM6Model
-    # 训练模型：原始分位（校准在回调里拟合）；inference_path 强制 torch；lora_path/routing_path 指向
-    # 从不写入的哨兵路径，保证构造期永远是零样本、无路由起点（不会读回同一 out_dir 里上一轮训练的产物）。
-    fresh = out / ".fresh"
+    # 训练模型：原始分位（校准在回调里拟合）；inference_path 强制 torch；lora_path 指向从不写入的哨兵路径，
+    # 保证构造期永远是零样本起点（不会读回同一 out_dir 里上一轮训练的产物）。
     train_cfg = {**cfg, "calibration": {**cfg["calibration"], "enabled": False},
-                 "finetune": {**ft, "inference_path": "torch",
-                              "lora_path": str(fresh / WEIGHTS_FILE),
-                              "routing_path": str(fresh / "station_routing.json")}}
+                 "finetune": {**ft, "inference_path": "torch", "lora_path": str(out / ".fresh" / WEIGHTS_FILE)}}
     args = build_training_args(train_cfg, out, max_steps)
     _ = args.device                  # 多进程时在这里建进程组、把本进程绑到自己的 GPU；须先于模型构造
     if args.n_gpu > 1:
@@ -349,26 +335,26 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
         # 推理配置：合并了默认值、未解析 ${run.out_dir} 的配置，推理时把 run.out_dir 指向产物目录即可整体搬走
         dump_config(deep_merge(DEFAULT_CFG, _raw_override(config_path)), out / CONFIG_FILE)
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
-    sel_parity, route_parity = (0, 1) if bool(guards.get("split_val_days", True)) else (None, None)
     eval_every = sch.get("eval_every_steps")
     if main:
         world, bs = _dist.world_size(), int(args.per_device_train_batch_size)
         if not need_cal:
-            print("[m6-lora] calibration.enabled=false：不做 conformal，早停与逐站路由按未校准分位上的点预测打分")
+            print("[m6-lora] calibration.enabled=false：不做 conformal，早停按未校准分位上的点预测打分")
         print(f"[m6-lora] train={len(ds_train)} cal={0 if ds_cal is None else len(ds_cal)} val={len(ds_val)} rows in {len(ds_val_blocks)} blocks "
               f"{plan_dict['val_blocks']}; trainable={trainable_summary(model.backbone.model)}")
         budget = f"{args.max_steps} 步" if args.max_steps > 0 else f"不限步数（{sch['epochs_max']} 个 epoch）"
         print(f"[m6-lora] {world} 个进程 × 每卡 batch {bs} = 每步 {world * bs} 行；预算 {budget}；"
               f"验证{f'每 {eval_every} 步一次' if eval_every else '每个 epoch 末一次'}，patience={ft['early_stop']['patience']} 次；"
               f"训练行采样 {sampling}")
-        if sel_parity is not None:
-            print("[m6-lora] 早停选权重只用偶数起报日，逐站路由只用奇数起报日（guards.split_val_days）")
         if coverage_note:
             print(f"[m6-lora] 提示：{coverage_note}")
+    # 零样本基线（训练前的模型：LoRA B=0、输出头未动），训后与 LoRA 并排写进报表
+    zs_score, zs_tab, _ = score_split(model, ds_cal, ds_val, collate, train_cfg) if main else (None, None, None)
+    _dist.barrier()
     best_path = out / WEIGHTS_FILE
     cb = NanwangEvalCallback(model, ds_cal, ds_val_blocks, collate, train_cfg, best_path=best_path,
                              patience=int(ft["early_stop"]["patience"]), log_path=out / "train_log.json",
-                             eval_every_steps=eval_every, day_parity=sel_parity)
+                             eval_every_steps=eval_every)
     trainer = _M6Trainer(model=model, args=args, data_collator=collate, train_dataset=ds_train, callbacks=[cb],
                          sampling=sampling, station_col=station_col, ts_col=ts_col)
     trainer.train()
@@ -380,55 +366,32 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
             f"（NanwangEvalCallback 每次验证对每块各调一次 score_split，取块均值）自始至终都是非有限值"
             f"（没有一块能凑出完整可评分的一天），cb.best_epoch={cb.best_epoch!r}，{best_path} 不存在。"
             f"请检查各验证块是否覆盖足够多的完整天。")
-    # 最优权重
+    # 最优权重 → 校准表（与推理时同一个模型）
     load_lora_state_dict(model.backbone.model, load_lora_weights(best_path))
     model.lora_loaded = True
-    # 阶梯 4：零样本 vs LoRA（各自校准）→ 逐站路由 → 路由模型重拟合校准表
-    model.station_routing = None
-    set_lora_enabled(model.backbone.model, False); zs_score, zs_tab, _, zs_daily = score_split(model, ds_cal, ds_val, collate, train_cfg)
-    set_lora_enabled(model.backbone.model, True);  lo_score, lo_tab, _, lo_daily = score_split(model, ds_cal, ds_val, collate, train_cfg)
-    stations = pd.concat([zs_tab["station_id"], lo_tab["station_id"]])
-    boot = guards.get("bootstrap") or {}
-    rule = {"route_day_parity": route_parity, "min_gain_pct": float(guards.get("min_gain_pct", 0.0)),
-            "n_boot": int(boot.get("n", 0)), "alpha": float(boot.get("alpha", 0.1)),
-            "min_days": int(boot.get("min_days", 1)), "seed": int(boot.get("seed", 0))}
-    detail = None
-    if bool(guards["per_station_fallback_to_zeroshot"]):
-        routing, detail = route_by_days(_on_days(zs_daily, route_parity), _on_days(lo_daily, route_parity), stations,
-                                        min_gain_pct=rule["min_gain_pct"], n_boot=rule["n_boot"], alpha=rule["alpha"],
-                                        min_days=rule["min_days"], seed=rule["seed"])
-    else:
-        routing = {int(s): "lora" for s in stations}
-    save_routing(out / "station_routing.json", routing)
-    model.station_routing = routing
-    routed_score, _, calib, _ = score_split(model, ds_cal, ds_val, collate, train_cfg)
+    lo_score, lo_tab, calib = score_split(model, ds_cal, ds_val, collate, train_cfg)
     if calib is not None:
         calib.save(cfg["calibration"]["table_path"])
     res_val = evaluate_model(model, ds_val, collate, train_cfg)
     res_val.to_parquet(out / "result_val_lora.parquet", index=False)
-    n_lora = sum(v == "lora" for v in routing.values()); n_zs = len(routing) - n_lora
     tag = "calibrated_pstar" if need_cal else "uncalibrated"
-    ladder = pd.DataFrame([{"variant": f"zeroshot_{tag}", "nanwang_short_D+1": zs_score, "n_stations_lora": 0, "n_stations_zeroshot": len(routing)},
-                           {"variant": f"lora_{tag}", "nanwang_short_D+1": lo_score, "n_stations_lora": len(routing), "n_stations_zeroshot": 0},
-                           {"variant": f"routed_{tag}", "nanwang_short_D+1": routed_score, "n_stations_lora": n_lora, "n_stations_zeroshot": n_zs}])
+    ladder = pd.DataFrame([{"variant": f"zeroshot_{tag}", "nanwang_short_D+1": zs_score},
+                           {"variant": f"lora_{tag}", "nanwang_short_D+1": lo_score}])
     ladder.to_csv(report_dir / "ladder_lora.csv", index=False)
-    station_tab = _station_table(zs_tab, lo_tab, routing, detail)
+    station_tab = _station_table(zs_tab, lo_tab)
     station_tab.to_csv(report_dir / "station_ladder.csv", index=False)
     log = json.loads((out / "train_log.json").read_text(encoding="utf-8"))
-    log.update({"final": ladder.to_dict("records"), "routing": {str(k): v for k, v in routing.items()},
-                "routing_rule": rule, "routing_detail": None if detail is None else detail.to_dict("records"),
-                "shift_days": int(shift_days), "split": split_info})
+    log.update({"final": ladder.to_dict("records"), "shift_days": int(shift_days), "split": split_info})
     (out / "train_log.json").write_text(json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8")
     print(ladder.to_string(index=False)); print(station_tab.to_string(index=False))
-    print(f"[m6-lora] 产物：{best_path} / {out / CONFIG_FILE} / {out / 'station_routing.json'} / "
+    print(f"[m6-lora] 产物：{best_path} / {out / CONFIG_FILE} / "
           + (f"{cfg['calibration']['table_path']} / " if calib is not None else "")
           + f"{out / 'split_manifest.json'} / {report_dir}")
-    return {"ladder": ladder, "routing": routing, "routing_detail": detail, "history": cb.history, "best": cb.best,
-            "split": split_info}
+    return {"ladder": ladder, "history": cb.history, "best": cb.best, "split": split_info}
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="M6 路线 B：LoRA 微调 + 站级回退 + 阶梯 4 报表")
+    ap = argparse.ArgumentParser(description="M6 路线 B：LoRA 微调 + 阶梯 4 报表")
     ap.add_argument("--config", default="forecast_backbones/m6/config/configs.yaml")
     ap.add_argument("--parquet", default=None, help="原始行表（可通配符），按 config 的 finetune.split 在内存里切")
     ap.add_argument("--splits-dir", default=None, help="pipelines.time_splits 落好的目录（train/valid/cal.parquet + manifest）")

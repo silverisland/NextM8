@@ -33,16 +33,12 @@ class LoRALinear(nn.Module):
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
         self.scaling = float(alpha) / float(rank)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.enabled = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.base(x)
-        if not self.enabled:
-            return y
-        return y + (self.dropout(x) @ self.lora_A.t() @ self.lora_B.t()) * self.scaling
+        return self.base(x) + (self.dropout(x) @ self.lora_A.t() @ self.lora_B.t()) * self.scaling
 
     def extra_repr(self) -> str:
-        return f"rank={self.lora_A.shape[0]}, scaling={self.scaling}, enabled={self.enabled}"
+        return f"rank={self.lora_A.shape[0]}, scaling={self.scaling}"
 
 
 def inject_lora(root: nn.Module, target_modules: Sequence[str], rank: int, alpha: float, dropout: float) -> list[str]:
@@ -64,14 +60,6 @@ def inject_lora(root: nn.Module, target_modules: Sequence[str], rank: int, alpha
     for name, parent, attr in hits:
         setattr(parent, attr, LoRALinear(getattr(parent, attr), rank, alpha, dropout))
     return [h[0] for h in hits]
-
-
-def set_lora_enabled(root: nn.Module, enabled: bool) -> int:
-    n = 0
-    for m in root.modules():
-        if isinstance(m, LoRALinear):
-            m.enabled = bool(enabled); n += 1
-    return n
 
 
 def freeze_all_but_lora(root: nn.Module, unfreeze_output_head: bool, output_head_name: str = "output_head") -> None:

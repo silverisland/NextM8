@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from pipelines.transformer_dataset import UnifiedDataset
-from forecast_backbones.m6.rows import StationDaySampler, day_row_index, row_stations
+from forecast_backbones.m6.rows import StationDaySampler, row_stations
 from .conftest import make_synthetic_frame
 
 
@@ -32,10 +32,3 @@ def test_station_day_sampler_is_reproducible_per_epoch():
     assert list(iter(a)) != first_a                                      # 下一轮换一批
     a.set_epoch(0)
     assert list(iter(a)) == first_a
-
-
-def test_day_row_index_keeps_all_rows_of_one_parity():
-    df = make_synthetic_frame(n_days=2, issue_every_min=60, seed=0)       # 06-08 奇数日（1970-01-01 后第 20247 天）、06-09 偶数日
-    ds = _ds(df)
-    odd = day_row_index(ds, "timestamp_win", 1)
-    assert len(odd) == len(df) // 2 and (df["timestamp_win"].iloc[odd].dt.day == 8).all()

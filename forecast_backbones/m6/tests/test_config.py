@@ -51,10 +51,9 @@ def test_finetune_defaults_use_real_timesfm3_module_names():
     ft = load_config(None)["finetune"]
     assert ft["lora"]["target_modules"] == ["query_proj", "key_proj", "value_proj", "out_proj"]
     assert ft["lora_path"].endswith("/model.safetensors") and "${" not in ft["lora_path"]
-    assert ft["routing_path"].endswith("/station_routing.json")
+    assert "routing_path" not in ft and "guards" not in ft
     assert ft["split"]["train_start"] is None
     assert ft["schedule"]["logging_steps"] == 20
-    assert ft["guards"]["min_gain_pct"] == 0.0
     assert ft["inference_path"] == "evaluator" and ft["enabled"] is False
 
 
