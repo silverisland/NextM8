@@ -82,17 +82,27 @@ DEFAULT_CFG: dict = {
                   "curtailment_autodetect": {"enabled": False, "plateau_ratio": 0.05,
                                              "k_nwp_min": 0.7, "min_run": 4},
                   "missing": True},
-        "schedule": {"lr": 1.0e-4, "weight_decay": 0.01, "epochs_max": 10, "batch_size": 16,
+        "schedule": {"lr": 1.0e-4, "weight_decay": 0.01,
+                     "epochs_max": 10,           # 只在 max_steps 为 null 时生效
+                     "batch_size": 16,           # 每张卡；多卡时每步共 卡数×batch_size 行
                      "grad_clip": 1.0, "precision": "bf16", "logging_steps": 20,
-                     "progress_bar": True},      # tqdm 进度条：训练步 + 每次验证推理；写日志文件嫌乱可关
+                     "progress_bar": True,       # tqdm 进度条：训练步 + 每次验证推理；写日志文件嫌乱可关
+                     "max_steps": 4000,          # 训练预算：优化器步数；null = 按 epochs_max 训满
+                     "eval_every_steps": 250,    # 每多少步在验证块上打一次分（早停、存最优）；null = 每个 epoch 末
+                     "sampling": "random"},      # random：训练行均匀随机抽；station_day：每个（站, 起报日）等概率
         "split": {"train_start": None,                     # null = 数据最早
                   # 验证块列表 [start, end) 整天；分散到不同季节；块前 purge_days、块后 purge_days+embargo_days 的训练行剔除
                   "val_blocks": [["2025-01-10", "2025-01-31"], ["2025-04-10", "2025-05-01"], ["2025-07-16", "2025-08-06"]],
                   "test_start": "2025-10-01", "test_end": None,   # 尾段测试；test_end null = 数据末尾
                   "cal_days": 45,                           # 校准段 = [test_start − purge − cal_days, test_start − purge)
                   "purge_days": 2, "embargo_days": 7},      # 2 天 ≥ H=192 步；块后 2+7=9 天 = L+H
-        "early_stop": {"metric": "nanwang_after_pstar", "patience": 3},
-        "guards": {"per_station_fallback_to_zeroshot": True, "min_gain_pct": 0.0},
+        "early_stop": {"metric": "nanwang_after_pstar", "patience": 3},   # patience 按验证次数计
+        "guards": {"per_station_fallback_to_zeroshot": True, "min_gain_pct": 0.0,
+                   # 早停选权重只用偶数起报日、逐站路由只用奇数起报日；false = 两者共用全部验证日
+                   "split_val_days": True,
+                   # 逐站对配对天重抽 n 次，LoRA−零样本 均值差的 alpha 分位 > min_gain_pct 且配对天数 ≥ min_days 才选 lora；
+                   # n = 0 只比均值差
+                   "bootstrap": {"n": 2000, "alpha": 0.1, "min_days": 5, "seed": 0}},
     },
     "calibration": {
         "enabled": True,

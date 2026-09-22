@@ -98,13 +98,14 @@ python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/conf
     --splits-dir dataset/<name> --out runs/m6_lora_f0
 ```
 `config/configs.yaml` 里先把 `finetune.enabled: true`、`finetune.split` 改成真实日期；滚动第二折加 `--shift-days N`（只对 a 有效，
-b 的整体后移在切分时给），输出目录换 `_f1`。`--max-steps` 只用于冒烟。
+b 的整体后移在切分时给），输出目录换 `_f1`。`--max-steps N` 覆盖 `finetune.schedule.max_steps`（0 = 不限步数，按 `epochs_max`）。
+服务器上用仓库根目录的 `train_m6.sh`（默认用全部可见 GPU，见下文“训练预算、验证与多卡”）。
 
 `finetune.split` 现在是验证块列表：`val_blocks` 若干个 `[start, end)` 整天区间（分散到不同季节），`test_start`/`test_end` 尾段测试，
 `cal_days` 校准段（固定放在 `test_start − purge_days` 之前），`purge_days`（块前剔除训练行）与 `embargo_days`（块后额外剔除）。
 两个天数都由 `SplitPlan.from_dict` 当场校验，给不够直接报错：`purge_days` 须 ≥ H 折算天数（默认 2 天），
 `purge_days + embargo_days` 须 ≥ L + H 折算天数（默认 9 天）——前 H 步保证块后训练行的标签不与块标签重叠，
-再往后的 L 步保证这些训练行 7 天的上下文不含块的标签。早停指标是各块南网短期得分的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`；
+再往后的 L 步保证这些训练行 7 天的上下文不含块的标签。早停指标是各块南网短期得分的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`（`guards.split_val_days: true` 时只用偶数起报日，见下文）；
 切分事实落在 `out_dir/split_manifest.json`（`generated_by: forecast_backbones.m6.train`）。给 M1–M4 生成同一规则的 `train/valid/cal/test.parquet`：
 `python -m pipelines.time_splits --parquet RAW.parquet --out-dir dataset/<name> --m6-config forecast_backbones/m6/config/configs.yaml`
 （`--m6-config` 时 L/H/step_min 默认取该 yaml 的 `timesfm3.context_len` / `timesfm3.pred_len` / `dataset.step_min`，
@@ -142,7 +143,16 @@ M6 的 `finetune.split` 不解析 `auto`，要用就抄 `split_resolved.yaml` �
 ```bash
 python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/lora_no_conformal.yaml \
     --splits-dir data/splits/m1_m4_v1 --out runs/m6_lora_v1
+# 服务器：全部可见 GPU，产物在 runs/m6/<run_id>
+bash train_m6.sh --splits_dir data/splits/m1_m4_v1 --run_id lora_v1
 ```
+
+**训练预算、验证与多卡**（`finetune.schedule` / `early_stop` / `guards`）：
+- 预算按优化器步数给：`max_steps`（默认 4000），`epochs_max` 只在 `max_steps: null` 时生效。训练行按 `sampling` 随机抽：`random` 在全部训练行里均匀抽，`station_day` 让每个（站, 起报日）被抽中的概率相同。
+- 每 `eval_every_steps` 步（默认 250，训练最后一步必打）在全部验证块上打一次南网短期分，`patience` 按验证次数计。验证只推理指标用到的行（每站每个起报日取 10:00 前最晚的一行），分数与推理全部行相同；做 conformal 时校准段每次验证只推理一遍，各块共用。
+- `guards.split_val_days: true`（默认）：早停选权重只用偶数起报日（距 1970-01-01 的天数为偶数），逐站路由只用奇数起报日，免得挑权重和选路由用同一批天。`ladder_lora.csv` 三行仍是全部验证日上的分数。
+- 逐站路由：同站同起报日配对 LoRA − 零样本 的日准确率差，对配对天重抽 `bootstrap.n` 次（默认 2000），重抽均值的 `alpha` 分位（默认 0.1）> `min_gain_pct` 且配对天数 ≥ `min_days`（默认 5）才选 lora；`n: 0` 只比均值差。逐站明细写进 `station_ladder.csv` 的 `n_days_route` / `gain_mean` / `gain_lower` 列和 `train_log.json` 的 `routing_detail`。
+- 多卡：`accelerate launch` / `torchrun` 起多个进程即可，`train_m6.sh` 默认用全部可见 GPU。每张卡一个进程、各吃不同的训练批，每步共 卡数 × `batch_size` 行（`batch_size` 是每张卡的）；验证、存最优、训后路由与报表只在主进程做，其余进程训完即退出。站号需要转换时由主进程写 `out_dir/.data/` 下的临时 parquet，其余进程等它写完再读。
 
 **训练与测试的站对不上**：只在测试集里、训练数据里没有的站，切分时忽略（manifest 的 `ignored_test_only_stations` 记下名单）；
 只在训练数据里、没有测试集的站，给占位 `test_start` = 该站最后一天 + 1 + `purge_days`，于是它没有测试行、末尾不剔除任何行，
@@ -150,11 +160,11 @@ python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/lora
 没有测试集的站晚于终点的数据不参与放块、照常进训练，免得验证块被拉进别的站的测试时段。这些站列在 `stations_without_test`，覆盖表的测试起点列显示"无测试集"，
 `split_resolved.yaml` 连同占位日期一起写下，原样重跑不变。M6 `make_splits` 同样处理。
 
-产物（`run.out_dir`）：`lora_weights.pt`（val 上南网短期得分最优的 epoch；epoch 0 是零样本基线，所以永远不输零样本）、
-`station_routing.json`（逐站 `lora|zeroshot`，输给零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
+产物（`run.out_dir`）：`lora_weights.pt`（验证日上南网短期得分最优的那次验证；第 0 步是零样本基线，所以在早停用的验证日上永远不输零样本）、
+`station_routing.json`（逐站 `lora|zeroshot`，没有稳定胜过零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
 `calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：
 `ladder_lora.csv`（阶梯 4：`zeroshot_calibrated_pstar` / `lora_calibrated_pstar` / `routed_calibrated_pstar` 三行）、`station_ladder.csv`
-（逐站 `route` 列，取值 `lora|zeroshot`）。
+（逐站 `route` 列，取值 `lora|zeroshot`，另有路由用的配对天数与 LoRA 增益的均值、下界）。
 
 推理：`finetune.enabled: true` 时（`torch_path = bool(finetune.enabled) or inference_path == "torch"`，`enabled=True` 已经短路成
 `True`）**永远**走 torch 路径并挂 LoRA，`inference_path` 这个键在 `enabled=True` 时不被读取、不产生任何差异；模型构造期自动加载

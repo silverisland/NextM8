@@ -93,6 +93,11 @@ def test_build_training_args_cpu_defaults(tmp_path):
     assert args.max_steps == 3 and args.per_device_train_batch_size == 4 and args.remove_unused_columns is False
     assert args.evaluation_strategy.value == "no" and args.save_strategy.value == "no" and args.report_to == []
     assert args.bf16 is False and args.max_grad_norm == 1.0 and args.use_cpu is (not torch.cuda.is_available())
+    assert args.ddp_timeout == 7200
+    assert build_training_args(load_config(cfg), out).max_steps == 4000                  # 不给就用 schedule.max_steps
+    assert build_training_args(load_config(cfg), out, max_steps=0).max_steps == -1       # 0 = 不限步数
+    no_budget = {**cfg, "finetune": {**cfg["finetune"], "schedule": {**cfg["finetune"]["schedule"], "max_steps": None}}}
+    assert build_training_args(load_config(no_budget), out).max_steps == -1
 
 
 def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monkeypatch):
@@ -109,12 +114,16 @@ def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monk
     assert np.isfinite(ladder["nanwang_short_D+1"]).all()
     st = pd.read_csv(out / "reports" / "station_ladder.csv")
     assert set(st["station_id"]) == set(CAP) and set(st["route"]) <= {"lora", "zeroshot"}
+    assert {"n_days_route", "gain_mean", "gain_lower"} <= set(st.columns)
     routing = load_routing(out / "station_routing.json")
     assert routing == dict(zip(st["station_id"].astype(int), st["route"]))
-    # 路由后的全体得分 ≥ 两者逐站取优的下界：不低于零样本行（逐站不输零样本）
+    # 验证块 2 天：偶数日 06-13 给早停、奇数日 06-12 给路由；每站 1 个配对天 < min_days=5 → 全部回退零样本
+    assert (st["n_days_route"] == 1).all() and set(routing.values()) == {"zeroshot"}
     z = ladder.set_index("variant")["nanwang_short_D+1"]
-    assert z["routed_calibrated_pstar"] >= z["zeroshot_calibrated_pstar"] - 1e-9
+    assert np.isclose(z["routed_calibrated_pstar"], z["zeroshot_calibrated_pstar"])
     log = json.loads((out / "train_log.json").read_text())
+    assert log["routing_rule"]["route_day_parity"] == 1 and log["day_parity"] == 0 and log["routing_rule"]["n_boot"] == 2000
+    assert len(log["routing_detail"]) == len(CAP)
     assert log["history"][0]["epoch"] == 0.0 and len(log["history"]) >= 2 and "best" in log
     assert set(res) >= {"ladder", "routing", "history", "best"}
     assert res["ladder"]["variant"].tolist() == ladder["variant"].tolist() and res["routing"] == routing
@@ -124,6 +133,38 @@ def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monk
     assert man["counts"]["train"] > 0 and man["counts"]["val_blocks"] == [man["counts"]["val"]]
     assert log["split"] == man and res["split"] == man
     assert log["history"][0]["blocks"] and len(log["history"][0]["blocks"]) == 1
+
+
+def test_train_m6_old_routing_rule_never_loses_to_zeroshot(tmp_path, tiny_evaluator, monkeypatch):
+    """split_val_days=false + bootstrap.n=0 + min_days=1：早停与路由共用全部验证日、逐站只比均值差（旧口径），
+    路由后的全体得分不低于零样本行。"""
+    _patch_tiny_backbone(monkeypatch, tiny_evaluator)
+    df, parquet, out, cfg = _inputs(tmp_path)
+    cfg["finetune"]["guards"] = {"split_val_days": False, "bootstrap": {"n": 0, "min_days": 1}}
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+        res = train_m6(cfg, str(parquet), max_steps=2)
+    z = res["ladder"].set_index("variant")["nanwang_short_D+1"]
+    assert z["routed_calibrated_pstar"] >= z["zeroshot_calibrated_pstar"] - 1e-9
+    assert (res["routing_detail"]["n_days_route"] == 2).all()
+    log = json.loads((out / "train_log.json").read_text())
+    assert log["day_parity"] is None and log["routing_rule"]["route_day_parity"] is None
+
+
+def test_train_m6_station_day_sampling_and_step_evals(tmp_path, tiny_evaluator, monkeypatch):
+    _patch_tiny_backbone(monkeypatch, tiny_evaluator)
+    df, parquet, out, cfg = _inputs(tmp_path)
+    cfg["finetune"]["schedule"].update({"sampling": "station_day", "eval_every_steps": 2})
+    cfg["finetune"]["early_stop"] = {"patience": 10}
+    import forecast_backbones.m6.train as train_mod
+    used = []
+    real = train_mod.StationDaySampler
+    monkeypatch.setattr(train_mod, "StationDaySampler", lambda *a, **k: used.append(1) or real(*a, **k))
+    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+        res = train_m6(cfg, str(parquet), max_steps=3)
+    assert used == [1] and [h["step"] for h in res["history"]] == [0, 2, 3]
+    bad = {**cfg, "finetune": {**cfg["finetune"], "schedule": {**cfg["finetune"]["schedule"], "sampling": "by_station"}}}
+    with pytest.raises(ValueError, match="sampling"):
+        train_m6(bad, str(parquet), max_steps=1)
 
 
 def test_trained_artifacts_load_into_inference_model(tmp_path, tiny_evaluator, monkeypatch):
@@ -401,3 +442,13 @@ def test_build_plan_rejects_unresolved_auto_blocks():
              "test_end": None, "cal_days": 1, "purge_days": 2, "embargo_days": 7}
     with pytest.raises(ValueError, match="split_resolved.yaml"):
         build_plan(split)
+
+
+def test_train_m6_refuses_single_process_multi_gpu(tmp_path, tiny_evaluator, monkeypatch):
+    """单进程看到多张卡时 HF 会退到 DataParallel（M6 的 dict batch 不支持）：开训前直接报错，指向多进程启动。"""
+    _patch_tiny_backbone(monkeypatch, tiny_evaluator)
+    from transformers import TrainingArguments
+    monkeypatch.setattr(TrainingArguments, "n_gpu", property(lambda self: 2))
+    df, parquet, out, cfg = _inputs(tmp_path)
+    with pytest.raises(ValueError, match="DataParallel"):
+        train_m6(cfg, str(parquet), max_steps=1)

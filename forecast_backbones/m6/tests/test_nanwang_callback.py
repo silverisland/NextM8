@@ -1,6 +1,7 @@
 import functools
 import json
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 from transformers import TrainerControl, TrainerState, TrainingArguments
@@ -9,6 +10,7 @@ pytest.importorskip("timesfm3")
 from pipelines.transformer_dataset import UnifiedDataset
 from forecast_backbones.m6 import nanwang_callback as nc
 from forecast_backbones.m6.nanwang_callback import score_split, NanwangEvalCallback
+from forecast_backbones.m6.rows import scored_row_index, day_parity
 from forecast_backbones.m6.lora import LoRALinear
 from .conftest import make_synthetic_frame, CAP
 from .test_model_route_b import _model_b
@@ -28,11 +30,13 @@ def test_score_split_returns_station_table_and_restores_train_mode(tmp_path, tin
         m = _model_b(tmp_path, tiny_evaluator)
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     m.train()
-    score, table, calib = score_split(m, ds_cal, ds_val, collate, m.cfg)
+    score, table, calib, daily = score_split(m, ds_cal, ds_val, collate, m.cfg)
     assert m.training is True                                           # 恢复
     assert np.isfinite(score) and 0 <= score <= 100
     assert set(table.columns) >= {"station_id", "station", "accuracy_pct", "n_days"} and set(table["station_id"]) == set(CAP)
     assert calib is not None and calib.last_stats is not None
+    assert list(daily.columns) == ["station_id", "station", "date", "accuracy_pct"] and len(daily) == table["n_days"].sum()
+    assert np.isclose(daily["accuracy_pct"].mean(), score)
 
 
 def test_score_split_rejects_model_with_calibrator(tmp_path, tiny_evaluator):
@@ -46,12 +50,12 @@ def test_score_split_rejects_model_with_calibrator(tmp_path, tiny_evaluator):
         score_split(m, ds_cal, ds_val, collate, m.cfg)
 
 
-def _cb(tmp_path, m, patience, scores, monkeypatch, n_blocks=1):
+def _cb(tmp_path, m, patience, scores, monkeypatch, n_blocks=1, **kw):
     """scores：每次 _score 调用依次消费 n_blocks 个分数。"""
     it = iter(scores)
-    monkeypatch.setattr(nc, "score_split", lambda *a, **k: (next(it), None, None))
+    monkeypatch.setattr(nc, "score_split", lambda *a, **k: (next(it), None, None, None))
     return NanwangEvalCallback(m, None, [None] * n_blocks, None, m.cfg, best_path=tmp_path / "best.pt", patience=patience,
-                               log_path=tmp_path / "log.json")
+                               log_path=tmp_path / "log.json", **kw)
 
 
 def test_callback_keeps_best_and_stops_on_patience(tmp_path, tiny_evaluator, monkeypatch):
@@ -133,3 +137,99 @@ def test_progress_bar_shows_block_label_and_can_be_disabled(tmp_path, tiny_evalu
     m.cfg = off
     NanwangEvalCallback(m, None, [ds_val], collate, off, best_path=tmp_path / "b.pt", patience=1, log_path=tmp_path / "l.json")._score()
     assert "验证块" not in capsys.readouterr().err
+
+
+def _two_val_days():
+    """校准段 2 天 + 验证段 2 天（06-10 是 1970-01-01 后第 20249 天，奇数日；06-11 偶数日），2 站，每小时一个起报。"""
+    df = make_synthetic_frame(n_days=4, issue_every_min=60, seed=0)
+    day = df["timestamp_win"].dt.normalize()
+    mk = lambda d: UnifiedDataset(d.reset_index(drop=True), timestamp_cols=["timestamp_win"], entity_cols=[],
+                                  label_cols=["observe_power_future"], for_hf_trainer=True)
+    return mk(df[day < pd.Timestamp("2025-06-10")]), mk(df[day >= pd.Timestamp("2025-06-10")])
+
+
+def test_score_split_infers_only_rows_the_metric_uses_and_scores_identically(tmp_path, tiny_evaluator, monkeypatch):
+    """南网短期 D+1 每站每天只用一行（当日 <= 10:00 的最晚一行）；只推理这些行，分数与推理全部行逐位相同。"""
+    ds_cal, ds_val = _datasets()
+    idx = scored_row_index(ds_val, "station_id", "timestamp_win")
+    ts = np.asarray(ds_val.column("timestamp_win")).astype("datetime64[ns]")
+    assert len(idx) == 2 and all(str(t)[11:16] == "10:00" for t in ts[idx])          # 2 站 × 1 天
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    seen = []
+    real = nc.evaluate_model
+    monkeypatch.setattr(nc, "evaluate_model", lambda model, ds, *a, **k: (seen.append(len(ds)), real(model, ds, *a, **k))[1])
+    fast = score_split(m, None, ds_val, collate, m.cfg)
+    full = score_split(m, None, ds_val, collate, m.cfg, scored_rows_only=False)
+    assert seen == [2, len(ds_val)]
+    assert fast[0] == full[0] and fast[1].equals(full[1]) and fast[3].equals(full[3])
+
+
+def test_scored_row_index_falls_back_to_latest_row_before_issue_time():
+    """当天没有 10:00 行时取更早的最近一行（与 short_d1_daily 一致）；10:00 之后的行永远不选。"""
+    df = make_synthetic_frame(n_days=2, issue_every_min=60, seed=0)
+    df = df[df["timestamp_win"].dt.hour != 10].reset_index(drop=True)
+    ds = UnifiedDataset(df, timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"],
+                        for_hf_trainer=True)
+    ts = pd.to_datetime(np.asarray(ds.column("timestamp_win")))[scored_row_index(ds, "station_id", "timestamp_win")]
+    assert len(ts) == 4 and all(t.hour == 9 for t in ts)                               # 2 站 × 2 天
+
+
+def test_day_parity_splits_scored_days_into_two_halves(tmp_path, tiny_evaluator):
+    _, ds_val = _two_val_days()
+    even = scored_row_index(ds_val, "station_id", "timestamp_win", parity=0)
+    odd = scored_row_index(ds_val, "station_id", "timestamp_win", parity=1)
+    both = scored_row_index(ds_val, "station_id", "timestamp_win")
+    assert len(even) == len(odd) == 2 and sorted(np.concatenate([even, odd])) == list(both)
+    assert day_parity([pd.Timestamp("2025-06-10"), pd.Timestamp("2025-06-11 23:45")]).tolist() == [1, 0]
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    s_all, _, _, d_all = score_split(m, None, ds_val, collate, m.cfg)
+    s0, _, _, d0 = score_split(m, None, ds_val, collate, m.cfg, day_parity=0)
+    s1, _, _, d1 = score_split(m, None, ds_val, collate, m.cfg, day_parity=1)
+    assert set(d0["date"]) == {pd.Timestamp("2025-06-11")} and set(d1["date"]) == {pd.Timestamp("2025-06-10")}
+    assert pd.concat([d0, d1]).sort_values(["date", "station_id"]).reset_index(drop=True).equals(
+        d_all.sort_values(["date", "station_id"]).reset_index(drop=True))
+    assert np.isclose(s_all, pd.concat([d0, d1])["accuracy_pct"].mean())
+
+
+def test_score_split_with_no_rows_left_returns_nan(tmp_path, tiny_evaluator):
+    _, ds_val = _datasets()                                                            # 只有 06-10（奇数日）
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    score, table, calib, daily = score_split(m, None, ds_val, collate, m.cfg, day_parity=0)
+    assert np.isnan(score) and table.empty and daily.empty and calib is None
+
+
+def test_calibration_is_fitted_once_per_evaluation_and_shared_by_blocks(tmp_path, tiny_evaluator, monkeypatch):
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    fits, seen = [], []
+    monkeypatch.setattr(nc, "fit_split_calibrator", lambda *a, **k: fits.append(1) or "CALIB")
+    monkeypatch.setattr(nc, "score_split", lambda *a, **k: (seen.append((k["calib"], k["day_parity"])), (70.0, None, None, None))[1])
+    cb = NanwangEvalCallback(m, "DS_CAL", [None, None, None], None, m.cfg, best_path=tmp_path / "b.pt", patience=1,
+                             log_path=tmp_path / "l.json", day_parity=0)
+    assert cb._score() == (70.0, [70.0, 70.0, 70.0])
+    assert fits == [1] and seen == [("CALIB", 0)] * 3
+
+
+def test_step_mode_evaluates_every_n_steps_and_on_last_step(tmp_path, tiny_evaluator, monkeypatch):
+    """eval_every_steps=2、max_steps=5：第 2、4、5 步打分；epoch 末不打；patience 按打分次数计。"""
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    cb = _cb(tmp_path, m, patience=2, scores=[50.0, 55.0, 54.0, 53.0], monkeypatch=monkeypatch, eval_every_steps=2)
+    args = TrainingArguments(output_dir=str(tmp_path / "hf"), report_to=[]); state = TrainerState(max_steps=5)
+    control = TrainerControl()
+    cb.on_train_begin(args, state, control)
+    for step in range(1, 6):
+        state.global_step, state.epoch = step, step / 5
+        cb.on_step_end(args, state, control)
+    cb.on_epoch_end(args, state, control)
+    assert [h["step"] for h in cb.history] == [0, 2, 4, 5]
+    assert cb.best == 55.0 and cb.best_step == 2 and cb.best_epoch == 0.4
+    assert control.should_training_stop is True                                        # 第 4、5 步连续两次没超过 55
+    log = json.loads((tmp_path / "log.json").read_text())
+    assert log["best_step"] == 2 and log["eval_every_steps"] == 2 and log["history"][-1]["bad_evals"] == 2

@@ -73,11 +73,14 @@ finetune:                              # 路线 B（计划 2）：LoRA 微调；
   schedule:
     lr: 1.0e-4
     weight_decay: 0.01
-    epochs_max: 10
-    batch_size: 16
+    epochs_max: 10                     # 只在 max_steps 为 null 时生效
+    batch_size: 16                     # 每张卡
     grad_clip: 1.0
     precision: bf16                    # 只在 cuda 上生效；cpu 自动退 fp32
     logging_steps: 20
+    max_steps: 4000                    # 训练预算：优化器步数（多卡时每步 = 卡数 × batch_size 行）；null = 按 epochs_max 训满
+    eval_every_steps: 250              # 每多少步在验证块上打一次分（早停、存最优）；null = 每个 epoch 末
+    sampling: random                   # random：训练行均匀随机抽；station_day：每个（站, 起报日）等概率
   split:                               # 只有 --parquet（原始行表）模式读这一段；--splits-dir 模式不读
     train_start: null                  # null = 数据最早
     val_blocks:                        # 验证块 [start, end) 整天，分散到不同季节（占位日期，须改成真实日期）
@@ -92,10 +95,16 @@ finetune:                              # 路线 B（计划 2）：LoRA 微调；
     embargo_days: 7                    # 块后额外剔除，块后共 purge+embargo = 9 天 = L+H
   early_stop:
     metric: nanwang_after_pstar
-    patience: 3
+    patience: 3                        # 按验证次数计
   guards:
     per_station_fallback_to_zeroshot: true
     min_gain_pct: 0.0                  # LoRA 站得分须超零样本这么多才选 lora
+    split_val_days: true               # 早停选权重只用偶数起报日、逐站路由只用奇数起报日；false = 两者共用全部验证日
+    bootstrap:                         # 逐站对配对天重抽 n 次，LoRA−零样本 均值差的 alpha 分位 > min_gain_pct 才选 lora
+      n: 2000                          # 0 = 只比均值差
+      alpha: 0.1
+      min_days: 5                      # 配对天数不足的站走零样本
+      seed: 0
 calibration:
   enabled: false                       # 不做 conformal：不要校准段，早停与逐站路由按未校准分位上的点预测打分
   table_path: ${run.out_dir}/calibration.parquet

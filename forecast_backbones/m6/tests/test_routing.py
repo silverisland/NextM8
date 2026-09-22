@@ -5,7 +5,7 @@ import pytest
 import torch
 
 pytest.importorskip("timesfm3")
-from forecast_backbones.m6.routing import decide_routing, save_routing, load_routing
+from forecast_backbones.m6.routing import decide_routing, route_by_days, save_routing, load_routing
 from forecast_backbones.m6.lora import LoRALinear, set_lora_enabled
 from .conftest import make_synthetic_frame
 from .test_model_route_a import _batch
@@ -16,6 +16,36 @@ def test_decide_routing_rules():
     t = pd.DataFrame({"station_id": [1, 2, 3, 4], "acc_zeroshot": [80.0, 80.0, 80.0, np.nan], "acc_lora": [81.0, 80.0, 79.0, 90.0]})
     assert decide_routing(t) == {1: "lora", 2: "zeroshot", 3: "zeroshot", 4: "zeroshot"}
     assert decide_routing(t, min_gain_pct=1.5) == {1: "zeroshot", 2: "zeroshot", 3: "zeroshot", 4: "zeroshot"}
+
+
+def _daily(station_id, diffs, base=80.0, start="2025-06-01"):
+    """逐日表对：零样本每天 base 分，LoRA 每天 base + diffs[i] 分。"""
+    dates = pd.date_range(start, periods=len(diffs), freq="D")
+    zs = pd.DataFrame({"station_id": station_id, "date": dates, "accuracy_pct": base})
+    return zs, zs.assign(accuracy_pct=base + np.asarray(diffs, float))
+
+
+def test_route_by_days_requires_a_stable_gain():
+    rng = np.random.default_rng(0)
+    z1, l1 = _daily(1, 2.0 + rng.normal(0, 0.5, 20))          # 稳定 +2 → lora
+    z2, l2 = _daily(2, rng.normal(0.3, 6.0, 20))              # 均值略正但噪声大 → 下界 < 0 → zeroshot
+    z3, l3 = _daily(3, [5.0, 5.0, 5.0])                        # 配对天数不足 min_days → zeroshot
+    zs, lo = pd.concat([z1, z2, z3]), pd.concat([l1, l2, l3])
+    routing, detail = route_by_days(zs, lo, stations=[1, 2, 3, 4], n_boot=2000, alpha=0.1, min_days=5)
+    assert routing == {1: "lora", 2: "zeroshot", 3: "zeroshot", 4: "zeroshot"}
+    d = detail.set_index("station_id")
+    assert d.loc[1, "gain_lower"] > 1.5 and d.loc[2, "gain_mean"] > d.loc[2, "gain_lower"] and d.loc[2, "gain_lower"] < 0
+    assert d.loc[3, "n_days_route"] == 3 and d.loc[4, "n_days_route"] == 0 and np.isnan(d.loc[4, "gain_mean"])
+    again, _ = route_by_days(zs, lo, stations=[1, 2, 3, 4], n_boot=2000, alpha=0.1, min_days=5)
+    assert again == routing                                    # 固定 seed 可复现
+
+
+def test_route_by_days_without_bootstrap_compares_mean_gain_on_paired_days():
+    z, l = _daily(1, [1.0, -0.4, 0.0])                         # 均值 +0.2
+    z = pd.concat([z, pd.DataFrame({"station_id": [1], "date": [pd.Timestamp("2025-07-01")], "accuracy_pct": [10.0]})])
+    routing, detail = route_by_days(z, l, stations=[1], n_boot=0, min_days=1)
+    assert routing == {1: "lora"} and detail.loc[0, "n_days_route"] == 3 and np.isclose(detail.loc[0, "gain_lower"], 0.2)
+    assert route_by_days(z, l, stations=[1], n_boot=0, min_days=1, min_gain_pct=0.5)[0] == {1: "zeroshot"}
 
 
 def test_routing_json_round_trip_and_validation(tmp_path):
