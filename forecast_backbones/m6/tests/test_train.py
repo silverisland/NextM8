@@ -106,8 +106,9 @@ def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monk
     with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):                    # 训练前无权重：构造期 warn 一次
         res = train_m6(cfg, str(parquet), max_steps=2)
     # 产物
-    assert (out / "lora_weights.pt").exists() and (out / "station_routing.json").exists()
+    assert (out / "model.safetensors").exists() and (out / "station_routing.json").exists()
     assert (out / "calibration.parquet").exists() and (out / "calibration.parquet.json").exists()
+    assert not (out / "lora_weights.pt").exists()
     assert (out / "train_log.json").exists() and (out / "result_val_lora.parquet").exists()
     ladder = pd.read_csv(out / "reports" / "ladder_lora.csv")
     assert list(ladder["variant"]) == ["zeroshot_calibrated_pstar", "lora_calibrated_pstar", "routed_calibrated_pstar"]
@@ -198,17 +199,17 @@ def test_train_m6_raises_clear_error_when_no_finite_score_ever_recorded(tmp_path
             train_m6(cfg, str(parquet), max_steps=1)
     msg = str(exc.value)
     assert "2025-06-12" in msg and "2025-06-14" in msg and "非有限" in msg
-    assert not (out / "lora_weights.pt").exists()
+    assert not (out / "model.safetensors").exists()
 
 
 def test_second_run_in_same_out_dir_starts_fresh(tmp_path, tiny_evaluator, monkeypatch):
-    """跨任务约束 1 的回归测试：同一 out_dir 里已经有上一轮训练的 lora_weights.pt / station_routing.json
+    """跨任务约束 1 的回归测试：同一 out_dir 里已经有上一轮训练的 model.safetensors / station_routing.json
     时，第二轮训练的模型构造仍须是零样本、无路由起点——不能把上一轮的产物读回来当成本轮的起点。"""
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
     with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
         train_m6(cfg, str(parquet), max_steps=1)
-    assert (out / "lora_weights.pt").exists() and (out / "station_routing.json").exists()
+    assert (out / "model.safetensors").exists() and (out / "station_routing.json").exists()
 
     # 第二轮换一份全新底座（同一份 tiny 权重目录重新构造）：避免两次构造共享同一个 evaluator.model 对象，
     # 让第一轮训练留在内存里的 LoRA 权重把"零样本起点"判定悄悄冲掉——真实场景里每轮训练都会从磁盘
@@ -381,7 +382,7 @@ def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
         train_m6(cfg, splits_dir=str(splits), shift_days=1)
     with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
         res = train_m6(cfg, splits_dir=str(splits), max_steps=2)
-    for f in ("lora_weights.pt", "station_routing.json", "calibration.parquet", "train_log.json", "split_manifest.json"):
+    for f in ("model.safetensors", "model_config.yaml", "station_routing.json", "calibration.parquet", "train_log.json", "split_manifest.json"):
         assert (out / f).exists()
     info = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
     assert info["source"] == "pipelines.time_splits" and info["plan"] == man["plan"] and info["splits_dir"] == str(splits.resolve())
@@ -408,7 +409,7 @@ def test_train_m6_without_conformal_uses_m1_m4_split(tmp_path, tiny_evaluator, m
     nocal = {**cfg, "calibration": {"enabled": False}}
     with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
         res = train_m6(nocal, splits_dir=str(splits), max_steps=2)
-    for f in ("lora_weights.pt", "station_routing.json", "train_log.json", "split_manifest.json"):
+    for f in ("model.safetensors", "model_config.yaml", "station_routing.json", "train_log.json", "split_manifest.json"):
         assert (out / f).exists()
     assert not (out / "calibration.parquet").exists()
     assert list(res["ladder"]["variant"]) == ["zeroshot_uncalibrated", "lora_uncalibrated", "routed_uncalibrated"]

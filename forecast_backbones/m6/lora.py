@@ -2,10 +2,12 @@
 # forecast_backbones/m6/lora.py
 """LoRA 最小实现（不依赖 peft）。LoRALinear 包装 nn.Linear：base 冻结，A[r,in] kaiming、B[out,r] 零初始化，
 所以挂载瞬间输出与原模型逐位相同；scaling = alpha / rank。inject_lora 按模块名尾段匹配替换，零匹配即 raise。
-存取只走 lora_state_dict / load_lora_state_dict（LoRA 参数 + 可训的 output_head），不保存底座。"""
+存取只走 lora_state_dict / load_lora_state_dict（LoRA 参数 + 可训的 output_head），不保存底座；
+落盘走 save_lora_weights / load_lora_weights：.safetensors 后缀存成 safetensors，其他后缀用 torch.save。"""
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Sequence
 
 import torch
@@ -87,6 +89,27 @@ def lora_state_dict(root: nn.Module) -> dict[str, torch.Tensor]:
         if is_lora or is_head:
             out[name] = p.detach().cpu().clone()
     return out
+
+
+def save_lora_weights(path, sd: dict[str, torch.Tensor]) -> None:
+    """lora_state_dict 的结果落盘。path 以 .safetensors 结尾存 safetensors（键名相对 backbone.model），否则 torch.save。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix == ".safetensors":
+        from safetensors.torch import save_file
+        save_file({k: v.detach().cpu().contiguous() for k, v in sd.items()}, str(path),
+                  metadata={"format": "pt", "content": "m6 lora + output_head", "root": "backbone.model"})
+    else:
+        torch.save(sd, path)
+
+
+def load_lora_weights(path) -> dict[str, torch.Tensor]:
+    """读 save_lora_weights 存的文件：.safetensors 后缀按 safetensors 读，其他后缀 torch.load。"""
+    path = Path(path)
+    if path.suffix == ".safetensors":
+        from safetensors.torch import load_file
+        return load_file(str(path), device="cpu")
+    return torch.load(path, map_location="cpu")
 
 
 def load_lora_state_dict(root: nn.Module, sd: dict) -> None:

@@ -74,7 +74,7 @@ DEFAULT_CFG: dict = {
                  # timesfm3 3.0.2 真名（transformer.py:188-193）；seq_attn 与 var_attn 两处都匹配
                  "target_modules": ["query_proj", "key_proj", "value_proj", "out_proj"]},
         "unfreeze_output_head": True,
-        "lora_path": "${run.out_dir}/lora_weights.pt",          # 训练产物；推理时存在即加载
+        "lora_path": "${run.out_dir}/model.safetensors",        # 训练产物（LoRA + output_head）；推理时存在即加载
         "routing_path": "${run.out_dir}/station_routing.json",  # 逐站 lora|zeroshot 路由表；存在即按表选路
         "loss": {"type": "pinball", "levels": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
                  "aux_nanwang_head": {"enabled": False, "weight": 0.5}},   # 辅助头：计划 3 消融，本计划不读
@@ -166,6 +166,14 @@ def interpolate(cfg: dict) -> dict:
         return x
 
     return _walk(cfg)
+
+
+def dump_config(cfg: dict, path) -> None:
+    """配置写成 yaml（元组转列表，键序不变）。"""
+    import json
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    plain = json.loads(json.dumps(cfg, ensure_ascii=False, default=str))
+    Path(path).write_text(yaml.safe_dump(plain, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
 def load_config(src: str | Path | dict | None) -> dict:

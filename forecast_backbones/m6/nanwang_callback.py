@@ -19,13 +19,13 @@ from transformers import TrainerCallback
 
 try:
     from .transformer_trainer import evaluate_model, fit_calibrator_from_result, recompute_points
-    from .lora import lora_state_dict
+    from .lora import lora_state_dict, save_lora_weights
     from .rows import SHORT_ISSUE_TIME, scored_row_index, day_row_index
     from . import _dist
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from transformer_trainer import evaluate_model, fit_calibrator_from_result, recompute_points
-    from lora import lora_state_dict
+    from lora import lora_state_dict, save_lora_weights
     from rows import SHORT_ISSUE_TIME, scored_row_index, day_row_index
     import _dist
 try:
@@ -128,8 +128,7 @@ class NanwangEvalCallback(TrainerCallback):
         return (float(np.mean(finite)) if finite else float("nan")), per
 
     def _save_best(self):
-        self.best_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(lora_state_dict(self.model.backbone.model), self.best_path)
+        save_lora_weights(self.best_path, lora_state_dict(self.model.backbone.model))
 
     def _record(self, step: int, epoch: float, scored: tuple[float, list[float]]) -> bool:
         """记一次打分；返回是否已连续 patience 次没有超过最优。"""

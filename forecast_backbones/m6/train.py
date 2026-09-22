@@ -9,7 +9,8 @@
   4. 训后：加载最优 LoRA；零样本 vs LoRA 逐站按天配对 bootstrap（split_val_days 时只用奇数起报日）→ station_routing.json
   5. 路由后的模型重拟合校准表 → calibration.parquet（与推理时一致）
   6. 报表：reports/ladder_lora.csv（阶梯第 4 步，全部验证日）、reports/station_ladder.csv；
-     状态：lora_weights.pt、train_log.json、split_manifest.json
+     权重：model.safetensors（LoRA + output_head，键名相对 backbone.model）；推理配置：model_config.yaml
+     状态：train_log.json、split_manifest.json
 用 HF Trainer 而不是 pipelines.transformer_trainer.train_model：后者 import 的 transformer_utils 本仓库没有，
 语义（forward 返 loss、collate 出 batch_dict/labels）在这里逐条保持一致。
 
@@ -17,10 +18,10 @@
 各吃不同的训练批（每步共 进程数×batch_size 行）；验证打分、存盘、训后路由与报表只在主进程做，其余进程训完即返回。
 
 训练模型的构造必须是真正的零样本起点：把 finetune.lora_path / routing_path 都改指向 run.out_dir 下一个
-从不写入的 `.fresh/` 哨兵路径，而不是直接用 cfg 里解析出的真实 lora_weights.pt / station_routing.json——
+从不写入的 `.fresh/` 哨兵路径，而不是直接用 cfg 里解析出的真实 model.safetensors / station_routing.json——
 后两者是本函数自己的输出路径，若同一 out_dir 曾跑过一次训练，构造期会静默把上一轮的 LoRA 权重和路由表
 读回来，epoch 0 记录的"零样本基线"和训练期的逐站前向就都不再是零样本/无路由的了。哨兵路径只影响构造期
-的装载判断，不影响本函数最终把新产物写到 out/lora_weights.pt、out/station_routing.json 的行为。"""
+的装载判断，不影响本函数最终把新产物写到 out/model.safetensors、out/station_routing.json 的行为。"""
 from __future__ import annotations
 
 import argparse
@@ -36,21 +37,21 @@ import torch
 from transformers import Trainer, TrainingArguments
 
 try:
-    from .config import load_config, deep_merge
+    from .config import DEFAULT_CFG, load_config, deep_merge, dump_config
     from .transformer_trainer import _raw_override, evaluate_model
     from .nanwang_callback import NanwangEvalCallback, score_split
     from .routing import route_by_days, save_routing
-    from .lora import load_lora_state_dict, set_lora_enabled, trainable_summary
+    from .lora import load_lora_state_dict, load_lora_weights, set_lora_enabled, trainable_summary
     from .features import attach_station_id
     from .rows import StationDaySampler, day_parity
     from . import _dist
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from config import load_config, deep_merge
+    from config import DEFAULT_CFG, load_config, deep_merge, dump_config
     from transformer_trainer import _raw_override, evaluate_model
     from nanwang_callback import NanwangEvalCallback, score_split
     from routing import route_by_days, save_routing
-    from lora import load_lora_state_dict, set_lora_enabled, trainable_summary
+    from lora import load_lora_state_dict, load_lora_weights, set_lora_enabled, trainable_summary
     from features import attach_station_id
     from rows import StationDaySampler, day_parity
     import _dist
@@ -246,6 +247,7 @@ def _station_table(zs: pd.DataFrame, lo: pd.DataFrame, routing: dict, detail: pd
 
 
 SAMPLING = ("random", "station_day")
+WEIGHTS_FILE, CONFIG_FILE = "model.safetensors", "model_config.yaml"
 
 
 class _M6Trainer(Trainer):
@@ -300,7 +302,7 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
     fresh = out / ".fresh"
     train_cfg = {**cfg, "calibration": {**cfg["calibration"], "enabled": False},
                  "finetune": {**ft, "inference_path": "torch",
-                              "lora_path": str(fresh / "lora_weights.pt"),
+                              "lora_path": str(fresh / WEIGHTS_FILE),
                               "routing_path": str(fresh / "station_routing.json")}}
     args = build_training_args(train_cfg, out, max_steps)
     _ = args.device                  # 多进程时在这里建进程组、把本进程绑到自己的 GPU；须先于模型构造
@@ -344,6 +346,8 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
     plan_dict = split_info["plan"]
     if main:
         (out / "split_manifest.json").write_text(json.dumps(split_info, indent=2, ensure_ascii=False), encoding="utf-8")
+        # 推理配置：合并了默认值、未解析 ${run.out_dir} 的配置，推理时把 run.out_dir 指向产物目录即可整体搬走
+        dump_config(deep_merge(DEFAULT_CFG, _raw_override(config_path)), out / CONFIG_FILE)
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     sel_parity, route_parity = (0, 1) if bool(guards.get("split_val_days", True)) else (None, None)
     eval_every = sch.get("eval_every_steps")
@@ -361,7 +365,7 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
             print("[m6-lora] 早停选权重只用偶数起报日，逐站路由只用奇数起报日（guards.split_val_days）")
         if coverage_note:
             print(f"[m6-lora] 提示：{coverage_note}")
-    best_path = out / "lora_weights.pt"
+    best_path = out / WEIGHTS_FILE
     cb = NanwangEvalCallback(model, ds_cal, ds_val_blocks, collate, train_cfg, best_path=best_path,
                              patience=int(ft["early_stop"]["patience"]), log_path=out / "train_log.json",
                              eval_every_steps=eval_every, day_parity=sel_parity)
@@ -377,7 +381,7 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
             f"（没有一块能凑出完整可评分的一天），cb.best_epoch={cb.best_epoch!r}，{best_path} 不存在。"
             f"请检查各验证块是否覆盖足够多的完整天。")
     # 最优权重
-    load_lora_state_dict(model.backbone.model, torch.load(best_path, map_location="cpu"))
+    load_lora_state_dict(model.backbone.model, load_lora_weights(best_path))
     model.lora_loaded = True
     # 阶梯 4：零样本 vs LoRA（各自校准）→ 逐站路由 → 路由模型重拟合校准表
     model.station_routing = None
@@ -416,7 +420,7 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
                 "shift_days": int(shift_days), "split": split_info})
     (out / "train_log.json").write_text(json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8")
     print(ladder.to_string(index=False)); print(station_tab.to_string(index=False))
-    print(f"[m6-lora] 产物：{best_path} / {out / 'station_routing.json'} / "
+    print(f"[m6-lora] 产物：{best_path} / {out / CONFIG_FILE} / {out / 'station_routing.json'} / "
           + (f"{cfg['calibration']['table_path']} / " if calib is not None else "")
           + f"{out / 'split_manifest.json'} / {report_dir}")
     return {"ladder": ladder, "routing": routing, "routing_detail": detail, "history": cb.history, "best": cb.best,

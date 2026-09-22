@@ -60,11 +60,11 @@ def _lazy_torch_path_imports():
     要求 transformer_models.py 模块级导入不依赖 timesfm3，所以只在 _attach_torch_path 里调用本函数。"""
     try:
         from .backbone import TorchBackbone
-        from .lora import inject_lora, freeze_all_but_lora, load_lora_state_dict, set_lora_enabled, trainable_summary
+        from .lora import inject_lora, freeze_all_but_lora, load_lora_state_dict, load_lora_weights, set_lora_enabled, trainable_summary
     except ImportError:
         from backbone import TorchBackbone
-        from lora import inject_lora, freeze_all_but_lora, load_lora_state_dict, set_lora_enabled, trainable_summary
-    return TorchBackbone, inject_lora, freeze_all_but_lora, load_lora_state_dict, set_lora_enabled, trainable_summary
+        from lora import inject_lora, freeze_all_but_lora, load_lora_state_dict, load_lora_weights, set_lora_enabled, trainable_summary
+    return TorchBackbone, inject_lora, freeze_all_but_lora, load_lora_state_dict, load_lora_weights, set_lora_enabled, trainable_summary
 
 
 def _lazy_routing_imports():
@@ -185,7 +185,7 @@ class TransformersAdaptedM6Model(nn.Module):
 
     def _attach_torch_path(self) -> None:
         """从已加载的 evaluator 取底层 nn.Module 建 TorchBackbone；finetune.enabled 时挂 LoRA、冻结、加载权重。"""
-        TorchBackbone, inject_lora, freeze_all_but_lora, load_lora_state_dict, _, trainable_summary = _lazy_torch_path_imports()
+        TorchBackbone, inject_lora, freeze_all_but_lora, load_lora_state_dict, load_lora_weights, _, trainable_summary = _lazy_torch_path_imports()
         if self._backbone is None:
             raise RuntimeError("evaluator 尚未加载，不能建 torch 路径")
         self.backbone = TorchBackbone.from_evaluator(self._backbone)
@@ -196,7 +196,7 @@ class TransformersAdaptedM6Model(nn.Module):
             freeze_all_but_lora(self.backbone.model, bool(ft["unfreeze_output_head"]))
             lp = Path(str(ft["lora_path"]))
             if lp.exists():
-                load_lora_state_dict(self.backbone.model, torch.load(lp, map_location="cpu"))
+                load_lora_state_dict(self.backbone.model, load_lora_weights(lp))
                 self.lora_loaded = True
             else:
                 self.lora_loaded = False
@@ -216,7 +216,7 @@ class TransformersAdaptedM6Model(nn.Module):
                   use_symmetric_averaging=bool(t3["use_symmetric_averaging"]), make_positive=bool(t3["make_positive"]))
         if not self.station_routing:
             return self.backbone.predict_quantiles(tgt, pf, po, **kw)
-        set_lora_enabled = _lazy_torch_path_imports()[4]
+        set_lora_enabled = _lazy_torch_path_imports()[5]
         use_lora = np.array([self.station_routing.get(int(s), "zeroshot") == "lora" for s in np.asarray(station_id).reshape(-1)])
         try:
             if use_lora.all():

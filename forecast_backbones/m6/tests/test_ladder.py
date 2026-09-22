@@ -307,7 +307,7 @@ def test_backfill_uses_lora_weights_when_finetune_enabled(tmp_path, monkeypatch)
     且回填结果真的随 LoRA 权重变化（不是零样本回填碰巧也能算出同样形状的阶梯表）。
 
     证明手段三件套：
-    (a) 训练后手动把 lora_weights.pt 里所有 lora_B 改成非零常数——不依赖训练本身是否真的带来提升，
+    (a) 训练后手动把 model.safetensors 里所有 lora_B 改成非零常数——不依赖训练本身是否真的带来提升，
         权重必然与零样本不同；
     (b) 监视 backfill_and_report 内部构造的模型（手法与 test_train.py::test_second_run_in_same_out_dir_starts_fresh
         一致），断言它确实 lora_loaded=True 且 torch_path=True；
@@ -339,12 +339,13 @@ def test_backfill_uses_lora_weights_when_finetune_enabled(tmp_path, monkeypatch)
         train_m6(cfg, str(parquet), max_steps=1)
 
     # (a) 训后把 lora_B 全部改成非零常数，保证 LoRA 输出与零样本必然不同
-    lora_path = out / "lora_weights.pt"
-    sd = torch.load(lora_path, map_location="cpu")
+    from forecast_backbones.m6.lora import load_lora_weights, save_lora_weights
+    lora_path = out / "model.safetensors"
+    sd = load_lora_weights(lora_path)
     for k, v in sd.items():
         if k.endswith(".lora_B"):
             sd[k] = torch.full_like(v, 0.05)
-    torch.save(sd, lora_path)
+    save_lora_weights(lora_path, sd)
 
     # (b) 监视 backfill_and_report 内部构造的模型
     RealModel = tm_mod.TransformersAdaptedM6Model

@@ -160,7 +160,8 @@ bash train_m6.sh --splits_dir data/splits/m1_m4_v1 --run_id lora_v1
 没有测试集的站晚于终点的数据不参与放块、照常进训练，免得验证块被拉进别的站的测试时段。这些站列在 `stations_without_test`，覆盖表的测试起点列显示"无测试集"，
 `split_resolved.yaml` 连同占位日期一起写下，原样重跑不变。M6 `make_splits` 同样处理。
 
-产物（`run.out_dir`）：`lora_weights.pt`（验证日上南网短期得分最优的那次验证；第 0 步是零样本基线，所以在早停用的验证日上永远不输零样本）、
+产物（`run.out_dir`）：`model.safetensors`（LoRA + 可训 output_head 的权重，键名相对 `backbone.model`，不含底座；验证日上南网短期得分最优的那次验证；第 0 步是零样本基线，所以在早停用的验证日上永远不输零样本；旧 run 的 `lora_weights.pt` 仍能读）、
+`model_config.yaml`（训练配置，保留 `${run.out_dir}` 占位符，推理时把 `run.out_dir` 指到产物目录即可整体搬走）、
 `station_routing.json`（逐站 `lora|zeroshot`，没有稳定胜过零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
 `calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：
 `ladder_lora.csv`（阶梯 4：`zeroshot_calibrated_pstar` / `lora_calibrated_pstar` / `routed_calibrated_pstar` 三行）、`station_ladder.csv`
@@ -183,5 +184,20 @@ LoRA 权重后再回填——路线 A 与路线 B 的产物在同一套 `run.out
 真机待办清单：训练机上跑 `python -m pytest forecast_backbones/m6/tests/test_real_backbone.py -q`（本机因无 timesfm3/权重全 skip，
 训练机应全绿，含 m5 一致性、torch/evaluator 一致性）；填好 `station_meta.csv`（`station_id` 须与 parquet 一致）；把
 `finetune.split` 的 `val_blocks`/`test_start`/`test_end` 改成真实日期（默认值是占位的示例日期，不能直接拿去训练）。
+
+**测试集逐站评测**（输出与 M1–M5 的 `metrics_ens` 同构：`{站}-metrics.xlsx` + `{站}-summary.json`）：
+
+```bash
+# 服务器：8 个 worker 各占一张卡，结果默认写 runs/m6/<run_id>/metrics_ens
+CKPT_DIR=runs/m6/<run_id> bash eval_shell/eval_m6.sh
+# 单站
+python eval_shell/m6_station_script.py --checkpoint_dir runs/m6/<run_id> \
+    --station_path datasets/test/station=1015.parquet --out_dir runs/m6/<run_id>/metrics_ens --cap_power 465
+```
+
+`station_eval.load_trained_model` 从产物目录读 `model_config.yaml`、`model.safetensors`、`station_routing.json` 与校准表，缺任何一个直接报错，
+不退回零样本或未校准；旧 run 没有 `model_config.yaml` 时用 `--config`（脚本为 `M6_CONFIG=`）给训练用的 yaml。单站推理与训练期验证同一条路
+（`_dataset_with_station_id` → `evaluate_model`），测试文件只有站名列时按 `station_meta` 转整数站号。指标、南网月表与 summary 走
+`eval_station_script` 的 `extract_summary` / `station_cap_from_df` / `NumpyJSONEncoder`，与 `m5_station_script.py` 相同。
 
 辅助头（`finetune.loss.aux_nanwang_head`）、阶梯 5 物理协变量消融与消融簇、堆叠 → 计划 3；本计划不读这些键。

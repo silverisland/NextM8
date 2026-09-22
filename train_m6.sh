@@ -230,9 +230,10 @@ if [ $rc -ne 0 ]; then
   echo "❌ M6 训练失败 (exit=$rc)，日志: $LOG_FILE" >&2
   exit 1
 fi
-for f in lora_weights.pt station_routing.json train_log.json; do
+for f in model.safetensors model_config.yaml station_routing.json train_log.json; do
   [ -f "$RUN_DIR/$f" ] || { echo "❌ 训练结束但缺少 $RUN_DIR/$f" >&2; exit 1; }
 done
-echo "✅ M6 完成: $RUN_DIR/lora_weights.pt"
+echo "✅ M6 完成: $RUN_DIR/model.safetensors（推理配置 $RUN_DIR/model_config.yaml）"
+echo "   测试集评测: CKPT_DIR=$RUN_DIR bash eval_shell/eval_m6.sh"
 echo "   对比表: $RUN_DIR/reports/ladder_lora.csv、$RUN_DIR/reports/station_ladder.csv"
 echo "   验证曲线: $RUN_DIR/train_log.json（history 每条一次验证）"
