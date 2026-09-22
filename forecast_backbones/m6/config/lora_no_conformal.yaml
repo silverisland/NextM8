@@ -59,7 +59,7 @@ finetune:                              # 路线 B（计划 2）：LoRA 微调；
     dropout: 0.05
     target_modules: [query_proj, key_proj, value_proj, out_proj]   # timesfm3 3.0.2 真名；seq_attn/var_attn 都挂
   unfreeze_output_head: true
-  lora_path: ${run.out_dir}/lora_weights.pt
+  lora_path: ${run.out_dir}/model.safetensors
   routing_path: ${run.out_dir}/station_routing.json
   loss:
     type: pinball

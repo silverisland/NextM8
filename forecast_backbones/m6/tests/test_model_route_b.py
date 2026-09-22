@@ -4,7 +4,7 @@ import torch
 
 pytest.importorskip("timesfm3")
 from forecast_backbones.m6.transformer_models import TransformersAdaptedM6Model
-from forecast_backbones.m6.lora import lora_state_dict, LoRALinear
+from forecast_backbones.m6.lora import lora_state_dict, save_lora_weights, LoRALinear
 from .conftest import make_synthetic_frame, write_station_meta
 from .test_model_route_a import _batch
 
@@ -103,7 +103,8 @@ def test_three_adam_steps_reduce_loss(tmp_path, tiny_evaluator, frame):
     assert l1 < l0
 
 
-def test_lora_weights_load_from_lora_path(tmp_path, tiny_evaluator, frame):
+@pytest.mark.parametrize("fname", ["model.safetensors", "lora_weights.pt"])     # 新产物 / 旧 run 的 torch.save 文件
+def test_lora_weights_load_from_lora_path(tmp_path, tiny_evaluator, frame, fname):
     bd, _ = _batch(frame, [0])
     with pytest.warns(UserWarning):
         m = _model_b(tmp_path, tiny_evaluator)
@@ -111,8 +112,8 @@ def test_lora_weights_load_from_lora_path(tmp_path, tiny_evaluator, frame):
         for x in m.backbone.model.modules():
             if isinstance(x, LoRALinear):
                 x.lora_B.normal_()
-    p = tmp_path / "lora_weights.pt"
-    torch.save(lora_state_dict(m.backbone.model), p)
+    p = tmp_path / fname
+    save_lora_weights(p, lora_state_dict(m.backbone.model))
     with torch.no_grad():
         ref = m(bd).aux["quantiles"].numpy()
     # 新 evaluator 副本：同一权重目录再加载一次，避免共享已改的 module

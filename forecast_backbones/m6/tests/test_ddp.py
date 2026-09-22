@@ -1,6 +1,7 @@
 """两进程 DDP（CPU、gloo）真跑 train_m6：各进程训完的 LoRA 权重逐位相同（梯度确实在同步）、同一步停下、
 产物只由主进程写；文本站号走“主进程转换、其余进程复用”那条路。"""
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -56,7 +57,8 @@ def test_two_process_ddp_training_keeps_ranks_in_sync(tmp_path, tiny_ckpt_dir):
     out = tmp_path / "run"
     cmd = [sys.executable, "-m", "torch.distributed.run", "--nproc_per_node=2", f"--master_port={_free_port()}",
            str(tmp_path / "driver.py"), str(tmp_path / "cfg.yaml"), str(tmp_path / "data.parquet"), str(out), str(ROOT)]
-    p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=600)
+    env = {**os.environ, "GLOO_SOCKET_IFNAME": "lo0"} if sys.platform == "darwin" else None   # 本机两进程走回环；mac 上 gloo 挑到别的网卡会 uv_accept 失败
+    p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=600, env=env)
     assert p.returncode == 0, p.stdout[-3000:] + p.stderr[-3000:]
     r0, r1 = torch.load(f"{out}.rank0.pt"), torch.load(f"{out}.rank1.pt")
     assert r0["world"] == r1["world"] == 2 and r0["step"] == r1["step"] == 6
@@ -64,6 +66,6 @@ def test_two_process_ddp_training_keeps_ranks_in_sync(tmp_path, tiny_ckpt_dir):
     assert any(k.endswith("lora_B") and float(v.abs().sum()) > 0 for k, v in r0["sd"].items())
     log = json.loads((out / "train_log.json").read_text(encoding="utf-8"))
     assert [h["step"] for h in log["history"]] == [0, 2, 4, 6]
-    assert (out / "lora_weights.pt").exists() and (out / "station_routing.json").exists()
+    assert (out / "model.safetensors").exists() and (out / "station_routing.json").exists()
     assert (out / ".data" / "data_with_station_id.parquet").exists()
     assert p.stdout.count("[m6-lora] step 0 ") == 1                          # 只有主进程打分、打印

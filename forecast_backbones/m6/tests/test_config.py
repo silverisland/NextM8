@@ -50,7 +50,7 @@ def test_finetune_defaults_use_real_timesfm3_module_names():
     from forecast_backbones.m6.config import load_config
     ft = load_config(None)["finetune"]
     assert ft["lora"]["target_modules"] == ["query_proj", "key_proj", "value_proj", "out_proj"]
-    assert ft["lora_path"].endswith("/lora_weights.pt") and "${" not in ft["lora_path"]
+    assert ft["lora_path"].endswith("/model.safetensors") and "${" not in ft["lora_path"]
     assert ft["routing_path"].endswith("/station_routing.json")
     assert ft["split"]["train_start"] is None
     assert ft["schedule"]["logging_steps"] == 20
