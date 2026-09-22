@@ -95,7 +95,7 @@ def evaluate_model(model, test_dataset, HF_collate_fn, config) -> pd.DataFrame:
 
 def M6_build_training_args(model_config, result_dir, max_steps=None):
     """框架契约（train_script.build_train_args）：model_config 是 yaml 顶层 dict 或路径，result_dir 是本次 run 目录。
-    M6 的训练不走 pipelines.train_model（需要校准段、按块早停、训后路由），train_script 对 m6 直接调 train.train_m6；
+    M6 的训练不走 pipelines.train_model（需要校准段、按块早停、训后校准表拟合），train_script 对 m6 直接调 train.train_m6；
     这里只把 TrainingArguments 的构造按同一签名暴露出来。"""
     try:                                          # 延迟导入：train 反过来 import 本模块
         from .train import build_training_args

@@ -43,9 +43,9 @@ calibrate → enforce_monotone → physics_clip → select_point，同一套 lev
 - `transformer_trainer.py`：`evaluate_model(model, test_dataset, HF_collate_fn, config)` 与 `M6_build_training_args(model_config, result_dir)`。
 - 默认配置在 `config/configs.yaml`（train_script 按 `<模型目录>/config/configs.yaml` 自动定位；不再有根目录 `model_config.yaml`）。
 - 训练入口：train_script 里 `--model_name m6` 走独立分支直接调 `train.train_m6(config, splits_dir=DATASET_PATH, out_dir=RUN_PATH)`，
-  不拆进 `pipelines.train_model`（M6 需要校准段、按块早停、训后路由与校准表拟合）。`DATASET_PATH` 是
+  不拆进 `pipelines.train_model`（M6 需要校准段、按块早停、训后校准表拟合）。`DATASET_PATH` 是
   `pipelines.time_splits` 落的目录（`train/valid/cal.parquet + split_manifest.json`，`cal_days ≥ 1`），与 M1–M4 共用同一份切分。
-- 站标识：M6 内部按整数 `station_id` 走（校准分层、路由、坐标）。数据只有站名列 `station` 时，训练入口按
+- 站标识：M6 内部按整数 `station_id` 走（校准分层、坐标）。数据只有站名列 `station` 时，训练入口按
   `station_meta.csv` 的 `station` 列自动映射补 `station_id`（查不到的站名直接报错，请先补表），映射后的副本落在 `out_dir/.data/`。
 - M5 同规：`TransformersAdaptedM5Model`（旧名 `TransformersAdaptedTimesFM3Model` 保留为别名）+ `transformer_trainer.evaluate_model`
   + `config/configs.yaml`；M5 不训练，没有 build_training_args。
@@ -105,7 +105,7 @@ b 的整体后移在切分时给），输出目录换 `_f1`。`--max-steps N` �
 `cal_days` 校准段（固定放在 `test_start − purge_days` 之前），`purge_days`（块前剔除训练行）与 `embargo_days`（块后额外剔除）。
 两个天数都由 `SplitPlan.from_dict` 当场校验，给不够直接报错：`purge_days` 须 ≥ H 折算天数（默认 2 天），
 `purge_days + embargo_days` 须 ≥ L + H 折算天数（默认 9 天）——前 H 步保证块后训练行的标签不与块标签重叠，
-再往后的 L 步保证这些训练行 7 天的上下文不含块的标签。早停指标是各块南网短期得分的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`（`guards.split_val_days: true` 时只用偶数起报日，见下文）；
+再往后的 L 步保证这些训练行 7 天的上下文不含块的标签。早停指标是各块南网短期得分的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`；
 切分事实落在 `out_dir/split_manifest.json`（`generated_by: forecast_backbones.m6.train`）。给 M1–M4 生成同一规则的 `train/valid/cal/test.parquet`：
 `python -m pipelines.time_splits --parquet RAW.parquet --out-dir dataset/<name> --m6-config forecast_backbones/m6/config/configs.yaml`
 （`--m6-config` 时 L/H/step_min 默认取该 yaml 的 `timesfm3.context_len` / `timesfm3.pred_len` / `dataset.step_min`，
@@ -136,9 +136,8 @@ M6 的 `finetune.split` 不解析 `auto`，要用就抄 `split_resolved.yaml` �
 原样重跑结果不变。阈值需要数据，M6 的 `finetune.split` 只认 `train_only_stations` 名单（且须按站给 `test_start`）。
 
 **只训 LoRA、不做 conformal**：用 `config/lora_no_conformal.yaml`（`calibration.enabled: false`、`finetune.enabled: true`、
-点预测取中位数），可以直接喂 M1–M4 的切分目录，不需要 `cal.parquet`。早停与逐站路由按未校准分位上的中位数打分，
-不写 `calibration.parquet`，`ladder_lora.csv` 三行叫 `zeroshot_uncalibrated` / `lora_uncalibrated` / `routed_uncalibrated`。
-只进训练的短站没有验证分数，不进路由表，推理时按设计走零样本。
+点预测取中位数），可以直接喂 M1–M4 的切分目录，不需要 `cal.parquet`。早停按未校准分位上的中位数打分，
+不写 `calibration.parquet`，`ladder_lora.csv` 两行叫 `zeroshot_uncalibrated` / `lora_uncalibrated`。
 
 ```bash
 python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/lora_no_conformal.yaml \
@@ -147,12 +146,10 @@ python -m forecast_backbones.m6.train --config forecast_backbones/m6/config/lora
 bash train_m6.sh --splits_dir data/splits/m1_m4_v1 --run_id lora_v1
 ```
 
-**训练预算、验证与多卡**（`finetune.schedule` / `early_stop` / `guards`）：
+**训练预算、验证与多卡**（`finetune.schedule` / `early_stop`）：
 - 预算按优化器步数给：`max_steps`（默认 4000），`epochs_max` 只在 `max_steps: null` 时生效。训练行按 `sampling` 随机抽：`random` 在全部训练行里均匀抽，`station_day` 让每个（站, 起报日）被抽中的概率相同。
 - 每 `eval_every_steps` 步（默认 250，训练最后一步必打）在全部验证块上打一次南网短期分，`patience` 按验证次数计。验证只推理指标用到的行（每站每个起报日取 10:00 前最晚的一行），分数与推理全部行相同；做 conformal 时校准段每次验证只推理一遍，各块共用。
-- `guards.split_val_days: true`（默认）：早停选权重只用偶数起报日（距 1970-01-01 的天数为偶数），逐站路由只用奇数起报日，免得挑权重和选路由用同一批天。`ladder_lora.csv` 三行仍是全部验证日上的分数。
-- 逐站路由：同站同起报日配对 LoRA − 零样本 的日准确率差，对配对天重抽 `bootstrap.n` 次（默认 2000），重抽均值的 `alpha` 分位（默认 0.1）> `min_gain_pct` 且配对天数 ≥ `min_days`（默认 5）才选 lora；`n: 0` 只比均值差。逐站明细写进 `station_ladder.csv` 的 `n_days_route` / `gain_mean` / `gain_lower` 列和 `train_log.json` 的 `routing_detail`。
-- 多卡：`accelerate launch` / `torchrun` 起多个进程即可，`train_m6.sh` 默认用全部可见 GPU。每张卡一个进程、各吃不同的训练批，每步共 卡数 × `batch_size` 行（`batch_size` 是每张卡的）；验证、存最优、训后路由与报表只在主进程做，其余进程训完即退出。站号需要转换时由主进程写 `out_dir/.data/` 下的临时 parquet，其余进程等它写完再读。
+- 多卡：`accelerate launch` / `torchrun` 起多个进程即可，`train_m6.sh` 默认用全部可见 GPU。每张卡一个进程、各吃不同的训练批，每步共 卡数 × `batch_size` 行（`batch_size` 是每张卡的）；验证、存最优与报表只在主进程做，其余进程训完即退出。站号需要转换时由主进程写 `out_dir/.data/` 下的临时 parquet，其余进程等它写完再读。
 
 **训练与测试的站对不上**：只在测试集里、训练数据里没有的站，切分时忽略（manifest 的 `ignored_test_only_stations` 记下名单）；
 只在训练数据里、没有测试集的站，给占位 `test_start` = 该站最后一天 + 1 + `purge_days`，于是它没有测试行、末尾不剔除任何行，
@@ -160,19 +157,18 @@ bash train_m6.sh --splits_dir data/splits/m1_m4_v1 --run_id lora_v1
 没有测试集的站晚于终点的数据不参与放块、照常进训练，免得验证块被拉进别的站的测试时段。这些站列在 `stations_without_test`，覆盖表的测试起点列显示"无测试集"，
 `split_resolved.yaml` 连同占位日期一起写下，原样重跑不变。M6 `make_splits` 同样处理。
 
-产物（`run.out_dir`）：`model.safetensors`（LoRA + 可训 output_head 的权重，键名相对 `backbone.model`，不含底座；验证日上南网短期得分最优的那次验证；第 0 步是零样本基线，所以在早停用的验证日上永远不输零样本；旧 run 的 `lora_weights.pt` 仍能读）、
+产物（`run.out_dir`）：`model.safetensors`（LoRA + 可训 output_head 的权重，键名相对 `backbone.model`，不含底座；验证块均值南网短期得分最优的那次验证；第 0 步是零样本基线，所以在验证集上永远不输零样本；旧 run 的 `lora_weights.pt` 仍能读）、
 `model_config.yaml`（训练配置，保留 `${run.out_dir}` 占位符，推理时把 `run.out_dir` 指到产物目录即可整体搬走）、
-`station_routing.json`（逐站 `lora|zeroshot`，没有稳定胜过零样本的站回退；未出现在路由表里的未知站按设计默认 `"zeroshot"`）、
-`calibration.parquet`（**在已路由的模型上**重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：
-`ladder_lora.csv`（阶梯 4：`zeroshot_calibrated_pstar` / `lora_calibrated_pstar` / `routed_calibrated_pstar` 三行）、`station_ladder.csv`
-（逐站 `route` 列，取值 `lora|zeroshot`，另有路由用的配对天数与 LoRA 增益的均值、下界）。
+`calibration.parquet`（在最优 LoRA 上重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：
+`ladder_lora.csv`（阶梯 4：`zeroshot_calibrated_pstar` / `lora_calibrated_pstar` 两行，全部验证日）、`station_ladder.csv`
+（逐站 `acc_zeroshot` / `acc_lora` / `n_days` / `gain`）。推理时全部站都用这份 LoRA，没有逐站回退。
 
 推理：`finetune.enabled: true` 时（`torch_path = bool(finetune.enabled) or inference_path == "torch"`，`enabled=True` 已经短路成
 `True`）**永远**走 torch 路径并挂 LoRA，`inference_path` 这个键在 `enabled=True` 时不被读取、不产生任何差异；模型构造期自动加载
-`lora_path`（缺失会 warn 并以零样本权重运行）与 `routing_path`（缺失=全站 lora，存在则按表逐站选路）。`inference_path` 只在
+`lora_path`（缺失会 warn 并以零样本权重运行）。`inference_path` 只在
 `finetune.enabled: false` 时才生效：`evaluator`＝路线 A 原样不变（零样本、无 LoRA、无梯度），`torch`＝同样零样本但走可微的
 torch 路径（无 LoRA，仅用于对照 evaluator 与 torch 两条路径本身的数值一致性，见下段 1e-4 门控测试）。
-混合站 batch 会跑两次底座按行选路；单一路由的 batch 只跑一次。路线 A 的回填 CLI（`transformer_trainer.backfill_and_report`）
+路线 A 的回填 CLI（`transformer_trainer.backfill_and_report`）
 不感知 `finetune`：只要 cfg 里 `finetune.enabled=True` 且 `lora_path` 指向的文件存在，模型构造时就会照常经 torch 路径加载
 LoRA 权重后再回填——路线 A 与路线 B 的产物在同一套 `run.out_dir` 约定下天然兼容，不需要额外接线（回归测试见
 `tests/test_ladder.py::test_backfill_uses_lora_weights_when_finetune_enabled`）。
@@ -195,8 +191,9 @@ python eval_shell/m6_station_script.py --checkpoint_dir runs/m6/<run_id> \
     --station_path datasets/test/station=1015.parquet --out_dir runs/m6/<run_id>/metrics_ens --cap_power 465
 ```
 
-`station_eval.load_trained_model` 从产物目录读 `model_config.yaml`、`model.safetensors`、`station_routing.json` 与校准表，缺任何一个直接报错，
-不退回零样本或未校准；旧 run 没有 `model_config.yaml` 时用 `--config`（脚本为 `M6_CONFIG=`）给训练用的 yaml。单站推理与训练期验证同一条路
+`station_eval.load_trained_model` 从产物目录读 `model_config.yaml`、`model.safetensors` 与校准表，缺任何一个直接报错，
+不退回零样本或未校准；返回的模型全部参数 `requires_grad=False`、全部子模块 eval 态（dropout 关闭），推理在 `torch.no_grad()` 下跑；
+旧 run 目录里的 `station_routing.json` 不再读，全部站都用 LoRA；旧 run 没有 `model_config.yaml` 时用 `--config`（脚本为 `M6_CONFIG=`）给训练用的 yaml。单站推理与训练期验证同一条路
 （`_dataset_with_station_id` → `evaluate_model`），测试文件只有站名列时按 `station_meta` 转整数站号。指标、南网月表与 summary 走
 `eval_station_script` 的 `extract_summary` / `station_cap_from_df` / `NumpyJSONEncoder`，与 `m5_station_script.py` 相同。
 

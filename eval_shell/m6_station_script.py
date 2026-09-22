@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""m6_station_script.py —— M6（TimesFM-3 + LoRA + 逐站路由 + conformal 校准）单站 192 步评测入口。
+"""m6_station_script.py —— M6（TimesFM-3 + LoRA + conformal 校准）单站 192 步评测入口。
 
 M6 的 checkpoint_dir 是 train_m6 / train_m6.sh 的产物目录（runs/m6/<run_id>）：
   model_config.yaml     训练配置（推理时 run.out_dir 指向本目录）
   model.safetensors     LoRA + output_head 权重（底座仍从 timesfm3.checkpoint 读）；旧 run 为 lora_weights.pt
-  station_routing.json  逐站 lora | zeroshot
   calibration.parquet   conformal 校准表（calibration.enabled 时）
+全部站都用这份 LoRA，模型全部冻结（旧 run 目录里的 station_routing.json 不再读）。
 M6 的 safetensors 只存微调增量，不能交给 eval_station_script.load_model_from_checkpoint 做 strict load，
 所以与 m5_station_script.py 一样自己装模型：
   产物目录 -> forecast_backbones.m6.station_eval.load_trained_model -> 单站推理（与训练期验证同一条 evaluate_model）
@@ -61,8 +61,7 @@ def infer_station_m6(checkpoint_dir, station_path, cap_power, batch_size=None, d
     model, cfg = load_trained_model(checkpoint_dir, config=config, device=device, batch_size=batch_size)
     t0 = time.time()
     st, res = predict_station(model, station_path, tail_scale=tail_scale, tail_len=tail_len, scratch_dir=scratch_dir)
-    route = (model.station_routing or {}).get(int(res["station_id"].iloc[0]), "zeroshot")
-    print(f"[m6] 站 {st}（station_id={int(res['station_id'].iloc[0])}，路由 {route}）推理 {len(res)} 行，"
+    print(f"[m6] 站 {st}（station_id={int(res['station_id'].iloc[0])}）推理 {len(res)} 行，"
           f"用时 {time.time() - t0:.1f}s")
 
     result_df = res[RESULT_COLS].copy()
@@ -133,7 +132,7 @@ def main():
         description="M6（TimesFM-3 + LoRA）逐站 192 步回测：训练产物 -> 推理 -> 指标"
     )
     parser.add_argument("--checkpoint_dir", type=str, required=True,
-                        help="M6 训练产物目录 runs/m6/<run_id>（含 model_config.yaml / model.safetensors / station_routing.json）")
+                        help="M6 训练产物目录 runs/m6/<run_id>（含 model_config.yaml / model.safetensors）")
     parser.add_argument("--station_path", type=str, required=True,
                         help="datasets/test/station=<站>.parquet")
     parser.add_argument("--out_dir", type=str, required=True,

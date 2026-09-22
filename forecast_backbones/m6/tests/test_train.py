@@ -10,7 +10,6 @@ pytest.importorskip("timesfm3")
 import forecast_backbones.m6.transformer_models as tm_mod
 from forecast_backbones.m6.transformer_models import TransformersAdaptedM6Model
 from forecast_backbones.m6.train import make_splits, build_training_args, train_m6
-from forecast_backbones.m6.routing import load_routing
 from pipelines.transformer_dataset import UnifiedDataset
 from pipelines.time_splits import SplitPlan, StationSplitPlan
 from .conftest import make_synthetic_frame, write_station_meta, CAP
@@ -103,52 +102,34 @@ def test_build_training_args_cpu_defaults(tmp_path):
 def test_train_m6_end_to_end_writes_all_artifacts(tmp_path, tiny_evaluator, monkeypatch):
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):                    # 训练前无权重：构造期 warn 一次
+    with pytest.warns(UserWarning, match="LoRA 权重"):                    # 训练前无权重：构造期 warn 一次
         res = train_m6(cfg, str(parquet), max_steps=2)
     # 产物
-    assert (out / "model.safetensors").exists() and (out / "station_routing.json").exists()
+    assert (out / "model.safetensors").exists() and not (out / "station_routing.json").exists()
     assert (out / "calibration.parquet").exists() and (out / "calibration.parquet.json").exists()
     assert not (out / "lora_weights.pt").exists()
     assert (out / "train_log.json").exists() and (out / "result_val_lora.parquet").exists()
     ladder = pd.read_csv(out / "reports" / "ladder_lora.csv")
-    assert list(ladder["variant"]) == ["zeroshot_calibrated_pstar", "lora_calibrated_pstar", "routed_calibrated_pstar"]
+    assert list(ladder["variant"]) == ["zeroshot_calibrated_pstar", "lora_calibrated_pstar"]
     assert np.isfinite(ladder["nanwang_short_D+1"]).all()
     st = pd.read_csv(out / "reports" / "station_ladder.csv")
-    assert set(st["station_id"]) == set(CAP) and set(st["route"]) <= {"lora", "zeroshot"}
-    assert {"n_days_route", "gain_mean", "gain_lower"} <= set(st.columns)
-    routing = load_routing(out / "station_routing.json")
-    assert routing == dict(zip(st["station_id"].astype(int), st["route"]))
-    # 验证块 2 天：偶数日 06-13 给早停、奇数日 06-12 给路由；每站 1 个配对天 < min_days=5 → 全部回退零样本
-    assert (st["n_days_route"] == 1).all() and set(routing.values()) == {"zeroshot"}
-    z = ladder.set_index("variant")["nanwang_short_D+1"]
-    assert np.isclose(z["routed_calibrated_pstar"], z["zeroshot_calibrated_pstar"])
+    assert set(st["station_id"]) == set(CAP)
+    assert list(st.columns) == ["station_id", "station", "acc_zeroshot", "acc_lora", "n_days", "gain"]
+    assert np.allclose(st["gain"], st["acc_lora"] - st["acc_zeroshot"]) and (st["n_days"] == 2).all()   # 验证块 2 天全用
     log = json.loads((out / "train_log.json").read_text())
-    assert log["routing_rule"]["route_day_parity"] == 1 and log["day_parity"] == 0 and log["routing_rule"]["n_boot"] == 2000
-    assert len(log["routing_detail"]) == len(CAP)
     assert log["history"][0]["epoch"] == 0.0 and len(log["history"]) >= 2 and "best" in log
-    assert set(res) >= {"ladder", "routing", "history", "best"}
-    assert res["ladder"]["variant"].tolist() == ladder["variant"].tolist() and res["routing"] == routing
+    # 只有 1 个验证块：零样本行 = 第 0 步基线；LoRA 行 = 训练中最优那次验证的分数（存下来、读回来的就是最优权重）
+    z = ladder.set_index("variant")["nanwang_short_D+1"]
+    assert np.isclose(z["zeroshot_calibrated_pstar"], log["history"][0]["nanwang_after_pstar"])
+    assert np.isclose(z["lora_calibrated_pstar"], log["best"]) and log["best"] == max(h["nanwang_after_pstar"] for h in log["history"])
+    assert set(res) == {"ladder", "history", "best", "split"}
+    assert res["ladder"]["variant"].tolist() == ladder["variant"].tolist()
     man = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
     assert man["generated_by"] == "forecast_backbones.m6.train"                  # 与 pipelines.time_splits 的 manifest 区分开
     assert man["plan"]["val_blocks"] == [["2025-06-12", "2025-06-14"]] and man["plan"]["cal"] == ["2025-06-16", "2025-06-17"]
     assert man["counts"]["train"] > 0 and man["counts"]["val_blocks"] == [man["counts"]["val"]]
     assert log["split"] == man and res["split"] == man
     assert log["history"][0]["blocks"] and len(log["history"][0]["blocks"]) == 1
-
-
-def test_train_m6_old_routing_rule_never_loses_to_zeroshot(tmp_path, tiny_evaluator, monkeypatch):
-    """split_val_days=false + bootstrap.n=0 + min_days=1：早停与路由共用全部验证日、逐站只比均值差（旧口径），
-    路由后的全体得分不低于零样本行。"""
-    _patch_tiny_backbone(monkeypatch, tiny_evaluator)
-    df, parquet, out, cfg = _inputs(tmp_path)
-    cfg["finetune"]["guards"] = {"split_val_days": False, "bootstrap": {"n": 0, "min_days": 1}}
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
-        res = train_m6(cfg, str(parquet), max_steps=2)
-    z = res["ladder"].set_index("variant")["nanwang_short_D+1"]
-    assert z["routed_calibrated_pstar"] >= z["zeroshot_calibrated_pstar"] - 1e-9
-    assert (res["routing_detail"]["n_days_route"] == 2).all()
-    log = json.loads((out / "train_log.json").read_text())
-    assert log["day_parity"] is None and log["routing_rule"]["route_day_parity"] is None
 
 
 def test_train_m6_station_day_sampling_and_step_evals(tmp_path, tiny_evaluator, monkeypatch):
@@ -160,7 +141,7 @@ def test_train_m6_station_day_sampling_and_step_evals(tmp_path, tiny_evaluator, 
     used = []
     real = train_mod.StationDaySampler
     monkeypatch.setattr(train_mod, "StationDaySampler", lambda *a, **k: used.append(1) or real(*a, **k))
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+    with pytest.warns(UserWarning, match="LoRA 权重"):
         res = train_m6(cfg, str(parquet), max_steps=3)
     assert used == [1] and [h["step"] for h in res["history"]] == [0, 2, 3]
     bad = {**cfg, "finetune": {**cfg["finetune"], "schedule": {**cfg["finetune"]["schedule"], "sampling": "by_station"}}}
@@ -171,14 +152,14 @@ def test_train_m6_station_day_sampling_and_step_evals(tmp_path, tiny_evaluator, 
 def test_trained_artifacts_load_into_inference_model(tmp_path, tiny_evaluator, monkeypatch):
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+    with pytest.warns(UserWarning, match="LoRA 权重"):
         train_m6(cfg, str(parquet), max_steps=2)
     from forecast_backbones.m6.config import load_config
     import warnings
     with warnings.catch_warnings():
-        warnings.simplefilter("error")                                       # 权重、路由、校准表齐全 → 零 warning
+        warnings.simplefilter("error")                                       # 权重、校准表齐全 → 零 warning
         m = TransformersAdaptedM6Model(load_config(cfg))                     # calibration.enabled 默认 True → 读训练产物
-    assert m.lora_loaded is True and m.calibrator is not None and m.station_routing is not None
+    assert m.lora_loaded is True and m.calibrator is not None
     from .test_model_route_a import _batch
     bd, _ = _batch(df, [len(df) - 4, len(df) - 3, len(df) - 2, len(df) - 1])
     with torch.no_grad():
@@ -194,7 +175,7 @@ def test_train_m6_raises_clear_error_when_no_finite_score_ever_recorded(tmp_path
     df, parquet, out, cfg = _inputs(tmp_path)
     import forecast_backbones.m6.nanwang_callback as nc
     monkeypatch.setattr(nc, "score_split", lambda *a, **k: (float("nan"), None, None))
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+    with pytest.warns(UserWarning, match="LoRA 权重"):
         with pytest.raises(ValueError) as exc:
             train_m6(cfg, str(parquet), max_steps=1)
     msg = str(exc.value)
@@ -203,13 +184,13 @@ def test_train_m6_raises_clear_error_when_no_finite_score_ever_recorded(tmp_path
 
 
 def test_second_run_in_same_out_dir_starts_fresh(tmp_path, tiny_evaluator, monkeypatch):
-    """跨任务约束 1 的回归测试：同一 out_dir 里已经有上一轮训练的 model.safetensors / station_routing.json
-    时，第二轮训练的模型构造仍须是零样本、无路由起点——不能把上一轮的产物读回来当成本轮的起点。"""
+    """跨任务约束 1 的回归测试：同一 out_dir 里已经有上一轮训练的 model.safetensors 时，
+    第二轮训练的模型构造仍须是零样本起点——不能把上一轮的产物读回来当成本轮的起点。"""
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+    with pytest.warns(UserWarning, match="LoRA 权重"):
         train_m6(cfg, str(parquet), max_steps=1)
-    assert (out / "model.safetensors").exists() and (out / "station_routing.json").exists()
+    assert (out / "model.safetensors").exists()
 
     # 第二轮换一份全新底座（同一份 tiny 权重目录重新构造）：避免两次构造共享同一个 evaluator.model 对象，
     # 让第一轮训练留在内存里的 LoRA 权重把"零样本起点"判定悄悄冲掉——真实场景里每轮训练都会从磁盘
@@ -225,18 +206,15 @@ def test_second_run_in_same_out_dir_starts_fresh(tmp_path, tiny_evaluator, monke
     class _SpyModel(RealModel):
         def __init__(self, model_config=None, **kw):
             super().__init__(model_config, **kw)
-            recorded.append({"lora_path": self.cfg["finetune"]["lora_path"],
-                             "routing_path": self.cfg["finetune"]["routing_path"],
-                             "lora_loaded": self.lora_loaded, "station_routing": self.station_routing})
+            recorded.append({"lora_path": self.cfg["finetune"]["lora_path"], "lora_loaded": self.lora_loaded})
 
     monkeypatch.setattr(tm_mod, "TransformersAdaptedM6Model", _SpyModel)
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+    with pytest.warns(UserWarning, match="LoRA 权重"):
         train_m6(cfg, str(parquet), max_steps=1)
 
     assert len(recorded) == 1, "第二轮训练模型只应构造一次"
     rec = recorded[0]
-    assert not Path(rec["lora_path"]).exists() and not Path(rec["routing_path"]).exists()
-    assert rec["lora_loaded"] is False and rec["station_routing"] is None
+    assert not Path(rec["lora_path"]).exists() and rec["lora_loaded"] is False
     log2 = json.loads((out / "train_log.json").read_text())
     assert log2["history"][0]["epoch"] == 0.0
 
@@ -380,9 +358,9 @@ def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
         train_m6(cfg, str(parquet), splits_dir=str(splits))
     with pytest.raises(ValueError, match="shift_days 无效"):
         train_m6(cfg, splits_dir=str(splits), shift_days=1)
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+    with pytest.warns(UserWarning, match="LoRA 权重"):
         res = train_m6(cfg, splits_dir=str(splits), max_steps=2)
-    for f in ("model.safetensors", "model_config.yaml", "station_routing.json", "calibration.parquet", "train_log.json", "split_manifest.json"):
+    for f in ("model.safetensors", "model_config.yaml", "calibration.parquet", "train_log.json", "split_manifest.json"):
         assert (out / f).exists()
     info = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
     assert info["source"] == "pipelines.time_splits" and info["plan"] == man["plan"] and info["splits_dir"] == str(splits.resolve())
@@ -396,7 +374,7 @@ def test_train_m6_from_presplit_dir(tmp_path, tiny_evaluator, monkeypatch):
 
 def test_train_m6_without_conformal_uses_m1_m4_split(tmp_path, tiny_evaluator, monkeypatch):
     """calibration.enabled=false：不做 conformal，不要 cal.parquet，直接用 M1–M4 的切分目录（cal_days 0）；
-    早停与逐站路由按未校准分位上的点预测打分，不写 calibration.parquet。"""
+    早停按未校准分位上的点预测打分，不写 calibration.parquet。"""
     from pipelines.time_splits import SplitPlan, write_splits
     _patch_tiny_backbone(monkeypatch, tiny_evaluator)
     df, parquet, out, cfg = _inputs(tmp_path)
@@ -407,12 +385,12 @@ def test_train_m6_without_conformal_uses_m1_m4_split(tmp_path, tiny_evaluator, m
     with pytest.raises(FileNotFoundError, match="calibration.enabled: false"):
         train_m6(cfg, splits_dir=str(splits), max_steps=1)                  # 默认做校准：缺 cal.parquet 报错并指出开关
     nocal = {**cfg, "calibration": {"enabled": False}}
-    with pytest.warns(UserWarning, match="LoRA 权重|站级路由"):
+    with pytest.warns(UserWarning, match="LoRA 权重"):
         res = train_m6(nocal, splits_dir=str(splits), max_steps=2)
-    for f in ("model.safetensors", "model_config.yaml", "station_routing.json", "train_log.json", "split_manifest.json"):
+    for f in ("model.safetensors", "model_config.yaml", "train_log.json", "split_manifest.json"):
         assert (out / f).exists()
     assert not (out / "calibration.parquet").exists()
-    assert list(res["ladder"]["variant"]) == ["zeroshot_uncalibrated", "lora_uncalibrated", "routed_uncalibrated"]
+    assert list(res["ladder"]["variant"]) == ["zeroshot_uncalibrated", "lora_uncalibrated"]
     assert res["split"]["counts"]["cal"] == 0 and len(res["history"]) >= 2
 
     ds = UnifiedDataset(str(parquet), timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"],
@@ -434,8 +412,8 @@ def test_lora_no_conformal_config_differs_from_default_only_where_intended():
         assert c[k] == base[k], k
     assert {**c["eval"], "report_dir": None} == {**base["eval"], "report_dir": None}
     assert c["eval"]["report_dir"] == "runs/m6_lora_no_conformal/reports"
-    assert {k: v for k, v in c["finetune"].items() if k not in ("enabled", "split", "lora_path", "routing_path")} == \
-           {k: v for k, v in base["finetune"].items() if k not in ("enabled", "split", "lora_path", "routing_path")}
+    assert {k: v for k, v in c["finetune"].items() if k not in ("enabled", "split", "lora_path")} == \
+           {k: v for k, v in base["finetune"].items() if k not in ("enabled", "split", "lora_path")}
 
 def test_build_plan_rejects_unresolved_auto_blocks():
     from forecast_backbones.m6.train import build_plan

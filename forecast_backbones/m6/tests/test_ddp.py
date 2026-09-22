@@ -51,7 +51,7 @@ def test_two_process_ddp_training_keeps_ranks_in_sync(tmp_path, tiny_ckpt_dir):
                                      "eval_every_steps": 2, "progress_bar": False, "sampling": "station_day"},
                         "split": {"train_start": None, "val_blocks": [["2025-06-12", "2025-06-14"]], "test_start": "2025-06-19",
                                   "test_end": None, "cal_days": 0, "purge_days": 2, "embargo_days": 7},
-                        "early_stop": {"patience": 10}, "guards": {"bootstrap": {"min_days": 1}}}}
+                        "early_stop": {"patience": 10}}}
     (tmp_path / "cfg.yaml").write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
     (tmp_path / "driver.py").write_text(DRIVER, encoding="utf-8")
     out = tmp_path / "run"
@@ -66,6 +66,6 @@ def test_two_process_ddp_training_keeps_ranks_in_sync(tmp_path, tiny_ckpt_dir):
     assert any(k.endswith("lora_B") and float(v.abs().sum()) > 0 for k, v in r0["sd"].items())
     log = json.loads((out / "train_log.json").read_text(encoding="utf-8"))
     assert [h["step"] for h in log["history"]] == [0, 2, 4, 6]
-    assert (out / "model.safetensors").exists() and (out / "station_routing.json").exists()
+    assert (out / "model.safetensors").exists() and not (out / "station_routing.json").exists()
     assert (out / ".data" / "data_with_station_id.parquet").exists()
     assert p.stdout.count("[m6-lora] step 0 ") == 1                          # 只有主进程打分、打印

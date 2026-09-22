@@ -58,10 +58,6 @@ if [ ! -f "${CKPT_DIR}/model.safetensors" ] && [ ! -f "${CKPT_DIR}/lora_weights.
   echo "错误: ${CKPT_DIR} 没有 model.safetensors（旧 run 为 lora_weights.pt）" >&2
   exit 1
 fi
-if [ ! -f "${CKPT_DIR}/station_routing.json" ]; then
-  echo "错误: ${CKPT_DIR} 没有 station_routing.json（训练没跑完？）" >&2
-  exit 1
-fi
 
 EXTRA_ARGS=()
 [ -n "${M6_CONFIG}" ] && EXTRA_ARGS+=(--config "${M6_CONFIG}")
