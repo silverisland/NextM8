@@ -35,6 +35,13 @@ def scored_row_index(ds, station_col: str, ts_col: str, issue_time: str = SHORT_
     return np.sort(f.groupby(["st", "day"], sort=False)["i"].last().to_numpy())
 
 
+def issue_grid_row_index(ds, ts_col: str, every_min: int) -> np.ndarray:
+    """起报时刻落在当日 every_min 分钟网格上的行（every_min=60：每小时整点一行；15：全部行）。返回下标（升序）。"""
+    ts = row_times(ds, ts_col)
+    minute = (ts - ts.dt.normalize()) // pd.Timedelta(minutes=1)
+    return np.flatnonzero((ts.notna() & (minute % int(every_min) == 0)).to_numpy())
+
+
 class StationDaySampler(torch.utils.data.Sampler):
     """训练行采样：每个（站, 起报日）被抽中的概率相同，抽中后在该站日的行里均匀取一行（有放回），每轮抽 len(ds) 次。
     序列只由 seed 与轮次决定：多卡时每个进程生成同一序列，再由 accelerate 按批分给各卡。"""

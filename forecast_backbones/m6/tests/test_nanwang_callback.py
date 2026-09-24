@@ -215,3 +215,66 @@ def test_step_mode_evaluates_every_n_steps_and_on_last_step(tmp_path, tiny_evalu
     assert control.should_training_stop is True                                        # 第 4、5 步连续两次没超过 55
     log = json.loads((tmp_path / "log.json").read_text())
     assert log["best_step"] == 2 and log["eval_every_steps"] == 2 and log["history"][-1]["bad_evals"] == 2
+
+
+def _nrmse_cfg(m, **es):
+    import copy
+    cfg = copy.deepcopy(m.cfg)
+    cfg["finetune"]["early_stop"].update({"metric": "nrmse", **es})
+    return cfg
+
+
+def test_nrmse_metric_keeps_lowest_and_stops_on_patience(tmp_path, tiny_evaluator, monkeypatch):
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    it = iter([10.0, 9.0, 9.5, 9.2])
+    monkeypatch.setattr(nc, "nrmse_split", lambda *a, **k: next(it))
+    monkeypatch.setattr(nc, "score_split", lambda *a, **k: pytest.fail("nrmse 模式不该调南网打分"))
+    cb = NanwangEvalCallback(m, None, [None], None, _nrmse_cfg(m), best_path=tmp_path / "b.pt", patience=2,
+                             log_path=tmp_path / "l.json")
+    args = TrainingArguments(output_dir=str(tmp_path / "hf"), report_to=[]); state = TrainerState(); control = TrainerControl()
+    cb.on_train_begin(args, state, control)
+    assert cb.best == 10.0
+    for e in (1.0, 2.0, 3.0):
+        state.epoch = e; cb.on_epoch_end(args, state, control)
+    assert cb.best == 9.0 and cb.best_epoch == 1.0 and control.should_training_stop is True
+    log = json.loads((tmp_path / "l.json").read_text())
+    assert log["metric"] == "nrmse" and log["higher_better"] is False and log["history"][1]["nrmse"] == 9.0
+
+
+def test_unknown_early_stop_metric_rejected(tmp_path, tiny_evaluator):
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    cfg = _nrmse_cfg(m); cfg["finetune"]["early_stop"]["metric"] = "mape"
+    with pytest.raises(ValueError, match="early_stop.metric"):
+        NanwangEvalCallback(m, None, [None], None, cfg, best_path=tmp_path / "b.pt", patience=1, log_path=tmp_path / "l.json")
+
+
+def test_nrmse_split_uses_issue_grid_rows_and_matches_manual(tmp_path, tiny_evaluator, monkeypatch):
+    from forecast_backbones.m6.transformer_trainer import recompute_points
+    _, ds_val = _datasets()                                                             # 每小时一个起报
+    with pytest.warns(UserWarning):
+        m = _model_b(tmp_path, tiny_evaluator)
+    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    seen = []
+    real = nc.evaluate_model
+    monkeypatch.setattr(nc, "evaluate_model", lambda model, ds, *a, **k: (seen.append(len(ds)), real(model, ds, *a, **k))[1])
+    m.train()
+    v60 = nc.nrmse_split(m, ds_val, collate, m.cfg, issue_every_min=60)
+    nc.nrmse_split(m, ds_val, collate, m.cfg, issue_every_min=120)
+    assert m.training is True and seen == [len(ds_val), len(ds_val) // 2]
+    df = recompute_points(real(m, ds_val, collate, m.cfg), m.cfg, None, "calibrated_pstar")
+    y = np.stack(df["observe_power_future"].to_numpy()); p = np.stack(df["observe_power_predict"].to_numpy())
+    r = (y - p) / df["cap"].to_numpy()[:, None]
+    assert np.isfinite(v60) and v60 == pytest.approx(100 * np.sqrt(np.nanmean(r ** 2)))
+
+
+def test_issue_grid_row_index_selects_on_minute_grid():
+    from forecast_backbones.m6.rows import issue_grid_row_index
+    df = make_synthetic_frame(n_days=1, issue_every_min=30, seed=0)
+    ds = UnifiedDataset(df, timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"],
+                        for_hf_trainer=True)
+    ts = pd.to_datetime(np.asarray(ds.column("timestamp_win")))
+    assert (ts[issue_grid_row_index(ds, "timestamp_win", 60)].minute == 0).all()
+    assert len(issue_grid_row_index(ds, "timestamp_win", 30)) == len(ds)
+    assert len(issue_grid_row_index(ds, "timestamp_win", 60)) == len(ds) // 2

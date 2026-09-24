@@ -95,7 +95,10 @@ DEFAULT_CFG: dict = {
                   "test_start": "2025-10-01", "test_end": None,   # 尾段测试；test_end null = 数据末尾
                   "cal_days": 45,                           # 校准段 = [test_start − purge − cal_days, test_start − purge)
                   "purge_days": 2, "embargo_days": 7},      # 2 天 ≥ H=192 步；块后 2+7=9 天 = L+H
-        "early_stop": {"metric": "nanwang_after_pstar", "patience": 3},   # patience 按验证次数计
+        # metric：nanwang_after_pstar = 南网短期 D+1（越高越好，每站每天推理 1 行）；
+        #         nrmse = 提交曲线全部 192 步的容量归一 RMSE%（越低越好，每站每天推理 24h·60/nrmse_issue_every_min 行）
+        "early_stop": {"metric": "nanwang_after_pstar", "patience": 3,   # patience 按验证次数计
+                       "nrmse_issue_every_min": 60},
     },
     "calibration": {
         "enabled": True,

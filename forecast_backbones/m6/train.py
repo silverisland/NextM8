@@ -344,7 +344,8 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
               f"{plan_dict['val_blocks']}; trainable={trainable_summary(model.backbone.model)}")
         budget = f"{args.max_steps} 步" if args.max_steps > 0 else f"不限步数（{sch['epochs_max']} 个 epoch）"
         print(f"[m6-lora] {world} 个进程 × 每卡 batch {bs} = 每步 {world * bs} 行；预算 {budget}；"
-              f"验证{f'每 {eval_every} 步一次' if eval_every else '每个 epoch 末一次'}，patience={ft['early_stop']['patience']} 次；"
+              f"验证{f'每 {eval_every} 步一次' if eval_every else '每个 epoch 末一次'}，早停指标 {ft['early_stop']['metric']}，"
+              f"patience={ft['early_stop']['patience']} 次；"
               f"训练行采样 {sampling}")
         if coverage_note:
             print(f"[m6-lora] 提示：{coverage_note}")
@@ -362,7 +363,7 @@ def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, 
         return {}
     if cb.best_epoch is None or not best_path.exists():
         raise ValueError(
-            f"训练全程未产出任何可用的最优 LoRA 权重：验证块 {plan_dict['val_blocks']} 上的南网短期打分"
+            f"训练全程未产出任何可用的最优 LoRA 权重：验证块 {plan_dict['val_blocks']} 上的早停打分（{ft['early_stop']['metric']}）"
             f"（NanwangEvalCallback 每次验证对每块各调一次 score_split，取块均值）自始至终都是非有限值"
             f"（没有一块能凑出完整可评分的一天），cb.best_epoch={cb.best_epoch!r}，{best_path} 不存在。"
             f"请检查各验证块是否覆盖足够多的完整天。")

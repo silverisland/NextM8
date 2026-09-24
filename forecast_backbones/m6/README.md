@@ -105,7 +105,7 @@ b 的整体后移在切分时给），输出目录换 `_f1`。`--max-steps N` �
 `cal_days` 校准段（固定放在 `test_start − purge_days` 之前），`purge_days`（块前剔除训练行）与 `embargo_days`（块后额外剔除）。
 两个天数都由 `SplitPlan.from_dict` 当场校验，给不够直接报错：`purge_days` 须 ≥ H 折算天数（默认 2 天），
 `purge_days + embargo_days` 须 ≥ L + H 折算天数（默认 9 天）——前 H 步保证块后训练行的标签不与块标签重叠，
-再往后的 L 步保证这些训练行 7 天的上下文不含块的标签。早停指标是各块南网短期得分的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`；
+再往后的 L 步保证这些训练行 7 天的上下文不含块的标签。早停指标是各块得分（默认南网短期，见下文 `early_stop.metric`）的均值，逐块分数在 `train_log.json` 的 `history[*].blocks`；
 切分事实落在 `out_dir/split_manifest.json`（`generated_by: forecast_backbones.m6.train`）。给 M1–M4 生成同一规则的 `train/valid/cal/test.parquet`：
 `python -m pipelines.time_splits --parquet RAW.parquet --out-dir dataset/<name> --m6-config forecast_backbones/m6/config/configs.yaml`
 （`--m6-config` 时 L/H/step_min 默认取该 yaml 的 `timesfm3.context_len` / `timesfm3.pred_len` / `dataset.step_min`，
@@ -149,6 +149,7 @@ bash train_m6.sh --splits_dir data/splits/m1_m4_v1 --run_id lora_v1
 **训练预算、验证与多卡**（`finetune.schedule` / `early_stop`）：
 - 预算按优化器步数给：`max_steps`（默认 4000），`epochs_max` 只在 `max_steps: null` 时生效。训练行按 `sampling` 随机抽：`random` 在全部训练行里均匀抽，`station_day` 让每个（站, 起报日）被抽中的概率相同。
 - 每 `eval_every_steps` 步（默认 250，训练最后一步必打）在全部验证块上打一次南网短期分，`patience` 按验证次数计。验证只推理指标用到的行（每站每个起报日取 10:00 前最晚的一行），分数与推理全部行相同；做 conformal 时校准段每次验证只推理一遍，各块共用。
+- 早停指标 `early_stop.metric`：`nanwang_after_pstar`（默认，南网短期 D+1，越高越好）或 `nrmse`（提交曲线全部 192 步、含夜间的容量归一 RMSE%，越低越好，超短期也算在内）。`nrmse` 每站每天推理起报时刻落在 `nrmse_issue_every_min` 分钟网格上的行（默认 60 → 24 行，验证开销约为南网口径的 24 倍；15 → 全部行）。
 - 多卡：`accelerate launch` / `torchrun` 起多个进程即可，`train_m6.sh` 默认用全部可见 GPU。每张卡一个进程、各吃不同的训练批，每步共 卡数 × `batch_size` 行（`batch_size` 是每张卡的）；验证、存最优与报表只在主进程做，其余进程训完即退出。站号需要转换时由主进程写 `out_dir/.data/` 下的临时 parquet，其余进程等它写完再读。
 
 **训练与测试的站对不上**：只在测试集里、训练数据里没有的站，切分时忽略（manifest 的 `ignored_test_only_stations` 记下名单）；
@@ -157,7 +158,7 @@ bash train_m6.sh --splits_dir data/splits/m1_m4_v1 --run_id lora_v1
 没有测试集的站晚于终点的数据不参与放块、照常进训练，免得验证块被拉进别的站的测试时段。这些站列在 `stations_without_test`，覆盖表的测试起点列显示"无测试集"，
 `split_resolved.yaml` 连同占位日期一起写下，原样重跑不变。M6 `make_splits` 同样处理。
 
-产物（`run.out_dir`）：`model.safetensors`（LoRA + 可训 output_head 的权重，键名相对 `backbone.model`，不含底座；验证块均值南网短期得分最优的那次验证；第 0 步是零样本基线，所以在验证集上永远不输零样本；旧 run 的 `lora_weights.pt` 仍能读）、
+产物（`run.out_dir`）：`model.safetensors`（LoRA + 可训 output_head 的权重，键名相对 `backbone.model`，不含底座；验证块均值早停指标最优的那次验证；第 0 步是零样本基线，所以在验证集上永远不输零样本；旧 run 的 `lora_weights.pt` 仍能读）、
 `model_config.yaml`（训练配置，保留 `${run.out_dir}` 占位符，推理时把 `run.out_dir` 指到产物目录即可整体搬走）、
 `calibration.parquet`（在最优 LoRA 上重拟合）、`train_log.json`、`result_val_lora.parquet`；报表（`eval.report_dir`）：
 `ladder_lora.csv`（阶梯 4：`zeroshot_calibrated_pstar` / `lora_calibrated_pstar` 两行，全部验证日）、`station_ladder.csv`
