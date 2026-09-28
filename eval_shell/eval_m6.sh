@@ -2,7 +2,7 @@
 # ============================================================
 # eval_m6.sh —— M6（TimesFM-3 + LoRA）逐站 192 步并行评测
 #
-# 与 eval_m5.sh 同构（各 worker 独占 GPU，按连续块切分）：
+# 与 eval_pretrain.sh 同构（各 worker 独占 GPU，按连续块切分）：
 #   每 worker 一个 GPU / CUDA_VISIBLE_DEVICES，串行处理自己的站块，
 #   worker 日志写到 $OUT_DIR/logs/worker_<i>.log，逐站跑 eval_shell/m6_station_script.py
 #   （训练产物 -> M6 模型 -> 推理 -> 指标 -> {站}-metrics.xlsx + {站}-summary.json）。

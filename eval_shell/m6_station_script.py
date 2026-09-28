@@ -7,11 +7,11 @@ M6 的 checkpoint_dir 是 train_m6 / train_m6.sh 的产物目录（runs/m6/<run_
   calibration.parquet   conformal 校准表（calibration.enabled 时）
 全部站都用这份 LoRA，模型全部冻结（旧 run 目录里的 station_routing.json 不再读）。
 M6 的 safetensors 只存微调增量，不能交给 eval_station_script.load_model_from_checkpoint 做 strict load，
-所以与 m5_station_script.py 一样自己装模型：
+所以与 eval_pretrain.py 一样自己装模型：
   产物目录 -> forecast_backbones.m6.station_eval.load_trained_model -> 单站推理（与训练期验证同一条 evaluate_model）
 
 指标与写文件（SolarMetricCalculator / NanwangMetric / extract_summary / NumpyJSONEncoder / station_cap_from_df）
-与 m5_station_script.py 逐行一致，输出与 M1-M5 的 metrics_ens 同构，可直接进 make_models_summary 汇总。
+与 eval_pretrain.py 逐行一致，输出与 M1-M5 的 metrics_ens 同构，可直接进 make_models_summary 汇总。
 
 产出：
     out_dir/{STATION}-metrics.xlsx   # 6 sheet + nanwang sheet
@@ -24,7 +24,7 @@ M6 的 safetensors 只存微调增量，不能交给 eval_station_script.load_mo
         --out_dir runs/m6/lora_20260922_1200/metrics_ens \
         --cap_power 465
 
-可选历史尾部缩放（--tail_scale/--tail_len）：与 m5_station_script.py 相同，只缩放推理输入里
+可选历史尾部缩放（--tail_scale/--tail_len）：与 eval_pretrain.py 相同，只缩放推理输入里
 observe_power 历史序列的末尾 --tail_len 个点，不改磁盘上的 parquet。
 """
 
@@ -51,7 +51,7 @@ from forecast_backbones.m6.station_eval import RESULT_COLS, load_trained_model, 
 
 def infer_station_m6(checkpoint_dir, station_path, cap_power, batch_size=None, device="cuda",
                      config=None, tail_scale=None, tail_len=4, scratch_dir=None):
-    """单站 M6 推理 -> (st, cap, result_df)。result_df 列与 m5_station_script.infer_station_m5 一致：
+    """单站 M6 推理 -> (st, cap, result_df)。result_df 列与 eval_pretrain.infer_station_pretrain 一致：
     timestamp_win / station / observe_power_predict / observe_power_future，数据带 cap_power_on 时一并带上。"""
     import pandas as pd
 
