@@ -1,0 +1,3 @@
+# B3 消融：TiRex 式 token 头（输出侧不再二次注入逐步 NWP）
+run: {tag: b3_token_head, out_dir: runs/m8/b3_token_head}
+model: {head_mode: token}

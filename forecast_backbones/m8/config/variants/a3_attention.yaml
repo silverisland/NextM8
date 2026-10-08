@@ -1,0 +1,3 @@
+# A3 骨干对照：因果多头注意力 ×4（patch Transformer）
+run: {tag: a3_attention, out_dir: runs/m8/a3_attention}
+model: {blocks: [attention, attention, attention, attention]}

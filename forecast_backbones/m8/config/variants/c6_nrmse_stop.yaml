@@ -1,0 +1,3 @@
+# C6 早停口径：按 192 步容量归一 RMSE 早停（整点起报行），而不是南网 D+1
+run: {tag: c6_nrmse_stop, out_dir: runs/m8/c6_nrmse_stop}
+train: {early_stop: {metric: nrmse, patience: 5, nrmse_issue_every_min: 60}}

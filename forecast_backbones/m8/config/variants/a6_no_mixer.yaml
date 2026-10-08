@@ -1,0 +1,3 @@
+# A6 骨干下界：无序列混合器，每个 token 只看自己 patch + 静态量（近似"逐步 MLP 回归 NWP→功率"）
+run: {tag: a6_no_mixer, out_dir: runs/m8/a6_no_mixer}
+model: {blocks: []}
