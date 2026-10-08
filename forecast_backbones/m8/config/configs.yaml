@@ -14,6 +14,7 @@ dataset:
   station_meta: forecast_backbones/m6/station_meta.csv    # 与 m6 共用；训练前填真实站坐标
   tz: Asia/Shanghai
   step_min: 15
+  known_stations: null               # 训练入口自动写入训练集里的站号；推理时名单外的站走"未知站"槽位 0
   context_len: 672
   pred_len: 192
 features:
@@ -50,7 +51,8 @@ model:
 train:
   cpm: {enabled: true, p_row: 0.5, min_frac: 0.05, max_frac: 0.25, max_runs: 3}
   cov_dropout: 0.1
-  hint_dropout: 0.3                  # future_only 通道整行清零概率（与 cov_dropout 独立；残差基准同步置 0）
+  hint_dropout: 0.3
+  slot_dropout: 0.3                  # 训练时按此概率把站点嵌入换成"未知站"槽，模型才学得会给没见过的站预报                  # future_only 通道整行清零概率（与 cov_dropout 独立；残差基准同步置 0）
   amp_mod: {p: 0.3, lo: 0.6, hi: 1.0}
   schedule:
     lr: 5.0e-4

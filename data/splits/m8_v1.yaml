@@ -1,0 +1,14 @@
+# M8 用的 train / valid 切分（测试集是独立文件，用 --test-parquets 推每站的测试起点，训练数据只在起点前留 2 天隔离带）
+#   python -m pipelines.time_splits --parquet "<训练文件夹>/*.parquet" --test-parquets "<测试文件夹>/*.parquet" \
+#       --split-yaml data/splits/m8_v1.yaml --dry-run            # 先看逐站报告
+#   …同上去掉 --dry-run 加 --out-dir data/splits/m8_v1            # 落盘
+train_start: null
+val_blocks:
+  - ["2025-04-10", "2025-05-01"]   # 6 个长站
+  - ["2025-07-16", "2025-08-06"]   # 6 个长站
+  - ["2026-01-10", "2026-01-31"]   # 8 个站，冬季；若测试集是秋季改成 ["2025-11-20", "2025-12-11"]
+cal_days: 0                        # M8 不用校准段
+purge_days: 2
+embargo_days: 7
+allow_stations_without_val: true   # 2024 年的两个单站数据集、华能北方、1005 碰不到验证块：全进训练
+val_only_stations: ["1006", "1016"]   # 两个最短的新站整站留出只进验证 = 模拟测试集里没见过的站

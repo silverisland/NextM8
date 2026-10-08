@@ -124,7 +124,7 @@ Reverso 多尺度输入（672 步上下文下收益不明，长卷积已覆盖�
 | 组 | 变体 | 回答的问题 |
 |---|---|---|
 | A 骨干 | a1_hybrid（基线）/ a2_slstm / a3_attention / a4_deltanet_only / a5_conv_only / a6_no_mixer | 混合器选型；a6 为无序列建模下界 |
-| B 协变量通路 | b1_split_stream / b2_bidirectional / b3_token_head / b4_no_nwp | 双流 vs 单流；预报时刻后的 NWP 是否有用；输出侧注入价值；NWP 总价值 |
+| B 协变量通路 | b1_split_stream / b2_bidirectional / b3_token_head / b4_no_nwp / b5_no_station_emb | 双流 vs 单流；预报时刻后的 NWP 是否有用；输出侧注入价值；NWP 总价值；站点嵌入对已见 / 未见站的影响（未见站走训练过的未知槽，`train.slot_dropout`） |
 | C 配方 | c1_no_cpm / c2_recent_peak / c3_patch32 / c4_patch8 / c5_large / c6_nrmse_stop / c7_station_day | CPM+dropout；归一化；token 粒度；规模；早停口径；采样 |
 | D 数据/决策 | d1_members / d2_pstar_point / d3_timesfm_hint / d4_timesfm_resid | 集合成员；p* vs 中位数；TimesFM 预测作未来提示通道（`features.future_only`，历史段恒 0，独立 `hint_dropout`）；残差学习（`residual_base_col`，输出 = 提示 + 网络输出） |
 

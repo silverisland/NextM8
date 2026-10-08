@@ -98,6 +98,13 @@ class TransformersAdaptedM8Model(nn.Module):
     def compute_metrics(eval_pred) -> dict:
         return {}
 
+    def set_known_stations(self, station_ids) -> list[int]:
+        """训练入口调用：记录训练集里的站号，推理时名单外的站走未知站槽。同步进 cfg（随 model_config.yaml 落盘）。"""
+        ids = sorted({int(s) for s in station_ids})
+        self.cfg["dataset"]["known_stations"] = ids
+        self.fe.known_stations = np.array(ids, dtype=np.int64) if ids else None
+        return ids
+
     def reseed(self, seed: int) -> None:
         """多卡时每个进程换不同的增强随机流。"""
         self._rng = np.random.default_rng(int(seed))

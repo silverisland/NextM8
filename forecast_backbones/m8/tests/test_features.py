@@ -138,3 +138,17 @@ def test_residual_requires_target_scaled_hint(small_cfg):
         load_config({**small_cfg, "features": {"future_only": [{"col": "timesfm_predict", "scale": "fixed"}], "residual_base_col": "timesfm_predict"}})
     with pytest.raises(ValueError):
         load_config({**small_cfg, "features": {"residual_base_col": "timesfm_predict"}})
+
+
+def test_unknown_station_goes_to_slot_zero_and_slot_dropout(small_cfg, batch):
+    cfg, fb = _fb(small_cfg)
+    inp = fb.build(batch["batch_dict"], training=False)
+    assert (inp["slot"] > 0).all()                                          # 没有名单：全部按站号取槽
+    cfg2 = load_config({**small_cfg, "dataset": {**small_cfg["dataset"], "known_stations": [1002]}})
+    fb2 = FeatureBuilder(cfg2, StationMeta.from_csv(cfg2["dataset"]["station_meta"]))
+    inp2 = fb2.build(batch["batch_dict"], training=False)
+    sid = batch["batch_dict"]["station_id"].numpy().astype(int)
+    assert (inp2["slot"][sid == 1001] == 0).all() and (inp2["slot"][sid == 1002] > 0).all()
+    cfg3, fb3 = _fb(small_cfg, train={"slot_dropout": 1.0})
+    assert (fb3.build(batch["batch_dict"], training=True, rng=np.random.default_rng(0))["slot"] == 0).all()
+    assert (fb3.build(batch["batch_dict"], training=False)["slot"] > 0).all()   # 推理不丢

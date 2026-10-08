@@ -38,7 +38,7 @@ if __name__ == "__main__":
     if df.empty:
         print("没有找到任何 reports/summary.csv")
     else:
-        cols = [c for c in ["tag", "nanwang_short_D+1", "nrmse_pct", "best_step", "params", "blocks", "layout", "head_mode",
+        cols = [c for c in ["tag", "nanwang_short_D+1", "nanwang_seen", "nanwang_unseen", "nrmse_pct", "best_step", "params", "blocks", "layout", "head_mode",
                             "patch_len", "d_model", "target_scale", "cpm", "cov_dropout", "future_only", "residual", "train_minutes", "run_dir"] if c in df.columns]
         print(df[cols].to_string(index=False))
         if a.out:

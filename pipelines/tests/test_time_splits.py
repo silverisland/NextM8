@@ -627,3 +627,36 @@ def test_unmatched_stations_are_ignored_or_kept_to_their_end(tmp_path, capsys):
         SplitPlan.from_dict({**SPLIT, "stations_without_test": ["A"]})
     with pytest.raises(ValueError, match="没有占位 test_start"):
         StationSplitPlan.from_dict({**FIXED, "stations_without_test": ["Q"]}, {"A": "2025-10-01"})
+
+
+def test_val_only_stations_hold_out_whole_station(tmp_path, capsys):
+    """val_only_stations：整站只进验证（块内行带块序号、块外行 −1），不进训练；CLI 与 resolved yaml 都带这个键。"""
+    spans = {**SPANS, "C": ("2025-08-10", "2025-12-20")}
+    df = _span_frame(spans, freq="60min")
+    starts = {s: b for s, (a, b) in spans.items()}
+    man = write_splits(df, StationSplitPlan.from_dict({**FIXED, "allow_stations_without_val": True}, starts), tmp_path / "a",
+                       val_only=["C"])
+    rep = {r["station"]: r for r in man["station_report"]}
+    assert rep["C"]["val_only"] and not rep["A"]["val_only"] and man["val_only_stations"] == ["C"]
+    assert rep["C"]["train_days"] == 0 and rep["C"]["val_days"] > 100 and rep["C"]["test_days"] == 0
+    va = pd.read_parquet(tmp_path / "a" / "valid.parquet")
+    assert (va.loc[va.station == "C", "split_block"] == -1).all()          # C 的数据不在任何固定块里
+    assert set(va.loc[va.station == "A", "split_block"]) == {0, 1, 2}
+    tr = pd.read_parquet(tmp_path / "a" / "train.parquet")
+    assert "C" not in set(tr.station)
+    with pytest.raises(ValueError, match="在数据里没有"):
+        write_splits(df, StationSplitPlan.from_dict({**FIXED, "allow_stations_without_val": True}, starts), tmp_path / "b", val_only=["Z"])
+
+    _write_station_files(tmp_path, spans)
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump({**AUTO, "allow_stations_without_val": True, "val_only_stations": ["C"]}), encoding="utf-8")
+    man = main(["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "s.yaml"),
+                "--out-dir", str(tmp_path / "ds"), "--test-parquets", str(tmp_path / "test" / "*.parquet")])
+    assert "整站只进验证" in capsys.readouterr().out
+    rep = {r["station"]: r for r in man["station_report"]}
+    assert rep["C"]["val_only"] and rep["C"]["train_days"] == 0 and rep["C"]["val_days"] > 0
+    resolved = yaml.safe_load((tmp_path / "ds" / "split_resolved.yaml").read_text(encoding="utf-8"))
+    assert resolved["val_only_stations"] == ["C"]
+    (tmp_path / "bad.yaml").write_text(yaml.safe_dump({**AUTO, "val_only_stations": ["C"], "train_only_stations": ["C"]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="同时写在"):
+        main(["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "bad.yaml"), "--dry-run",
+              "--test-parquets", str(tmp_path / "test" / "*.parquet")])

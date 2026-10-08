@@ -27,7 +27,7 @@ try:
     from .transformer_trainer import evaluate_model, build_training_args
     from .transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
     from ..m6.train import _dataset_with_station_id, _check_presplit_dir
-    from ..m6.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler
+    from ..m6.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
     from ..m6 import _dist
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
@@ -35,7 +35,7 @@ except ImportError:
     from forecast_backbones.m8.transformer_trainer import evaluate_model, build_training_args
     from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
     from forecast_backbones.m6.train import _dataset_with_station_id, _check_presplit_dir
-    from forecast_backbones.m6.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler
+    from forecast_backbones.m6.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
     from forecast_backbones.m6 import _dist
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
@@ -76,7 +76,19 @@ def score_nanwang(model, ds_val, collate, cfg, res: pd.DataFrame | None = None) 
     g = sd.groupby("station")["accuracy_pct"].agg(["mean", "count"]).reset_index()
     table = pd.DataFrame({"station_id": g["station"].map(name_to_id).astype(int), "station": g["station"],
                           "accuracy_pct": g["mean"].astype(float), "n_days": g["count"].astype(int)})
+    known = cfg["dataset"].get("known_stations")
+    table["seen"] = True if not known else table["station_id"].isin([int(s) for s in known])
     return float(sd["accuracy_pct"].mean()), table, res
+
+
+def seen_unseen_scores(table: pd.DataFrame) -> tuple[float, float, int]:
+    """逐站表 → (已见站站日均值, 未见站站日均值, 未见站数)；按 n_days 加权等于站日均值。"""
+    if table.empty or "seen" not in table:
+        return float("nan"), float("nan"), 0
+    def wmean(t):
+        return float((t["accuracy_pct"] * t["n_days"]).sum() / t["n_days"].sum()) if len(t) and t["n_days"].sum() else float("nan")
+    seen, unseen = table[table["seen"]], table[~table["seen"]]
+    return wmean(seen), wmean(unseen), int(len(unseen))
 
 
 def nrmse_pct(res: pd.DataFrame) -> float:
@@ -115,13 +127,17 @@ class EvalCallback(TrainerCallback):
         self.issue_every_min = int(es.get("nrmse_issue_every_min", 60))
         self.best = -np.inf if self.higher_better else np.inf
         self.best_step, self.bad_evals, self.history = None, 0, []
+        self.last_unseen = None
 
     def _score(self) -> float:
         self.model._progress_desc = "[m8] 验证"
         try:
             if self.metric == "nrmse":
                 return score_nrmse(self.model, self.ds_val, self.collate, self.cfg, self.issue_every_min)[0]
-            return score_nanwang(self.model, self.ds_val, self.collate, self.cfg)[0]
+            score, table, _ = score_nanwang(self.model, self.ds_val, self.collate, self.cfg)
+            _, unseen, n_unseen = seen_unseen_scores(table)
+            self.last_unseen = float(unseen) if n_unseen else None
+            return score
         finally:
             self.model._progress_desc = None
 
@@ -133,6 +149,7 @@ class EvalCallback(TrainerCallback):
         else:
             self.bad_evals += 1
         self.history.append({"step": int(step), "epoch": float(epoch), self.metric: float(score), "train_loss": loss,
+                             **({"nanwang_unseen": self.last_unseen} if self.last_unseen is not None else {}),
                              "best": self.best, "bad_evals": self.bad_evals, "time": time.time()})
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text(json.dumps({"history": self.history, "best": self.best, "best_step": self.best_step,
@@ -214,10 +231,14 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     if not main:
         loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=True)
     ds_train, ds_val, man = loaded
+    known = model.set_known_stations(row_stations(ds_train, station_col).tolist())     # 验证/测试里名单外的站走未知站槽
+    train_cfg["dataset"]["known_stations"] = known
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     eval_every = sch.get("eval_every_steps")
     if main:
-        dump_config(deep_merge(DEFAULT_CFG, raw_override(config_path)), out / CONFIG_FILE)
+        dump_config(deep_merge(deep_merge(DEFAULT_CFG, raw_override(config_path)), {"dataset": {"known_stations": known}}), out / CONFIG_FILE)
+        n_unseen_val = len(set(row_stations(ds_val, station_col).tolist()) - set(known))
+        print(f"[m8] 训练集站 {len(known)} 个；验证集里训练没见过的站 {n_unseen_val} 个（走未知站槽，报表里 seen=False）")
         (out / "split_manifest.json").write_text(json.dumps({"generated_by": "forecast_backbones.m8.train",
             "splits_dir": str(Path(splits_dir).resolve()), "plan": man.get("plan"),
             "counts": {"train": len(ds_train), "val": len(ds_val)}}, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -247,8 +268,10 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     nw_score, station_tab, _ = score_nanwang(model, ds_val, collate, train_cfg)
     nr, res_hourly = score_nrmse(model, ds_val, collate, train_cfg, int(cfg["train"]["early_stop"].get("nrmse_issue_every_min", 60)))
     res_hourly.to_parquet(out / "result_val.parquet", index=False)
+    nw_seen, nw_unseen, n_unseen = seen_unseen_scores(station_tab)
     summary = pd.DataFrame([{
         "tag": tag or cfg["run"].get("tag") or out.name, "nanwang_short_D+1": nw_score, "nrmse_pct": nr,
+        "nanwang_seen": nw_seen, "nanwang_unseen": nw_unseen, "n_unseen_stations": n_unseen,
         "best_step": cb.best_step, "n_evals": len(cb.history), "train_minutes": (time.time() - t0) / 60.0,
         "params": model.n_params(), "blocks": "+".join(cfg["model"]["blocks"]) or "none",
         "layout": cfg["model"].get("layout", "fused"), "head_mode": cfg["model"].get("head_mode", "step_cov"),

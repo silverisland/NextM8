@@ -63,7 +63,7 @@ python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/conf
 | 组 | 变体 | 回答的问题 |
 |---|---|---|
 | A 骨干 | a1_hybrid（基线）/ a2_slstm / a3_attention / a4_deltanet_only / a5_conv_only / a6_no_mixer | 混合器选型；a6 是「没有序列建模」的下界 |
-| B 协变量通路 | b1_split_stream / b2_bidirectional / b3_token_head / b4_no_nwp | 双流 vs 单流；预报时刻之后的 NWP 是否有用；输出侧注入值多少；NWP 总共值多少 |
+| B 协变量通路 | b1_split_stream / b2_bidirectional / b3_token_head / b4_no_nwp / b5_no_station_emb | 双流 vs 单流；预报时刻之后的 NWP 是否有用；输出侧注入值多少；NWP 总共值多少；站点嵌入对已见 / 未见站的影响 |
 | C 配方 | c1_no_cpm / c2_recent_peak / c3_patch32 / c4_patch8 / c5_large / c6_nrmse_stop / c7_station_day | CPM+dropout 的价值；归一化；token 粒度；规模；早停口径；采样 |
 | D 数据/决策 | d1_members（需 SSRD_pos_* 列）/ d2_pstar_point / d3_timesfm_hint / d4_timesfm_resid（需 timesfm_predict 列） | 集合成员；p* vs 中位数；TimesFM 单变量预测作为未来提示通道；在其上做残差学习 |
 
@@ -75,6 +75,15 @@ python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/conf
 `python -m pytest forecast_backbones/m8/tests -q`（CPU，约 15 s；含层因果性、CPM/夜间掩码语义、registry 发现、九种结构变体的
 前向/反向、`compute_loss` 两条路径一致、权重读写、`evaluate_model` schema、两种早停指标的端到端训练）。合成数据 400 步 CPU 训练：
 有 NWP 时南网 D+1 从 82 升到 87.0、nrmse 6.7%；不喂 NWP 时 80.2、nrmse 10.2%，说明协变量通路在起作用（合成数据，不代表真实水平）。
+
+## 没见过的站（零样本新站）
+
+训练入口把训练集里出现过的站号写进 `model_config.yaml` 的 `dataset.known_stations`；推理时名单外的站走"未知站"槽位 0。
+训练时 `train.slot_dropout`（默认 0.3）按概率把站点嵌入换成未知槽，所以槽 0 是训练过的，模型学会只靠静态量
+（容量、坐标、上下文统计）和历史窗口给新站预报。报表里 `station_table.csv` 多一列 `seen`，`summary.csv` 多
+`nanwang_seen` / `nanwang_unseen` / `n_unseen_stations`，`train_log.json` 每次验证也记 `nanwang_unseen`；早停仍按总分。
+要让早停和变体比较也看到零样本表现，切分时用 `val_only_stations` 整站留出一两个短站（见 `pipelines/time_splits.py`），
+它们的行全部进 valid、不进训练。对照变体 b5_no_station_emb 关掉站点嵌入。
 
 ## 外部提示通道（`features.future_only`）与残差学习
 

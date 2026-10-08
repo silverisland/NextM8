@@ -28,6 +28,8 @@ DEFAULT_CFG: dict = {
         "station_meta": "forecast_backbones/m6/station_meta.csv",   # 与 m6 共用一份站表（station_id, station, lat, lon, alt_m, cap_mw）
         "tz": "Asia/Shanghai",
         "step_min": 15,
+        # 训练入口自动写入：训练集里出现过的整数站号。推理时不在名单里的站走"未知站"槽位 0（见 train.slot_dropout）
+        "known_stations": None,
         "context_len": 672,
         "pred_len": 192,
     },
@@ -71,7 +73,9 @@ DEFAULT_CFG: dict = {
     "train": {
         "cpm": {"enabled": True, "p_row": 0.5, "min_frac": 0.05, "max_frac": 0.25, "max_runs": 3},
         "cov_dropout": 0.1,
-        "hint_dropout": 0.3,                   # future_only 通道整行清零的概率（与 cov_dropout 独立抽样；残差基准同步为 0）
+        "hint_dropout": 0.3,
+        # 训练时按此概率把站点嵌入槽位换成"未知站"槽 0，让模型学会不依赖站点嵌入；推理时不在 known_stations 里的站走槽 0
+        "slot_dropout": 0.3,                   # future_only 通道整行清零的概率（与 cov_dropout 独立抽样；残差基准同步为 0）
         "amp_mod": {"p": 0.3, "lo": 0.6, "hi": 1.0},
         "schedule": {"lr": 5.0e-4, "weight_decay": 0.05, "batch_size": 64, "max_steps": 20000, "epochs_max": 20,
                      "warmup_steps": 500, "grad_clip": 1.0, "precision": "fp32", "logging_steps": 50,

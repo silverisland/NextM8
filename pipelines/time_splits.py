@@ -8,7 +8,9 @@
   前 H 步保证训练行标签不与块标签重叠，再往后的 L 步保证训练行 7 天上下文不含块的标签。
 校准段固定放在 test_start − purge 之前 cal_days 天；训练行到校准段前 purge 为止。
 验证块是全站共用的日历日期（同一天不会一站当训练、另一站当验证）；val_blocks: auto 时按各站实际数据自动放块
-（suggest_val_blocks），落盘后 split_resolved.yaml 记下实际用到的固定日期，原样传回即可复现。"""
+（suggest_val_blocks），落盘后 split_resolved.yaml 记下实际用到的固定日期，原样传回即可复现。
+val_only_stations：整站留出只进验证（模拟"没见过的站"）：该站除测试段外全部行都是验证行，不进训练；落在验证块里的行
+带块序号，其余行 split_block = −1。它们不参与自动放块。"""
 from __future__ import annotations
 
 import argparse
@@ -589,7 +591,8 @@ def _ts_array(col: pd.Series) -> np.ndarray:
 
 
 def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
-                 source=None, shift_days: int = 0, station_col=None, write: bool = True, extra: dict | None = None) -> dict:
+                 source=None, shift_days: int = 0, station_col=None, write: bool = True, extra: dict | None = None,
+                 val_only=()) -> dict:
     """按 plan（SplitPlan 或 StationSplitPlan）把原始行表落成 train/valid[/cal]/test.parquet（按时间稳定排序）
     + split_manifest.json。返回 manifest（含逐站覆盖 station_report）。按站切分时站标识列取 station_col，
     缺省自动认 station_id / station。write=False 只算不落盘（--dry-run）。
@@ -606,10 +609,21 @@ def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
     order = np.argsort(ts, kind="stable")
     df, ts, role, block = df.iloc[order].reset_index(drop=True), ts[order], role[order], block[order]
     station = None if station is None else station[order]
+    val_only = sorted({_station_key(x) for x in (val_only or ())})
+    if val_only:
+        if station is None:
+            raise ValueError("val_only_stations 需要站标识列：数据里没有 station_id / station，请用 station_col 指定")
+        missing = sorted(set(val_only) - set(station.tolist()))
+        if missing:
+            raise ValueError(f"val_only_stations 里这些站在数据里没有：{missing}")
+        m = np.isin(station, val_only) & (role != "test") & ~np.isnat(ts)
+        role[m] = "val"                          # 整站留出：块内行保留块序号，块外行 block = −1
     verify_rows(plan, ts, role, block, station)
     val_ts = [ts[(role == "val") & (block == i)] for i in range(len(plan.val_blocks))]
     ref = plan.reference if isinstance(plan, StationSplitPlan) else plan
     report = station_report(ts, station, role, block, plan) if station is not None else None
+    if report is not None:
+        report["val_only"] = report["station"].isin(val_only)
     if report is not None and not ref.allow_stations_without_val:
         bad = report[(report["val_days"] == 0) & ~report["train_only"]]
         if len(bad):
@@ -651,6 +665,7 @@ def write_splits(df: pd.DataFrame, plan, out_dir, ts_col: str = "timestamp_win",
                 "plan": plan.to_dict(), "counts": counts,
                 "blocks": blocks, "stations": stations, "n_nat": int(np.isnat(ts).sum()),
                 "inputs_disjoint_after": ref.inputs_disjoint_after, "coverage_note": ref.coverage_note,
+                "val_only_stations": val_only,
                 "station_report": [] if report is None else report.to_dict("records"), **(extra or {})}
     if write:
         (out / "split_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -796,7 +811,7 @@ def load_test_starts_file(path) -> dict:
     return {_station_key(k): str(v) for k, v in data.items()}
 
 
-def _resolved_yaml(plan, source_yaml, n_files: int, shift_days: int) -> str:
+def _resolved_yaml(plan, source_yaml, n_files: int, shift_days: int, val_only=()) -> str:
     """实际用到的固定切分配置：val_blocks / test_start 都是具体日期（已含 --shift-days），原样 --split-yaml 即可复现。"""
     d = plan.to_dict()
     ref = plan.reference if isinstance(plan, StationSplitPlan) else plan
@@ -809,6 +824,8 @@ def _resolved_yaml(plan, source_yaml, n_files: int, shift_days: int) -> str:
         out["train_only_stations"] = sorted(plan.train_only)
     if isinstance(plan, StationSplitPlan) and plan.no_test:
         out["stations_without_test"] = sorted(plan.no_test)
+    if val_only:
+        out["val_only_stations"] = sorted(val_only)
     head = (f"# 由 pipelines.time_splits 生成：源配置 {source_yaml}，数据 {n_files} 个文件"
             + (f"，已含 --shift-days {shift_days}" if shift_days else "") + "。\n"
             "# val_blocks / test_start 是这次实际用到的固定日期；原样 --split-yaml 本文件（不带 --test-parquets）即可复现同一切分。\n"
@@ -893,6 +910,18 @@ def main(argv=None) -> dict:
             print(f"[time_splits] 站 {s} 在 train_only_stations 里：只进训练")
         split = {**{k: v for k, v in split.items() if k != "min_station_days_for_val"},
                  "train_only_stations": sorted(set(explicit) | set(short))}
+    val_only = sorted({_station_key(x) for x in (split.get("val_only_stations") or [])})
+    if val_only:
+        if station is None:
+            raise ValueError("val_only_stations 需要站标识列（station_id / station），请用 --station-col 指定")
+        missing = sorted(set(val_only) - set(station.tolist()))
+        if missing:
+            raise ValueError(f"val_only_stations 里这些站在训练数据里没有：{missing}")
+        both = sorted(set(val_only) & set(split.get("train_only_stations") or []))
+        if both:
+            raise ValueError(f"这些站同时写在 val_only_stations 与 train_only_stations 里：{both}")
+        for s in val_only:
+            print(f"[time_splits] 站 {s} 在 val_only_stations 里：整站只进验证（模拟没见过的站），不进训练")
     train_only = set(split.get("train_only_stations") or [])
     if train_only and station is not None and set(station.tolist()) <= train_only:
         raise ValueError(f"所有站都被列为只进训练（train_only_stations / min_station_days_for_val={min_days}），"
@@ -909,8 +938,10 @@ def main(argv=None) -> dict:
             per, st_auto = {s: t0 for s in set(station.tolist())}, station
         else:
             per, st_auto = {"__all__": t0}, np.full(len(ts), "__all__")
-        keep_rows = ~np.isin(st_auto, sorted(train_only)) if train_only else np.ones(len(ts), bool)
-        blocks, notes = resolve_auto_blocks(ts[keep_rows], st_auto[keep_rows], per, split)   # 只进训练的站不参与放块
+        skip = sorted(train_only | set(val_only))
+        keep_rows = ~np.isin(st_auto, skip) if skip else np.ones(len(ts), bool)
+        per = {s: v for s, v in per.items() if s not in val_only}
+        blocks, notes = resolve_auto_blocks(ts[keep_rows], st_auto[keep_rows], per, split)   # 只进训练 / 整站留出的站不参与放块
         split = {**split, "val_blocks": blocks}
         print(f"[time_splits] val_blocks: auto → {blocks}")
         for n in notes:
@@ -921,7 +952,8 @@ def main(argv=None) -> dict:
     else:
         plan = SplitPlan.from_dict(split, shift_days=a.shift_days, L=L, H=H, step_min=step_min)
     man = write_splits(df, plan, a.out_dir, ts_col=a.ts_col, source=paths, shift_days=a.shift_days,
-                       station_col=a.station_col, write=not a.dry_run, extra={"ignored_test_only_stations": test_only})
+                       station_col=a.station_col, write=not a.dry_run, extra={"ignored_test_only_stations": test_only},
+                       val_only=val_only)
     c = man["counts"]
     print(f"[time_splits] train={c['train']} val={c['val']} cal={c.get('cal', 0)} test={c['test']} dropped={c['dropped']} "
           f"n_nat={man['n_nat']}" + (" （dry-run，未写文件）" if a.dry_run else f" → {a.out_dir}"))
@@ -929,7 +961,7 @@ def main(argv=None) -> dict:
         print(f"[time_splits] val block {b['index']}: [{b['start']}, {b['end']}) rows={b['rows']} months={b['months']}")
     if man["station_report"]:
         rep_df = pd.DataFrame(man["station_report"]).rename(columns={
-            "station": "站", "data_start": "数据起", "data_end": "数据止", "test_start": "测试起点", "val_blocks": "参加的块", "skipped_blocks": "跳过的块(测试太早)", "train_only": "只进训练",
+            "station": "站", "data_start": "数据起", "data_end": "数据止", "test_start": "测试起点", "val_blocks": "参加的块", "skipped_blocks": "跳过的块(测试太早)", "train_only": "只进训练", "val_only": "整站留出",
             "train_days": "训练天", "val_days": "验证天", "cal_days": "校准天", "dropped_days": "剔除天", "test_days": "测试天",
             "train_share": "训练占比", "val_share": "验证占比"})
         if not has_cal(plan):
@@ -940,7 +972,7 @@ def main(argv=None) -> dict:
         print(f"[time_splits] 提示：{man['coverage_note']}")
     if not a.dry_run:
         src = a.split_yaml or f"{a.m6_config} 的 finetune.split"
-        (Path(a.out_dir) / "split_resolved.yaml").write_text(_resolved_yaml(plan, src, len(paths), a.shift_days),
+        (Path(a.out_dir) / "split_resolved.yaml").write_text(_resolved_yaml(plan, src, len(paths), a.shift_days, val_only),
                                                              encoding="utf-8")
         print(f"[time_splits] 实际用到的固定切分配置 → {Path(a.out_dir) / 'split_resolved.yaml'}")
     return man

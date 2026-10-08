@@ -130,3 +130,23 @@ def test_all_variant_configs_load(small_cfg):
     assert len(files) >= 21
     tags = [load_config(f)["run"]["tag"] for f in files]
     assert len(set(tags)) == len(tags)
+
+
+def test_set_known_stations_changes_unseen_prediction_only(small_cfg, batch):
+    m = _model(small_cfg); m.eval()
+    with torch.no_grad():
+        a = m(batch["batch_dict"]).logits
+        ids = m.set_known_stations([1002])
+        b = m(batch["batch_dict"]).logits
+    assert ids == [1002] and m.config["dataset"]["known_stations"] == [1002]
+    sid = batch["batch_dict"]["station_id"].numpy().astype(int)
+    assert torch.equal(a[sid == 1002], b[sid == 1002])                        # 已见站不变
+    assert not torch.equal(a[sid == 1001], b[sid == 1001])                    # 未见站改走未知槽
+
+
+def test_no_station_emb_variant_ignores_known_list(small_cfg, batch):
+    cfg = {**small_cfg, "features": {"static": {"station_embedding": False}}}
+    m = build_model(model_name="m8", model_config=cfg); m.eval()
+    with torch.no_grad():
+        a = m(batch["batch_dict"]).logits; m.set_known_stations([1002]); b = m(batch["batch_dict"]).logits
+    assert torch.equal(a, b)

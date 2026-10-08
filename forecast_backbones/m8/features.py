@@ -180,6 +180,8 @@ class FeatureBuilder:
             raise ValueError(f"features.target_scale 须是 cap 或 recent_peak，得到 {self.target_scale!r}")
         self.n_static = 5 + (3 if self.static_cfg.get("context_stats", True) else 0)
         self.n_slots = int(self.static_cfg.get("n_station_slots", 4096)) if self.static_cfg.get("station_embedding", True) else 0
+        ks = ds.get("known_stations")
+        self.known_stations = None if not ks else np.array(sorted({int(s) for s in ks}), dtype=np.int64)
 
     # ------------------------------------------------------------------ 小工具
     def _scale(self, col: str) -> tuple[float, float]:
@@ -360,6 +362,12 @@ class FeatureBuilder:
             static[:, 6] = np.where(day_vis, y_vis, 0.0).sum(1) / cnt
             static[:, 7] = np.where(day_vis, k_nwp[:, :L], 0.0).sum(1) / cnt
         slot = (np.mod(sid, self.n_slots) + 1).astype(np.int64) if self.n_slots > 0 else np.zeros(B, np.int64)
+        if self.n_slots > 0:
+            if self.known_stations is not None:                                   # 名单外的站 → 未知站槽 0
+                slot = np.where(np.isin(sid, self.known_stations), slot, 0)
+            p_slot = float(self.cfg["train"].get("slot_dropout", 0.0))
+            if training and p_slot > 0:
+                slot = np.where(rng.random(B) < p_slot, 0, slot)
 
         # 监督目标：历史 = 真值（NaN 未观测；是否计损由 y_mask 通道决定）；未来 = 标签（给了才有）
         target = np.full((B, T), np.nan, np.float32)

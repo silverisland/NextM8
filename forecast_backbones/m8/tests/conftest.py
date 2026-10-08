@@ -66,11 +66,11 @@ def make_frame(n_days=3, stations=(1001, 1002), issue_every_min=60, seed=0, star
     return pd.DataFrame(rows)
 
 
-def write_splits(tmp_path, n_train_days=4, n_val_days=2, seed=0):
+def write_splits(tmp_path, n_train_days=4, n_val_days=2, seed=0, train_stations=(1001, 1002), val_stations=(1001, 1002)):
     """train/valid.parquet + split_manifest.json（与 pipelines.time_splits 产物同构的最小集）。"""
     d = Path(tmp_path) / "splits"; d.mkdir(parents=True, exist_ok=True)
-    tr = make_frame(n_days=n_train_days, issue_every_min=60, seed=seed, start="2025-06-08")
-    va = make_frame(n_days=n_val_days, issue_every_min=60, seed=seed + 1, start="2025-06-20")
+    tr = make_frame(n_days=n_train_days, stations=train_stations, issue_every_min=60, seed=seed, start="2025-06-08")
+    va = make_frame(n_days=n_val_days, stations=val_stations, issue_every_min=60, seed=seed + 1, start="2025-06-20")
     va["split_block"] = 0
     tr.to_parquet(d / "train.parquet", index=False); va.to_parquet(d / "valid.parquet", index=False)
     (d / "split_manifest.json").write_text(json.dumps({"generated_by": "pipelines.time_splits",
