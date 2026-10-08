@@ -196,6 +196,6 @@ python eval_shell/m6_station_script.py --checkpoint_dir runs/m6/<run_id> \
 不退回零样本或未校准；返回的模型全部参数 `requires_grad=False`、全部子模块 eval 态（dropout 关闭），推理在 `torch.no_grad()` 下跑；
 旧 run 目录里的 `station_routing.json` 不再读，全部站都用 LoRA；旧 run 没有 `model_config.yaml` 时用 `--config`（脚本为 `M6_CONFIG=`）给训练用的 yaml。单站推理与训练期验证同一条路
 （`_dataset_with_station_id` → `evaluate_model`），测试文件只有站名列时按 `station_meta` 转整数站号。指标、南网月表与 summary 走
-`eval_station_script` 的 `extract_summary` / `station_cap_from_df` / `NumpyJSONEncoder`，与 `m5_station_script.py` 相同。
+`eval_station_script` 的 `extract_summary` / `station_cap_from_df` / `NumpyJSONEncoder`，与 `eval_pretrain.py` 相同。
 
 辅助头（`finetune.loss.aux_nanwang_head`）、阶梯 5 物理协变量消融与消融簇、堆叠 → 计划 3；本计划不读这些键。

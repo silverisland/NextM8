@@ -1,0 +1,20 @@
+run:
+  model_name: m7
+model: {}
+dataset:
+  pv_col: observe_power
+patchtst_fm:
+  # 服务器本地权重目录（离线）：huggingface-cli download ibm-granite/granite-timeseries-patchtst-fm-r2 --local-dir <下行路径>
+  checkpoint: /data/tangqingang/granite-timeseries-patchtst-fm-r2
+  context_len: 672
+  pred_len: 192
+  eager_init: true
+  device: auto
+  per_core_batch_size: 64
+  # 与 M5 的 9 档对齐（须是模型 0.01~0.99 的子集）
+  quantile_levels: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+  return_quantiles: true
+  predict_quantile: null   # null=模型点预测（99 档分位积分的均值）；0.5=中位数
+  nan_policy: interp
+  make_positive: true
+  # 注意：PatchTST-FM 不支持协变量，没有 past_future_cols / past_only_cols
