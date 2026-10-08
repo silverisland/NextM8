@@ -27,6 +27,7 @@ CPU_THREADS=""
 OVERWRITE=0
 ALLOW_CPU=0
 TAG=""
+SEED=""
 VENV_PY="/home/ma-user/ts3/bin/python"
 PRE_CUDA_LD="/usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu"
 
@@ -44,6 +45,7 @@ usage() {
   --batch_size <n>         覆盖 train.schedule.batch_size（每张卡）
   --precision <fp32|bf16>  训练精度（默认 fp32；V100 不支持 bf16）
   --tag <name>             写进 reports/summary.csv 的变体名（默认取配置 run.tag）
+  --seed <n>               覆盖 run.seeds（模型初始化 + 数据顺序 + 增强随机数）
   --port <n>               多进程通信端口（默认 29700）
   --cpu_threads <n>        每个进程的 CPU 线程数
   --overwrite              产物目录已存在时删掉重训
@@ -63,6 +65,7 @@ while [ $# -gt 0 ]; do
     --batch_size)   BATCH_SIZE="$2";  shift 2 ;;
     --precision)    PRECISION="$2";   shift 2 ;;
     --tag)          TAG="$2";         shift 2 ;;
+    --seed)         SEED="$2";        shift 2 ;;
     --port)         PORT="$2";        shift 2 ;;
     --cpu_threads)  CPU_THREADS="$2"; shift 2 ;;
     --overwrite)    OVERWRITE=1;      shift   ;;
@@ -110,15 +113,16 @@ if [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
     echo "❌ 产物目录已存在且非空: ${RUN_DIR}（换 --run_id，或加 --overwrite）" >&2; exit 1; fi
 fi
 
-"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" <<'PYEOF'
+"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" <<'PYEOF'
 import sys, yaml, os
-src, dst, precision, batch_size, eval_every, tag = sys.argv[1:7]
+src, dst, precision, batch_size, eval_every, tag, seed = sys.argv[1:8]
 cfg = yaml.safe_load(open(src, encoding="utf-8")) or {}
 sch = cfg.setdefault("train", {}).setdefault("schedule", {})
 sch["precision"] = precision
 if batch_size: sch["batch_size"] = int(batch_size)
 if eval_every: sch["eval_every_steps"] = int(eval_every)
 cfg.setdefault("run", {})["tag"] = tag
+if seed != "": cfg["run"]["seeds"] = [int(seed)]
 yaml.safe_dump(cfg, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 meta = (cfg.get("dataset") or {}).get("station_meta", "forecast_backbones/m6/station_meta.csv")
 print(f"STATION_META={meta}")
@@ -129,7 +133,7 @@ if [ $RC -eq 3 ]; then echo "❌ dataset.station_meta 路径不存在（见上�
 elif [ $RC -ne 0 ]; then echo "❌ 生成运行时配置失败" >&2; rm -f "$TMP_CFG"; exit 1; fi
 
 echo "=============================================================="
-echo "M8 训练   tag=$TAG"
+echo "M8 训练   tag=$TAG${SEED:+   seed=$SEED}"
 echo "CONFIG     : $CONFIG  (运行时副本: $TMP_CFG)"
 echo "SPLITS_DIR : $SPLITS_DIR"
 echo "RUN_DIR    : $RUN_DIR"
