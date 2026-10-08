@@ -93,8 +93,9 @@ finetune:                              # 路线 B（计划 2）：LoRA 微调；
     purge_days: 2                      # 块前剔除训练行天数，须 ≥ H=192 步折算（2 天）
     embargo_days: 7                    # 块后额外剔除，块后共 purge+embargo = 9 天 = L+H
   early_stop:
-    metric: nanwang_after_pstar
+    metric: nanwang_after_pstar        # nanwang_after_pstar：南网短期 D+1（越高越好）；nrmse：提交曲线 192 步容量归一 RMSE%（越低越好）
     patience: 3                        # 按验证次数计
+    nrmse_issue_every_min: 60          # 仅 nrmse：每站每天推理起报时刻落在该分钟网格上的行（60 → 24 行；15 → 全部 96 行）
 calibration:
   enabled: false                       # 不做 conformal：不要校准段，早停按未校准分位上的点预测打分
   table_path: ${run.out_dir}/calibration.parquet

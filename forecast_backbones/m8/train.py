@@ -1,0 +1,279 @@
+# -*- coding: utf-8 -*-
+# forecast_backbones/m8/train.py
+"""M8 训练入口：
+  1. 读 pipelines.time_splits 落好的切分目录（train.parquet / valid.parquet / split_manifest.json；不需要 cal.parquet）
+  2. HF Trainer：损失在模型 forward 里（pinball，未来段 + CPM 掩码段，掩夜间/缺测）；预算 train.schedule.max_steps 个优化器步
+  3. EvalCallback：每 eval_every_steps 步在验证集上打分（nanwang_after_pstar：每站每天 10:00 前最晚一行 → 南网短期 D+1；
+     或 nrmse：整点起报行 → 192 步容量归一 RMSE%），patience 按验证次数计，最优权重存 model.safetensors（完整 state_dict）
+  4. 训后：加载最优权重 → 验证集推理 → result_val.parquet（默认只存整点起报行）→ reports/summary.csv、reports/station_table.csv
+多卡：accelerate launch / torchrun 起多进程，每进程各持一份模型吃不同的批；打分、存盘、报表只在主进程做。
+训练模型的构造必须从零起步：train.weights_path 改指向 out_dir 下从不写入的 .fresh/ 哨兵路径。"""
+from __future__ import annotations
+
+import argparse
+import functools
+import json
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from transformers import Trainer, TrainerCallback
+
+try:
+    from .config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override
+    from .transformer_trainer import evaluate_model, build_training_args
+    from .transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
+    from ..m6.train import _dataset_with_station_id, _check_presplit_dir
+    from ..m6.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler
+    from ..m6 import _dist
+except ImportError:
+    sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+    from forecast_backbones.m8.config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override
+    from forecast_backbones.m8.transformer_trainer import evaluate_model, build_training_args
+    from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
+    from forecast_backbones.m6.train import _dataset_with_station_id, _check_presplit_dir
+    from forecast_backbones.m6.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler
+    from forecast_backbones.m6 import _dist
+try:
+    from ...pipelines.transformer_dataset import UnifiedDataset
+    from ...pipelines.nanwang_metric import NanwangMetric
+except ImportError:
+    from pipelines.transformer_dataset import UnifiedDataset
+    from pipelines.nanwang_metric import NanwangMetric
+
+WEIGHTS_FILE, CONFIG_FILE = "model.safetensors", "model_config.yaml"
+EARLY_STOP_METRICS = {"nanwang_after_pstar": True, "nrmse": False}      # 指标 → 是否越高越好
+TABLE_COLS = ["station_id", "station", "accuracy_pct", "n_days"]
+
+
+# ------------------------------------------------------------------ 打分
+def _subset(ds, idx):
+    return torch.utils.data.Subset(ds, [int(i) for i in idx])
+
+
+def score_nanwang(model, ds_val, collate, cfg, res: pd.DataFrame | None = None) -> tuple[float, pd.DataFrame, pd.DataFrame]:
+    """每站每个起报日只推理 10:00 前最晚一行 → 南网短期 D+1 日准确率均值；返回 (均值, 逐站表, 结果表)。"""
+    ds_cfg = cfg["dataset"]
+    if res is None:
+        idx = scored_row_index(ds_val, str(ds_cfg["station_id_col"]), str(ds_cfg["ts_col"]))
+        if len(idx) == 0:
+            return float("nan"), pd.DataFrame(columns=TABLE_COLS), pd.DataFrame()
+        was = model.training
+        try:
+            res = evaluate_model(model, _subset(ds_val, idx), collate, cfg)
+        finally:
+            model.train(was)
+    if res.empty:
+        return float("nan"), pd.DataFrame(columns=TABLE_COLS), res
+    gccap = {model.station_meta.name(int(s)): float(c) for s, c in res.drop_duplicates("station_id")[["station_id", "cap"]].itertuples(index=False)}
+    sd = NanwangMetric().short_d1_daily(res, gccap)
+    name_to_id = {model.station_meta.name(int(s)): int(s) for s in res["station_id"].unique()}
+    if len(sd) == 0:
+        return float("nan"), pd.DataFrame(columns=TABLE_COLS), res
+    g = sd.groupby("station")["accuracy_pct"].agg(["mean", "count"]).reset_index()
+    table = pd.DataFrame({"station_id": g["station"].map(name_to_id).astype(int), "station": g["station"],
+                          "accuracy_pct": g["mean"].astype(float), "n_days": g["count"].astype(int)})
+    return float(sd["accuracy_pct"].mean()), table, res
+
+
+def nrmse_pct(res: pd.DataFrame) -> float:
+    if res.empty:
+        return float("nan")
+    y = np.stack(res["observe_power_future"].to_numpy()).astype(float)
+    p = np.stack(res["observe_power_predict"].to_numpy()).astype(float)
+    r = (y - p) / res["cap"].to_numpy(float)[:, None]
+    ok = np.isfinite(r)
+    return float(100.0 * np.sqrt(np.mean(r[ok] ** 2))) if ok.any() else float("nan")
+
+
+def score_nrmse(model, ds_val, collate, cfg, issue_every_min: int = 60) -> tuple[float, pd.DataFrame]:
+    idx = issue_grid_row_index(ds_val, str(cfg["dataset"]["ts_col"]), issue_every_min)
+    if len(idx) == 0:
+        return float("nan"), pd.DataFrame()
+    was = model.training
+    try:
+        res = evaluate_model(model, _subset(ds_val, idx), collate, cfg)
+    finally:
+        model.train(was)
+    return nrmse_pct(res), res
+
+
+# ------------------------------------------------------------------ 回调
+class EvalCallback(TrainerCallback):
+    def __init__(self, model, ds_val, collate, cfg, best_path, patience: int, log_path, eval_every_steps=None):
+        self.model, self.ds_val, self.collate, self.cfg = model, ds_val, collate, cfg
+        self.best_path, self.log_path, self.patience = Path(best_path), Path(log_path), int(patience)
+        self.eval_every_steps = int(eval_every_steps) if eval_every_steps else None
+        es = cfg["train"]["early_stop"]
+        self.metric = str(es.get("metric", "nanwang_after_pstar"))
+        if self.metric not in EARLY_STOP_METRICS:
+            raise ValueError(f"train.early_stop.metric={self.metric!r} 未知，可选 {sorted(EARLY_STOP_METRICS)}")
+        self.higher_better = EARLY_STOP_METRICS[self.metric]
+        self.issue_every_min = int(es.get("nrmse_issue_every_min", 60))
+        self.best = -np.inf if self.higher_better else np.inf
+        self.best_step, self.bad_evals, self.history = None, 0, []
+
+    def _score(self) -> float:
+        self.model._progress_desc = "[m8] 验证"
+        try:
+            if self.metric == "nrmse":
+                return score_nrmse(self.model, self.ds_val, self.collate, self.cfg, self.issue_every_min)[0]
+            return score_nanwang(self.model, self.ds_val, self.collate, self.cfg)[0]
+        finally:
+            self.model._progress_desc = None
+
+    def _record(self, step: int, epoch: float, score: float, loss: float | None) -> bool:
+        better = score > self.best if self.higher_better else score < self.best
+        if np.isfinite(score) and better:
+            self.best, self.best_step, self.bad_evals = float(score), int(step), 0
+            save_weights(self.model, self.best_path)
+        else:
+            self.bad_evals += 1
+        self.history.append({"step": int(step), "epoch": float(epoch), self.metric: float(score), "train_loss": loss,
+                             "best": self.best, "bad_evals": self.bad_evals, "time": time.time()})
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.write_text(json.dumps({"history": self.history, "best": self.best, "best_step": self.best_step,
+                                             "patience": self.patience, "metric": self.metric,
+                                             "higher_better": self.higher_better}, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[m8] step {step} (epoch {epoch:.3g}): {self.metric}={score:.4f} best={self.best:.4f}@step {self.best_step} "
+              f"bad={self.bad_evals}/{self.patience}", flush=True)
+        return self.bad_evals >= self.patience
+
+    def _evaluate(self, state, control):
+        loss = next((h["loss"] for h in reversed(state.log_history) if "loss" in h), None)
+        stop = self._record(int(state.global_step or 0), float(state.epoch or 0.0), self._score(), loss) if _dist.is_main() else False
+        if _dist.broadcast_from_main(stop) and control is not None:
+            control.should_training_stop = True
+
+    def on_step_end(self, args, state, control, **kwargs):
+        every = self.eval_every_steps
+        if every and (state.global_step % every == 0 or state.global_step >= state.max_steps):
+            self._evaluate(state, control)
+        return control
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if not self.eval_every_steps:
+            self._evaluate(state, control)
+        return control
+
+
+class _M8Trainer(Trainer):
+    def __init__(self, *a, sampling: str = "random", station_col: str = "station_id", ts_col: str = "timestamp_win", **kw):
+        super().__init__(*a, **kw)
+        self._sampling, self._station_col, self._ts_col = sampling, station_col, ts_col
+
+    def _get_train_sampler(self):
+        if self._sampling == "station_day":
+            return StationDaySampler(self.train_dataset, self._station_col, self._ts_col, seed=self.args.seed)
+        return super()._get_train_sampler()
+
+
+# ------------------------------------------------------------------ 数据
+def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir, reuse: bool = False):
+    d = _check_presplit_dir(splits_dir, need_cal=False)
+    man = json.loads((d / "split_manifest.json").read_text(encoding="utf-8"))
+    load = functools.partial(_dataset_with_station_id, cfg=cfg, station_meta=station_meta, scratch_dir=scratch_dir, reuse=reuse)
+    ds_train, ds_val = load([str(d / "train.parquet")]), load([str(d / "valid.parquet")])
+    if len(ds_train) == 0 or len(ds_val) == 0:
+        raise ValueError(f"{d} 的 train/valid 为空")
+    return ds_train, ds_val, man
+
+
+# ------------------------------------------------------------------ 主流程
+def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | None = None) -> dict:
+    if out_dir is not None:
+        config_path = deep_merge(raw_override(config_path), {"run": {"out_dir": str(out_dir)}})
+    cfg = load_config(config_path)
+    out = Path(cfg["run"]["out_dir"]); out.mkdir(parents=True, exist_ok=True)
+    if out_dir is not None:
+        # 调用方传了 out_dir 时报表目录跟着走（传入的若是已插值的 dict，eval.report_dir 里还是旧的 run.out_dir）
+        cfg["eval"]["report_dir"] = str(out / "reports")
+    report_dir = Path(cfg["eval"]["report_dir"]); report_dir.mkdir(parents=True, exist_ok=True)
+    sch = cfg["train"]["schedule"]
+    sampling = str(sch.get("sampling") or "random")
+    if sampling not in ("random", "station_day"):
+        raise ValueError(f"train.schedule.sampling={sampling!r} 不在 ('random', 'station_day')")
+    _check_presplit_dir(splits_dir, need_cal=False)
+    train_cfg = {**cfg, "train": {**cfg["train"], "weights_path": str(out / ".fresh" / WEIGHTS_FILE)}}
+    args = build_training_args(train_cfg, out, max_steps)
+    _ = args.device                        # 多进程时在这里建进程组、绑卡；须先于模型构造
+    if args.n_gpu > 1:
+        raise ValueError(f"单进程看到 {args.n_gpu} 张卡：HF 会退到 DataParallel，dict batch 不支持。多卡请用 accelerate launch / torchrun")
+    main = _dist.is_main()
+    model = TransformersAdaptedM8Model(train_cfg)
+    model.reseed(int(args.seed) * 1000 + _dist.rank())
+    model.to(args.device)
+    scratch = out / ".data"
+    station_col, ts_col = str(cfg["dataset"]["station_id_col"]), str(cfg["dataset"]["ts_col"])
+    if main:
+        loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=False)
+    _dist.barrier()
+    if not main:
+        loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=True)
+    ds_train, ds_val, man = loaded
+    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    eval_every = sch.get("eval_every_steps")
+    if main:
+        dump_config(deep_merge(DEFAULT_CFG, raw_override(config_path)), out / CONFIG_FILE)
+        (out / "split_manifest.json").write_text(json.dumps({"generated_by": "forecast_backbones.m8.train",
+            "splits_dir": str(Path(splits_dir).resolve()), "plan": man.get("plan"),
+            "counts": {"train": len(ds_train), "val": len(ds_val)}}, indent=2, ensure_ascii=False), encoding="utf-8")
+        world, bs = _dist.world_size(), int(args.per_device_train_batch_size)
+        budget = f"{args.max_steps} 步" if args.max_steps > 0 else f"不限步数（{sch['epochs_max']} 个 epoch）"
+        print(f"[m8] tag={tag or cfg['run'].get('tag')} params={model.n_params():,} channels={len(model.fe.channel_names)} "
+              f"blocks={cfg['model']['blocks']} layout={cfg['model'].get('layout', 'fused')} head={cfg['model'].get('head_mode', 'step_cov')}")
+        print(f"[m8] train={len(ds_train)} val={len(ds_val)} rows；{world} 个进程 × 每卡 batch {bs}；预算 {budget}；"
+              f"验证{f'每 {eval_every} 步' if eval_every else '每个 epoch 末'}，早停指标 {cfg['train']['early_stop']['metric']}，"
+              f"patience={cfg['train']['early_stop']['patience']}；采样 {sampling}；device={args.device}", flush=True)
+    best_path = out / WEIGHTS_FILE
+    cb = EvalCallback(model, ds_val, collate, train_cfg, best_path=best_path, patience=int(cfg["train"]["early_stop"]["patience"]),
+                      log_path=out / "train_log.json", eval_every_steps=eval_every)
+    model.train()
+    trainer = _M8Trainer(model=model, args=args, data_collator=collate, train_dataset=ds_train, callbacks=[cb],
+                         sampling=sampling, station_col=station_col, ts_col=ts_col)
+    t0 = time.time()
+    trainer.train()
+    if not main:
+        return {}
+    if cb.best_step is None or not best_path.exists():
+        raise ValueError(f"训练全程没有产出可用的最优权重：早停指标 {cb.metric} 在验证集上自始至终非有限，{best_path} 不存在。"
+                         f"请检查验证集是否覆盖完整天、station_meta 是否填好。")
+    load_weights(model, best_path)
+    model.eval()
+    # 终评：南网 D+1（10:00 行）+ nrmse（整点行）；result_val 默认存整点行
+    nw_score, station_tab, _ = score_nanwang(model, ds_val, collate, train_cfg)
+    nr, res_hourly = score_nrmse(model, ds_val, collate, train_cfg, int(cfg["train"]["early_stop"].get("nrmse_issue_every_min", 60)))
+    res_hourly.to_parquet(out / "result_val.parquet", index=False)
+    summary = pd.DataFrame([{
+        "tag": tag or cfg["run"].get("tag") or out.name, "nanwang_short_D+1": nw_score, "nrmse_pct": nr,
+        "best_step": cb.best_step, "n_evals": len(cb.history), "train_minutes": (time.time() - t0) / 60.0,
+        "params": model.n_params(), "blocks": "+".join(cfg["model"]["blocks"]) or "none",
+        "layout": cfg["model"].get("layout", "fused"), "head_mode": cfg["model"].get("head_mode", "step_cov"),
+        "patch_len": cfg["model"]["patch_len"], "d_model": cfg["model"]["d_model"],
+        "target_scale": cfg["features"].get("target_scale", "cap"), "cpm": cfg["train"]["cpm"]["enabled"],
+        "cov_dropout": cfg["train"].get("cov_dropout", 0.0),
+        "future_only": "+".join(d["col"] for d in cfg["features"].get("future_only", [])) or "",
+        "residual": cfg["features"].get("residual_base_col") or "",
+        "n_val_rows": len(ds_val), "n_train_rows": len(ds_train)}])
+    summary.to_csv(report_dir / "summary.csv", index=False)
+    station_tab.to_csv(report_dir / "station_table.csv", index=False)
+    log = json.loads((out / "train_log.json").read_text(encoding="utf-8"))
+    log["final"] = summary.to_dict("records")[0]
+    (out / "train_log.json").write_text(json.dumps(log, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    print(summary.to_string(index=False)); print(station_tab.to_string(index=False))
+    print(f"[m8] 产物：{best_path} / {out / CONFIG_FILE} / {out / 'result_val.parquet'} / {report_dir}")
+    return {"summary": summary, "station_table": station_tab, "history": cb.history, "best": cb.best}
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="M8 PVRex 训练")
+    ap.add_argument("--config", default="forecast_backbones/m8/config/configs.yaml")
+    ap.add_argument("--splits-dir", required=True, help="pipelines.time_splits 落好的目录（train/valid.parquet + split_manifest.json）")
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--max-steps", type=int, default=None, help="覆盖 train.schedule.max_steps；0 = 不限步数（按 epochs_max）")
+    ap.add_argument("--tag", default=None, help="写进 reports/summary.csv 的变体名")
+    a = ap.parse_args()
+    train_m8(a.config, a.splits_dir, out_dir=a.out, max_steps=a.max_steps, tag=a.tag)

@@ -1,0 +1,3 @@
+# A2 骨干：sLSTM ×4（TiRex 式递推）
+run: {tag: a2_slstm, out_dir: runs/m8/a2_slstm}
+model: {blocks: [slstm, slstm, slstm, slstm]}

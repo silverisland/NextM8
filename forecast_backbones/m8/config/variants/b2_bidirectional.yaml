@@ -1,0 +1,3 @@
+# B2 协变量通路：双向混合（预报时刻之后的 NWP 也可见）
+run: {tag: b2_bidirectional, out_dir: runs/m8/b2_bidirectional}
+model: {bidirectional: true}

@@ -1,0 +1,76 @@
+# forecast_backbones/m8/config/configs.yaml —— M8 "PVRex" 默认配置（train_script.py 按 <模型目录>/config/configs.yaml 自动定位）
+# 变体配置见 config/variants/*.yaml；只需覆盖与本文件不同的字段（其余取 config.py 的 DEFAULT_CFG）。
+run:
+  model_name: m8
+  tag: hybrid_default                  # 写进 reports/summary.csv，批量对比用
+  seeds: [0]
+  out_dir: runs/m8_baseline
+dataset:
+  pv_col: observe_power
+  label_col: observe_power_future
+  ts_col: timestamp_win
+  station_id_col: station_id
+  cap_col: cap_power_on
+  station_meta: forecast_backbones/m6/station_meta.csv    # 与 m6 共用；训练前填真实站坐标
+  tz: Asia/Shanghai
+  step_min: 15
+  context_len: 672
+  pred_len: 192
+features:
+  past_future:                         # (历史列, 未来列)；缺列只提示一次、通道置 0
+    - [general_ghi,   general_ghi_predict]
+    - [general_temp,  general_temp_predict]
+    - [GHI_solargis,  ghi_solargis_predict]
+    - [temp_solargis, temp_solargis_predict]
+  past_only: []
+  # 只有未来段的"提示"通道（如 TimesFM 单变量预测）：历史段恒 0；scale=target 按每行目标尺度归一并随幅度调制，fixed 用 scales 表
+  future_only: []                    # 例：[{col: timesfm_predict, scale: target}]
+  residual_base_col: null            # 残差学习：输出 = 该列（归一后）+ 网络输出；须是 future_only 里 scale=target 的列
+  nwp_members: {enabled: false, cols: [SSRD_pos_1, SSRD_pos_2, SSRD_pos_3, SSRD_pos_4, SSRD_pos_5, SSRD_pos_6, SSRD_pos_7, SSRD_pos_8, SSRD_pos_9], future_suffix: _predict}
+  scales: {ghi: [0.0, 1000.0], ssrd: [0.0, 1000.0], temp: [15.0, 15.0], t2m: [15.0, 15.0], default: [0.0, 1.0]}
+  clear_sky_index_col: general_ghi_predict
+  target_scale: cap                    # cap | recent_peak
+  derived: {solar: true, time_encoding: true, nwp_resid: true}
+  static: {station_embedding: true, n_station_slots: 4096, context_stats: true}
+model:
+  layout: fused                        # fused | split
+  head_mode: step_cov                  # step_cov | token
+  patch_len: 16
+  d_model: 256
+  n_heads: 4
+  d_ff: 1024
+  blocks: [conv, deltanet, conv, deltanet]   # conv | deltanet | slstm | attention；[] = 无混合器
+  dropout: 0.1
+  bidirectional: false
+  short_conv_kernel: 4
+  deltanet_gated: true
+  head_hidden: 256
+  pos_in_patch_dim: 32
+  quantiles: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+train:
+  cpm: {enabled: true, p_row: 0.5, min_frac: 0.05, max_frac: 0.25, max_runs: 3}
+  cov_dropout: 0.1
+  hint_dropout: 0.3                  # future_only 通道整行清零概率（与 cov_dropout 独立；残差基准同步置 0）
+  amp_mod: {p: 0.3, lo: 0.6, hi: 1.0}
+  schedule:
+    lr: 5.0e-4
+    weight_decay: 0.05
+    batch_size: 64                     # 每张卡
+    max_steps: 20000                   # 优化器步数预算；null = 按 epochs_max
+    epochs_max: 20
+    warmup_steps: 500
+    grad_clip: 1.0
+    precision: fp32                    # V100 用 fp32；A100/H100 可 bf16
+    logging_steps: 50
+    eval_every_steps: 500
+    sampling: random                   # random | station_day
+    progress_bar: true
+    num_workers: 0
+  early_stop: {metric: nanwang_after_pstar, patience: 5, nrmse_issue_every_min: 60}
+  weights_path: ${run.out_dir}/model.safetensors
+decision:
+  physics: {night_zero: true, clear_sky_cap_ratio: 1.05, capacity_cap: true}
+  point: {default: median, by_step: [], floor_ratio: 0.2, tau_grid_step: 0.005, tail: flat, shrink_factor: null}
+eval:
+  batch_size: 256
+  report_dir: ${run.out_dir}/reports

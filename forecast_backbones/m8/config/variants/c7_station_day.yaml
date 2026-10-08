@@ -1,0 +1,3 @@
+# C7 采样：每个（站, 起报日）等概率抽训练行
+run: {tag: c7_station_day, out_dir: runs/m8/c7_station_day}
+train: {schedule: {sampling: station_day}}

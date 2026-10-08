@@ -48,6 +48,10 @@ def build_train_args(MODEL_NAME, model_config):
         from forecast_backbones.m6.transformer_trainer import M6_build_training_args
         training_args = M6_build_training_args(model_config, result_dir = RUN_PATH)
         device = (model_config.get("timesfm3") or {}).get("device", "auto")
+    elif MODEL_NAME == "m8":
+        from forecast_backbones.m8.transformer_trainer import M8_build_training_args
+        training_args = M8_build_training_args(model_config, result_dir = RUN_PATH)
+        device = str(training_args.device)
     elif MODEL_NAME == "mW":
         from weather_fusion.mW.transformer_trainer import mW_build_training_args
         training_args = mW_build_training_args(model_config, result_dir = RUN_PATH)
@@ -180,6 +184,13 @@ if __name__ == '__main__':
         splits_dir = DATASET_PATH if data_path_source == "dataset directory" else train_path.parent
         print(f"[m6] train_m6(config={MODEL_CONFIG_PATH}, splits_dir={splits_dir}, out_dir={RUN_PATH})")
         train_m6(MODEL_CONFIG_PATH, splits_dir=splits_dir, out_dir=RUN_PATH)
+        raise SystemExit(0)
+    # ======================= M8：同 M6，自带训练入口（验证集早停 + 存最优 + 报表），不拆进 train_model ========================
+    if MODEL_NAME == "m8":
+        from forecast_backbones.m8.train import train_m8
+        splits_dir = DATASET_PATH if data_path_source == "dataset directory" else train_path.parent
+        print(f"[m8] train_m8(config={MODEL_CONFIG_PATH}, splits_dir={splits_dir}, out_dir={RUN_PATH})")
+        train_m8(MODEL_CONFIG_PATH, splits_dir=splits_dir, out_dir=RUN_PATH)
         raise SystemExit(0)
 
     model = build_model(model_name = MODEL_NAME, model_config = model_config)

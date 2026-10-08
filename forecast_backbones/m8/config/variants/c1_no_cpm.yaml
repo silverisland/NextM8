@@ -1,0 +1,3 @@
+# C1 配方消融：关 CPM、关协变量 dropout、关幅度调制
+run: {tag: c1_no_cpm, out_dir: runs/m8/c1_no_cpm}
+train: {cpm: {enabled: false}, cov_dropout: 0.0, amp_mod: {p: 0.0}}
