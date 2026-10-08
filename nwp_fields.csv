@@ -1,0 +1,371 @@
+﻿数据源,字段名,变量组,层次类型,层次值,原始说明,标准中文名,英文名,常见单位,光伏相关度,备注
+EC,pv_hl_1000,pv,等压面,1000 hPa,位势涡度,1000 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_950,pv,等压面,950 hPa,位势涡度,950 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_925,pv,等压面,925 hPa,位势涡度,925 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_900,pv,等压面,900 hPa,位势涡度,900 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_850,pv,等压面,850 hPa,位势涡度,850 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_800,pv,等压面,800 hPa,位势涡度,800 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_700,pv,等压面,700 hPa,位势涡度,700 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_600,pv,等压面,600 hPa,位势涡度,600 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_500,pv,等压面,500 hPa,位势涡度,500 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,pv_hl_200,pv,等压面,200 hPa,位势涡度,200 hPa 位势涡度,Potential vorticity,K·m²·kg⁻¹·s⁻¹,低,
+EC,q_hl_1000,q,等压面,1000 hPa,绝对湿度,1000 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_950,q,等压面,950 hPa,绝对湿度,950 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_925,q,等压面,925 hPa,绝对湿度,925 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_900,q,等压面,900 hPa,绝对湿度,900 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_850,q,等压面,850 hPa,绝对湿度,850 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_800,q,等压面,800 hPa,绝对湿度,800 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_700,q,等压面,700 hPa,绝对湿度,700 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_600,q,等压面,600 hPa,绝对湿度,600 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_500,q,等压面,500 hPa,绝对湿度,500 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,q_hl_200,q,等压面,200 hPa,绝对湿度,200 hPa 比湿,Specific humidity,kg/kg,低,原说明写“绝对湿度”，ECMWF 的 q 实为比湿（单位 kg/kg）
+EC,w_hl_1000,w,等压面,1000 hPa,垂直速度,1000 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_950,w,等压面,950 hPa,垂直速度,950 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_925,w,等压面,925 hPa,垂直速度,925 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_900,w,等压面,900 hPa,垂直速度,900 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_850,w,等压面,850 hPa,垂直速度,850 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_800,w,等压面,800 hPa,垂直速度,800 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_700,w,等压面,700 hPa,垂直速度,700 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_600,w,等压面,600 hPa,垂直速度,600 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_500,w,等压面,500 hPa,垂直速度,500 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,w_hl_200,w,等压面,200 hPa,垂直速度,200 hPa 垂直速度,Vertical velocity (omega),Pa/s,低,气压坐标垂直速度，负值表示上升运动
+EC,tem_hl_1000,tem,等压面,1000 hPa,温度,1000 hPa 温度,Temperature,K,低,
+EC,tem_hl_950,tem,等压面,950 hPa,温度,950 hPa 温度,Temperature,K,低,
+EC,tem_hl_925,tem,等压面,925 hPa,温度,925 hPa 温度,Temperature,K,低,
+EC,tem_hl_900,tem,等压面,900 hPa,温度,900 hPa 温度,Temperature,K,低,
+EC,tem_hl_850,tem,等压面,850 hPa,温度,850 hPa 温度,Temperature,K,低,
+EC,tem_hl_800,tem,等压面,800 hPa,温度,800 hPa 温度,Temperature,K,低,
+EC,tem_hl_700,tem,等压面,700 hPa,温度,700 hPa 温度,Temperature,K,低,
+EC,tem_hl_600,tem,等压面,600 hPa,温度,600 hPa 温度,Temperature,K,低,
+EC,tem_hl_500,tem,等压面,500 hPa,温度,500 hPa 温度,Temperature,K,低,
+EC,tem_hl_200,tem,等压面,200 hPa,温度,200 hPa 温度,Temperature,K,低,
+EC,rh_hl_1000,rh,等压面,1000 hPa,相对湿度,1000 hPa 相对湿度,Relative humidity,%,中,
+EC,rh_hl_950,rh,等压面,950 hPa,相对湿度,950 hPa 相对湿度,Relative humidity,%,中,
+EC,rh_hl_925,rh,等压面,925 hPa,相对湿度,925 hPa 相对湿度,Relative humidity,%,中,
+EC,rh_hl_900,rh,等压面,900 hPa,相对湿度,900 hPa 相对湿度,Relative humidity,%,中,
+EC,rh_hl_850,rh,等压面,850 hPa,相对湿度,850 hPa 相对湿度,Relative humidity,%,中,
+EC,rh_hl_800,rh,等压面,800 hPa,相对湿度,800 hPa 相对湿度,Relative humidity,%,中,
+EC,rh_hl_700,rh,等压面,700 hPa,相对湿度,700 hPa 相对湿度,Relative humidity,%,中,
+EC,rh_hl_600,rh,等压面,600 hPa,相对湿度,600 hPa 相对湿度,Relative humidity,%,低,
+EC,rh_hl_500,rh,等压面,500 hPa,相对湿度,500 hPa 相对湿度,Relative humidity,%,低,
+EC,rh_hl_200,rh,等压面,200 hPa,相对湿度,200 hPa 相对湿度,Relative humidity,%,低,
+EC,clwc_hl_1000,clwc,等压面,1000 hPa,云层液态水含量,1000 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,高,
+EC,clwc_hl_950,clwc,等压面,950 hPa,云层液态水含量,950 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,高,
+EC,clwc_hl_925,clwc,等压面,925 hPa,云层液态水含量,925 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,高,
+EC,clwc_hl_900,clwc,等压面,900 hPa,云层液态水含量,900 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,高,
+EC,clwc_hl_850,clwc,等压面,850 hPa,云层液态水含量,850 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,高,
+EC,clwc_hl_800,clwc,等压面,800 hPa,云层液态水含量,800 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,高,
+EC,clwc_hl_700,clwc,等压面,700 hPa,云层液态水含量,700 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,高,
+EC,clwc_hl_600,clwc,等压面,600 hPa,云层液态水含量,600 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,中,
+EC,clwc_hl_500,clwc,等压面,500 hPa,云层液态水含量,500 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,中,
+EC,clwc_hl_200,clwc,等压面,200 hPa,云层液态水含量,200 hPa 云液态水含量,Specific cloud liquid water content,kg/kg,中,
+EC,div_hl_1000,div,等压面,1000 hPa,散度,1000 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_950,div,等压面,950 hPa,散度,950 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_925,div,等压面,925 hPa,散度,925 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_900,div,等压面,900 hPa,散度,900 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_850,div,等压面,850 hPa,散度,850 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_800,div,等压面,800 hPa,散度,800 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_700,div,等压面,700 hPa,散度,700 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_600,div,等压面,600 hPa,散度,600 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_500,div,等压面,500 hPa,散度,500 hPa 散度,Divergence,s⁻¹,低,
+EC,div_hl_200,div,等压面,200 hPa,散度,200 hPa 散度,Divergence,s⁻¹,低,
+EC,hgpm_hl_1000,hgpm,等压面,1000 hPa,位势高度,1000 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_950,hgpm,等压面,950 hPa,位势高度,950 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_925,hgpm,等压面,925 hPa,位势高度,925 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_900,hgpm,等压面,900 hPa,位势高度,900 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_850,hgpm,等压面,850 hPa,位势高度,850 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_800,hgpm,等压面,800 hPa,位势高度,800 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_700,hgpm,等压面,700 hPa,位势高度,700 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_600,hgpm,等压面,600 hPa,位势高度,600 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_500,hgpm,等压面,500 hPa,位势高度,500 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,hgpm_hl_200,hgpm,等压面,200 hPa,位势高度,200 hPa 位势高度,Geopotential height,gpm,低,由位势 z 除以 9.80665 得到
+EC,u_hl_1000,u,等压面,1000 hPa,1000hPa层U向风,1000 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_950,u,等压面,950 hPa,,950 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_925,u,等压面,925 hPa,,925 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_900,u,等压面,900 hPa,,900 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_850,u,等压面,850 hPa,,850 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_800,u,等压面,800 hPa,,800 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_700,u,等压面,700 hPa,,700 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_600,u,等压面,600 hPa,,600 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_500,u,等压面,500 hPa,,500 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,u_hl_200,u,等压面,200 hPa,,200 hPa U 向风（东西分量）,U component of wind,m/s,低,
+EC,v_hl_1000,v,等压面,1000 hPa,1000hPa层V向风,1000 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_950,v,等压面,950 hPa,,950 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_925,v,等压面,925 hPa,,925 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_900,v,等压面,900 hPa,,900 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_850,v,等压面,850 hPa,,850 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_800,v,等压面,800 hPa,,800 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_700,v,等压面,700 hPa,,700 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_600,v,等压面,600 hPa,,600 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_500,v,等压面,500 hPa,,500 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,v_hl_200,v,等压面,200 hPa,,200 hPa V 向风（南北分量）,V component of wind,m/s,低,
+EC,sp,sp,地面/单层,,气压,地表气压,Surface pressure,Pa,低,
+EC,ssrd,ssrd,地面/单层,,地表热辐射,地表向下短波辐射（总辐照）,Surface solar radiation downwards,J/m²（自起报时刻累积）,高,原说明“地表热辐射”有误，ssrd 是向下短波太阳辐射，即 GHI。ECMWF 原始值是自起报时刻起的累积量，要相邻时次差分再除以秒数才得到 W/m²
+EC,u10,u10,地面/单层,,10米U风,10 m U 向风,10 metre U wind component,m/s,低,
+EC,u100,u100,地面/单层,,100米U风,100 m U 向风,100 metre U wind component,m/s,低,
+EC,t2m,t2m,地面/单层,,2米气温K,2 m 气温,2 metre temperature,K,中,影响组件温度和转换效率
+EC,td2,td2,地面/单层,,2米露点气温K,2 m 露点温度,2 metre dewpoint temperature,K,低,ECMWF 标准简称为 d2m
+EC,v10,v10,地面/单层,,10米V风,10 m V 向风,10 metre V wind component,m/s,低,
+EC,v100,v100,地面/单层,,100米V风,100 m V 向风,100 metre V wind component,m/s,低,
+EC,fdir,fdir,地面/单层,,地表太阳能总直射,地表直接辐射（水平面，全天空）,Total sky direct solar radiation at surface,J/m²（自起报时刻累积）,高,水平面上的直接辐射。累积量，需要差分；用 ssrd − fdir 可以近似得到散射辐射
+EC,u_hl_118,u_model,模式层（混合 σ-p）,第 118 层,混合层118sigma层U向风,模式第 118 层 U 向风,U component of wind on model level 118,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；离地约 1 km；每层实际高度随地面气压变化
+EC,u_hl_119,u_model,模式层（混合 σ-p）,第 119 层,,模式第 119 层 U 向风,U component of wind on model level 119,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_120,u_model,模式层（混合 σ-p）,第 120 层,,模式第 120 层 U 向风,U component of wind on model level 120,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_121,u_model,模式层（混合 σ-p）,第 121 层,,模式第 121 层 U 向风,U component of wind on model level 121,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_122,u_model,模式层（混合 σ-p）,第 122 层,,模式第 122 层 U 向风,U component of wind on model level 122,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_123,u_model,模式层（混合 σ-p）,第 123 层,,模式第 123 层 U 向风,U component of wind on model level 123,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_124,u_model,模式层（混合 σ-p）,第 124 层,,模式第 124 层 U 向风,U component of wind on model level 124,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_125,u_model,模式层（混合 σ-p）,第 125 层,,模式第 125 层 U 向风,U component of wind on model level 125,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_126,u_model,模式层（混合 σ-p）,第 126 层,,模式第 126 层 U 向风,U component of wind on model level 126,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_127,u_model,模式层（混合 σ-p）,第 127 层,,模式第 127 层 U 向风,U component of wind on model level 127,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_128,u_model,模式层（混合 σ-p）,第 128 层,,模式第 128 层 U 向风,U component of wind on model level 128,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_129,u_model,模式层（混合 σ-p）,第 129 层,,模式第 129 层 U 向风,U component of wind on model level 129,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_130,u_model,模式层（混合 σ-p）,第 130 层,,模式第 130 层 U 向风,U component of wind on model level 130,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_131,u_model,模式层（混合 σ-p）,第 131 层,,模式第 131 层 U 向风,U component of wind on model level 131,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_132,u_model,模式层（混合 σ-p）,第 132 层,,模式第 132 层 U 向风,U component of wind on model level 132,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_133,u_model,模式层（混合 σ-p）,第 133 层,,模式第 133 层 U 向风,U component of wind on model level 133,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_134,u_model,模式层（混合 σ-p）,第 134 层,,模式第 134 层 U 向风,U component of wind on model level 134,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_135,u_model,模式层（混合 σ-p）,第 135 层,,模式第 135 层 U 向风,U component of wind on model level 135,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_136,u_model,模式层（混合 σ-p）,第 136 层,,模式第 136 层 U 向风,U component of wind on model level 136,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,u_hl_137,u_model,模式层（混合 σ-p）,第 137 层,,模式第 137 层 U 向风,U component of wind on model level 137,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；L137 最底层，离地约 10 m；每层实际高度随地面气压变化
+EC,v_hl_118,v_model,模式层（混合 σ-p）,第 118 层,混合层118sigma层V向风,模式第 118 层 V 向风,V component of wind on model level 118,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；离地约 1 km；每层实际高度随地面气压变化
+EC,v_hl_119,v_model,模式层（混合 σ-p）,第 119 层,,模式第 119 层 V 向风,V component of wind on model level 119,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_120,v_model,模式层（混合 σ-p）,第 120 层,,模式第 120 层 V 向风,V component of wind on model level 120,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_121,v_model,模式层（混合 σ-p）,第 121 层,,模式第 121 层 V 向风,V component of wind on model level 121,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_122,v_model,模式层（混合 σ-p）,第 122 层,,模式第 122 层 V 向风,V component of wind on model level 122,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_123,v_model,模式层（混合 σ-p）,第 123 层,,模式第 123 层 V 向风,V component of wind on model level 123,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_124,v_model,模式层（混合 σ-p）,第 124 层,,模式第 124 层 V 向风,V component of wind on model level 124,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_125,v_model,模式层（混合 σ-p）,第 125 层,,模式第 125 层 V 向风,V component of wind on model level 125,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_126,v_model,模式层（混合 σ-p）,第 126 层,,模式第 126 层 V 向风,V component of wind on model level 126,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_127,v_model,模式层（混合 σ-p）,第 127 层,,模式第 127 层 V 向风,V component of wind on model level 127,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_128,v_model,模式层（混合 σ-p）,第 128 层,,模式第 128 层 V 向风,V component of wind on model level 128,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_129,v_model,模式层（混合 σ-p）,第 129 层,,模式第 129 层 V 向风,V component of wind on model level 129,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_130,v_model,模式层（混合 σ-p）,第 130 层,,模式第 130 层 V 向风,V component of wind on model level 130,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_131,v_model,模式层（混合 σ-p）,第 131 层,,模式第 131 层 V 向风,V component of wind on model level 131,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_132,v_model,模式层（混合 σ-p）,第 132 层,,模式第 132 层 V 向风,V component of wind on model level 132,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_133,v_model,模式层（混合 σ-p）,第 133 层,,模式第 133 层 V 向风,V component of wind on model level 133,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_134,v_model,模式层（混合 σ-p）,第 134 层,,模式第 134 层 V 向风,V component of wind on model level 134,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_135,v_model,模式层（混合 σ-p）,第 135 层,,模式第 135 层 V 向风,V component of wind on model level 135,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_136,v_model,模式层（混合 σ-p）,第 136 层,,模式第 136 层 V 向风,V component of wind on model level 136,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；编号越大越靠近地面；每层实际高度随地面气压变化
+EC,v_hl_137,v_model,模式层（混合 σ-p）,第 137 层,,模式第 137 层 V 向风,V component of wind on model level 137,m/s,低,ECMWF L137 混合 σ-压力坐标（原表写的“sigma层”不准确）；L137 最底层，离地约 10 m；每层实际高度随地面气压变化
+EC,ro,ro,地面/单层,,地表及地下总径流,总径流,Runoff,m（累积）,低,
+EC,ssro,ssro,地面/单层,,地下径流,地下径流,Sub-surface runoff,m（累积）,低,
+EC,sro,sro,地面/单层,,地表径流,地表径流,Surface runoff,m（累积）,低,
+EC,sr_15min_xr,sr_15min_xr,地面/单层,,,15 分钟太阳辐射（数据商自定义字段，推测）,"15-min solar radiation (vendor-derived, inferred)",W/m²（推测）,高,不是 ECMWF 标准参数。推测是数据商由 ssrd 差分并插值到 15 分钟的辐照，xr 含义不明，需要向数据商确认
+EC,snow_depth,snow_depth,地面/单层,,积雪,积雪深度,Snow depth,m 水当量,低,ECMWF 标准简称为 sd
+EC,lsp,lsp,地面/单层,,,大尺度降水,Large-scale precipitation,m（累积）,低,
+EC,cp,cp,地面/单层,,,对流性降水,Convective precipitation,m（累积）,中,对流云常伴随辐照骤降
+EC,snow,snow,地面/单层,,,降雪量（推测）,"Snowfall (inferred, ECMWF sf)",m 水当量（累积）,低,字段名有歧义，推测对应 ECMWF 的 sf，需要确认
+EC,msl,msl,地面/单层,,,海平面气压,Mean sea level pressure,Pa,低,
+EC,tcc,tcc,地面/单层,,总云量,总云量,Total cloud cover,0–1,高,
+EC,lsm,lsm,地面/单层,,,海陆掩膜,Land-sea mask,0–1,低,静态字段，1 为陆地
+EC,lcc,lcc,地面/单层,,低云量,低云量,Low cloud cover,0–1,高,
+EC,mcc,mcc,地面/单层,,中云量,中云量,Medium cloud cover,0–1,高,
+EC,hcc,hcc,地面/单层,,高云量,高云量,High cloud cover,0–1,高,
+EC,tp,tp,地面/单层,,,总降水量,Total precipitation,m（累积）,中,等于 lsp + cp，需要差分
+EC,skt,skt,地面/单层,,地表气温,地表皮肤温度,Skin temperature,K,中,原说明“地表气温”不准确，skt 是地表皮肤温度，不是气温
+EC,fal,fal,地面/单层,,,预报地表反照率,Forecast albedo,0–1,中,影响双面组件背面的入射辐射
+EC,vis,vis,地面/单层,,能见度,能见度,Visibility,m,中,雾、霾对辐照有衰减
+EC,cdir,cdir,地面/单层,,,晴空地表直接辐射,Clear-sky direct solar radiation at surface,J/m²（累积）,高,晴空理论值，可以和 fdir 构造晴空指数
+EC,capes,capes,地面/单层,,,对流有效位能切变,CAPE shear,m²/s²,低,
+EC,fzra,fzra,地面/单层,,,冻雨累积量,Accumulated freezing rain,m（累积）,低,
+EC,u200,u200,地面/单层,,,200 m U 向风,200 metre U wind component,m/s,低,离地 200 m，注意和 200 hPa 的 u_hl_200 区分
+EC,v200,v200,地面/单层,,,200 m V 向风,200 metre V wind component,m/s,低,离地 200 m，注意和 200 hPa 的 v_hl_200 区分
+EC,ptype,ptype,地面/单层,,降水相态,降水相态,Precipitation type,代码,低,0 无降水，1 雨，3 冻雨，5 雪，6 湿雪，7 雨夹雪，8 冰粒
+EC,stl1,stl1,地面/单层,,,第 1 层土壤温度（0–7 cm）,Soil temperature level 1,K,低,
+EC,stl2,stl2,地面/单层,,,第 2 层土壤温度（7–28 cm）,Soil temperature level 2,K,低,
+EC,stl3,stl3,地面/单层,,,第 3 层土壤温度（28–100 cm）,Soil temperature level 3,K,低,
+EC,stl4,stl4,地面/单层,,,第 4 层土壤温度（100–289 cm）,Soil temperature level 4,K,低,
+EC,dsrp,dsrp,地面/单层,,,法向直接辐射,Direct solar radiation (normal to sun),J/m²（累积）,高,垂直于太阳方向平面上的直接辐射（DNI），适合跟踪式组件
+EC,fg10,fg10,地面/单层,,,10 m 阵风,10 metre wind gust since previous post-processing,m/s,低,
+EC,cape,cape,地面/单层,,,对流有效位能,Convective available potential energy,J/kg,中,指示对流云发展潜力
+GDFS,skt,skt,地面/单层,,地表气温,地表温度,Surface (skin) temperature,℃,中,
+GDFS,mcc,mcc,地面/单层,,中云量,中云量,Medium cloud cover,%,高,
+GDFS,gust,gust,地面/单层,,阵风,阵风风速,Wind gust,m/s,低,
+GDFS,apt,apt,地面/单层,,体感温度,体感温度,Apparent temperature,℃,低,
+GDFS,ptype,ptype,地面/单层,,降水相态,降水相态,Precipitation type,代码,低,编码规则需要对照 CMA 产品说明
+GDFS,vis,vis,地面/单层,,能见度,能见度,Visibility,m 或 km,中,
+GDFS,snow_1h,snow_1h,地面/单层,,1小时降雪量,1 小时降雪量,1-hour snowfall,mm,低,
+GDFS,sr,sr,地面/单层,,太阳辐射,地表太阳总辐射,Surface solar radiation,W/m²,高,GDFS 里唯一的辐照字段，是核心特征
+GDFS,pre_1h,pre_1h,地面/单层,,1小时降水量,1 小时降水量,1-hour precipitation,mm,中,
+GDFS,wc_12h,wc_12h,地面/单层,,12小时天气现象,12 小时天气现象,12-hour weather phenomenon,代码,中,晴、多云、阴、雨等天气现象编码，可作为类别特征
+GDFS,tcc,tcc,地面/单层,,总云量,总云量,Total cloud cover,%,高,
+GDFS,hcc,hcc,地面/单层,,高云量,高云量,High cloud cover,%,高,
+GDFS,msl,msl,地面/单层,,海平面气压,海平面气压,Mean sea level pressure,hPa,低,
+GDFS,prs_hl_10,prs,离地高度,10 m,10米气压,10 m 气压,Pressure at 10 m,hPa,低,
+GDFS,prs_hl_30,prs,离地高度,30 m,,30 m 气压,Pressure at 30 m,hPa,低,
+GDFS,prs_hl_50,prs,离地高度,50 m,,50 m 气压,Pressure at 50 m,hPa,低,
+GDFS,prs_hl_70,prs,离地高度,70 m,,70 m 气压,Pressure at 70 m,hPa,低,
+GDFS,prs_hl_90,prs,离地高度,90 m,,90 m 气压,Pressure at 90 m,hPa,低,
+GDFS,prs_hl_120,prs,离地高度,120 m,,120 m 气压,Pressure at 120 m,hPa,低,
+GDFS,prs_hl_150,prs,离地高度,150 m,,150 m 气压,Pressure at 150 m,hPa,低,
+GDFS,prs_hl_200,prs,离地高度,200 m,200米气压,200 m 气压,Pressure at 200 m,hPa,低,
+GDFS,snow_15m,snow_15m,地面/单层,,15分钟降雪量,15 分钟降雪量,15-min snowfall,mm,低,
+GDFS,ws_hl_10,ws,离地高度,10 m,10米风速,10 m 风速,Wind speed at 10 m,m/s,中,
+GDFS,ws_hl_30,ws,离地高度,30 m,,30 m 风速,Wind speed at 30 m,m/s,低,
+GDFS,ws_hl_50,ws,离地高度,50 m,,50 m 风速,Wind speed at 50 m,m/s,低,
+GDFS,ws_hl_70,ws,离地高度,70 m,,70 m 风速,Wind speed at 70 m,m/s,低,
+GDFS,ws_hl_90,ws,离地高度,90 m,,90 m 风速,Wind speed at 90 m,m/s,低,
+GDFS,ws_hl_120,ws,离地高度,120 m,,120 m 风速,Wind speed at 120 m,m/s,低,
+GDFS,ws_hl_150,ws,离地高度,150 m,,150 m 风速,Wind speed at 150 m,m/s,低,
+GDFS,ws_hl_200,ws,离地高度,200 m,,200 m 风速,Wind speed at 200 m,m/s,低,
+GDFS,wd_hl_10,wd,离地高度,10 m,10米风向,10 m 风向,Wind direction at 10 m,°,低,
+GDFS,wd_hl_30,wd,离地高度,30 m,,30 m 风向,Wind direction at 30 m,°,低,
+GDFS,wd_hl_50,wd,离地高度,50 m,,50 m 风向,Wind direction at 50 m,°,低,
+GDFS,wd_hl_70,wd,离地高度,70 m,,70 m 风向,Wind direction at 70 m,°,低,
+GDFS,wd_hl_90,wd,离地高度,90 m,,90 m 风向,Wind direction at 90 m,°,低,
+GDFS,wd_hl_120,wd,离地高度,120 m,,120 m 风向,Wind direction at 120 m,°,低,
+GDFS,wd_hl_150,wd,离地高度,150 m,,150 m 风向,Wind direction at 150 m,°,低,
+GDFS,wd_hl_200,wd,离地高度,200 m,,200 m 风向,Wind direction at 200 m,°,低,
+GDFS,rhu_hl_10,rhu,离地高度,10 m,10米相对湿度,10 m 相对湿度,Relative humidity at 10 m,%,中,
+GDFS,rhu_hl_30,rhu,离地高度,30 m,,30 m 相对湿度,Relative humidity at 30 m,%,低,
+GDFS,rhu_hl_50,rhu,离地高度,50 m,,50 m 相对湿度,Relative humidity at 50 m,%,低,
+GDFS,rhu_hl_70,rhu,离地高度,70 m,,70 m 相对湿度,Relative humidity at 70 m,%,低,
+GDFS,rhu_hl_90,rhu,离地高度,90 m,,90 m 相对湿度,Relative humidity at 90 m,%,低,
+GDFS,rhu_hl_120,rhu,离地高度,120 m,,120 m 相对湿度,Relative humidity at 120 m,%,低,
+GDFS,rhu_hl_150,rhu,离地高度,150 m,,150 m 相对湿度,Relative humidity at 150 m,%,低,
+GDFS,rhu_hl_200,rhu,离地高度,200 m,,200 m 相对湿度,Relative humidity at 200 m,%,低,
+GDFS,tem_hl_10,tem,离地高度,10 m,10米温度,10 m 温度,Temperature at 10 m,℃,中,
+GDFS,tem_hl_30,tem,离地高度,30 m,,30 m 温度,Temperature at 30 m,℃,低,
+GDFS,tem_hl_50,tem,离地高度,50 m,,50 m 温度,Temperature at 50 m,℃,低,
+GDFS,tem_hl_70,tem,离地高度,70 m,,70 m 温度,Temperature at 70 m,℃,低,
+GDFS,tem_hl_90,tem,离地高度,90 m,,90 m 温度,Temperature at 90 m,℃,低,
+GDFS,tem_hl_120,tem,离地高度,120 m,,120 m 温度,Temperature at 120 m,℃,低,
+GDFS,tem_hl_150,tem,离地高度,150 m,,150 m 温度,Temperature at 150 m,℃,低,
+GDFS,tem_hl_200,tem,离地高度,200 m,,200 m 温度,Temperature at 200 m,℃,低,
+GDFS,lcc,lcc,地面/单层,,低云量,低云量,Low cloud cover,%,高,
+GDFS,pre_15m,pre_15m,地面/单层,,15分钟降水量,15 分钟降水量,15-min precipitation,mm,中,
+GDFS,snow_depth,snow_depth,地面/单层,,积雪,积雪深度,Snow depth,cm,低,
+GFS,tcc,tcc,地面/单层,,总云量,总云量,Total cloud cover,%,高,瞬时值
+GFS,dswrf,dswrf,地面/单层,,向下短波辐射均值（6h循环）,地表向下短波辐射（时段均值）,Downward short-wave radiation flux,W/m²,高,GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值
+GFS,gust,gust,地面/单层,,阵风风速,地面阵风风速,Wind speed (gust),m/s,低,
+GFS,ishf,ishf,地面/单层,,感热通量（6h循环均值）,地表感热通量,Surface sensible heat flux,W/m²,低,cfgrib 里 ishf 通常指瞬时感热通量，和原说明“6h循环均值”不一致，需要确认
+GFS,lcc_ave,lcc_ave,地面/单层,,低云量均值（6h循环）,低云量（时段均值）,Low cloud cover (average),%,高,GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值
+GFS,lhtfl,lhtfl,地面/单层,,潜热通量（6h循环均值）,地表潜热通量（时段均值）,Latent heat net flux,W/m²,低,GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值
+GFS,sh2,sh2,地面/单层,,2 米比湿湿度,2 m 比湿,2 metre specific humidity,kg/kg,低,
+GFS,siconc,siconc,地面/单层,,海冰覆盖率,海冰覆盖率,Sea ice area fraction,0–1,低,陆上站点可以忽略
+GFS,t,t,地面/单层,,地表温度,地表温度,Surface temperature,K,中,
+GFS,d2m,d2m,地面/单层,,2 米露点温度,2 m 露点温度,2 metre dewpoint temperature,K,低,
+GFS,tcc_ave,tcc_ave,地面/单层,,总云量均值（6h循环）,总云量（时段均值）,Total cloud cover (average),%,高,GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值
+GFS,u10,u10,地面/单层,,10米风速U分量,10 m U 向风,10 metre U wind component,m/s,低,
+GFS,uswrf,uswrf,地面/单层,,地面向上短波辐射通量小时均值（6h循环）,地表向上短波辐射（时段均值）,Upward short-wave radiation flux,W/m²,中,GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值；uswrf/dswrf 约等于地表反照率
+GFS,v100,v100,地面/单层,,100米风速V分量,100 m V 向风,100 metre V wind component,m/s,低,
+GFS,v_sigma,v_sigma,地面/单层,,sigma层风速V分量,σ 层 V 向风,V component of wind on sigma level,m/s,低,GFS 通常是 σ=0.995 层（最底层，接近地面）
+GFS,u100,u100,地面/单层,,100米风速U分量,100 m U 向风,100 metre U wind component,m/s,低,
+GFS,mcc_ave,mcc_ave,地面/单层,,中云量均值（6h循环）,中云量（时段均值）,Medium cloud cover (average),%,高,GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值
+GFS,pres_80,pres_80,地面/单层,,80米气压,80 m 气压,Pressure at 80 m,Pa,低,
+GFS,q_80,q_80,地面/单层,,80米比湿,80 m 比湿,Specific humidity at 80 m,kg/kg,低,
+GFS,r2,r2,地面/单层,,2 米相对湿度,2 m 相对湿度,2 metre relative humidity,%,中,
+GFS,sde,sde,地面/单层,,积雪深度,积雪深度,Snow depth,m,低,
+GFS,sp,sp,地面/单层,,地表气压,地表气压,Surface pressure,Pa,低,
+GFS,SUNSD,SUNSD,地面/单层,,日照时长,日照时长,Sunshine duration,s,高,和辐照、云量高度相关
+GFS,t2m,t2m,地面/单层,,2米温度,2 m 气温,2 metre temperature,K,中,
+GFS,tp,tp,地面/单层,,总降水量,总降水量,Total precipitation,kg/m²（等于 mm，累积）,中,累积量，需要差分
+GFS,t_sigma,t_sigma,地面/单层,,sigma层温度,σ 层温度,Temperature on sigma level,K,低,GFS 通常是 σ=0.995 层
+GFS,u_sigma,u_sigma,地面/单层,,sigma层风速U分量,σ 层 U 向风,U component of wind on sigma level,m/s,低,GFS 通常是 σ=0.995 层
+GFS,v10,v10,地面/单层,,10米风速V分量,10 m V 向风,10 metre V wind component,m/s,低,
+GFS,vis,vis,地面/单层,,能见度,能见度,Visibility,m,中,
+GFS,al,al,地面/单层,,漫散射系数（6h循环均值）,地表反照率（时段均值）,Albedo,%,中,原说明“漫散射系数”有误，GFS 的 al 是地表反照率。GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值
+GFS,hcc,hcc,地面/单层,,高云量,高云量,High cloud cover,%,高,瞬时值
+GFS,hcc_ave,hcc_ave,地面/单层,,高云量均值（6h循环）,高云量（时段均值）,High cloud cover (average),%,高,GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值
+GFS,u_planetary,u_planetary,地面/单层,,边界层风速U分量,行星边界层 U 向风,U component of wind in planetary boundary layer,m/s,低,
+GFS,v_planetary,v_planetary,地面/单层,,边界层风速V分量,行星边界层 V 向风,V component of wind in planetary boundary layer,m/s,低,
+GFS,cape,cape,地面/单层,,对流有效位能,对流有效位能,Convective available potential energy,J/kg,中,
+GFS,dlwrf,dlwrf,地面/单层,,向下长波辐射均值（6h循环）,地表向下长波辐射（时段均值）,Downward long-wave radiation flux,W/m²,中,GFS 平均场按 6 小时周期重置（窗口依次为 0–1h、0–2h……0–6h），需要先反平均才能得到逐小时值；和云量、组件温度相关
+GFS,gflux,gflux,地面/单层,,地表热通量,地表土壤热通量,Ground heat flux,W/m²,低,
+GFS,icetk,icetk,地面/单层,,地面冰层厚度,冰层厚度,Ice thickness,m,低,
+GFS,lcc,lcc,地面/单层,,低云层,低云量,Low cloud cover,%,高,瞬时值
+GFS,lftx,lftx,地面/单层,,地面抬升指数,地面抬升指数,Surface lifted index,K,低,负值越大，大气越不稳定
+GFS,mcc,mcc,地面/单层,,中云量,中云量,Medium cloud cover,%,高,瞬时值
+GFS,orog,orog,地面/单层,,地表位势高度,地形高度,Orography (surface geometric height),m,低,静态字段
+GFS,prmsl,prmsl,地面/单层,,海平面气压,海平面气压（约化）,Pressure reduced to MSL,Pa,低,
+GFS,r_sigma,r_sigma,地面/单层,,sigma层相对湿度,σ 层相对湿度,Relative humidity on sigma level,%,低,GFS 通常是 σ=0.995 层
+GFS,v_isobaric_hl_1000,v_isobaric,等压面,1000 hPa,等压面风速V分量,1000 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_975,v_isobaric,等压面,975 hPa,,975 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_950,v_isobaric,等压面,950 hPa,,950 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_925,v_isobaric,等压面,925 hPa,,925 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_900,v_isobaric,等压面,900 hPa,,900 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_850,v_isobaric,等压面,850 hPa,,850 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_800,v_isobaric,等压面,800 hPa,,800 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_700,v_isobaric,等压面,700 hPa,,700 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_600,v_isobaric,等压面,600 hPa,,600 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_500,v_isobaric,等压面,500 hPa,,500 hPa V 向风,V component of wind,m/s,低,
+GFS,v_isobaric_hl_200,v_isobaric,等压面,200 hPa,,200 hPa V 向风,V component of wind,m/s,低,
+GFS,gh_isobaric_hl_1000,gh_isobaric,等压面,1000 hPa,等压面位势高度,1000 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_975,gh_isobaric,等压面,975 hPa,,975 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_950,gh_isobaric,等压面,950 hPa,,950 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_925,gh_isobaric,等压面,925 hPa,,925 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_900,gh_isobaric,等压面,900 hPa,,900 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_850,gh_isobaric,等压面,850 hPa,,850 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_800,gh_isobaric,等压面,800 hPa,,800 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_700,gh_isobaric,等压面,700 hPa,,700 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_600,gh_isobaric,等压面,600 hPa,,600 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_500,gh_isobaric,等压面,500 hPa,,500 hPa 位势高度,Geopotential height,gpm,低,
+GFS,gh_isobaric_hl_200,gh_isobaric,等压面,200 hPa,,200 hPa 位势高度,Geopotential height,gpm,低,
+GFS,r_isobaric_hl_1000,r_isobaric,等压面,1000 hPa,等压面相对湿度,1000 hPa 相对湿度,Relative humidity,%,中,
+GFS,r_isobaric_hl_975,r_isobaric,等压面,975 hPa,,975 hPa 相对湿度,Relative humidity,%,中,
+GFS,r_isobaric_hl_950,r_isobaric,等压面,950 hPa,,950 hPa 相对湿度,Relative humidity,%,中,
+GFS,r_isobaric_hl_925,r_isobaric,等压面,925 hPa,,925 hPa 相对湿度,Relative humidity,%,中,
+GFS,r_isobaric_hl_900,r_isobaric,等压面,900 hPa,,900 hPa 相对湿度,Relative humidity,%,中,
+GFS,r_isobaric_hl_850,r_isobaric,等压面,850 hPa,,850 hPa 相对湿度,Relative humidity,%,中,
+GFS,r_isobaric_hl_800,r_isobaric,等压面,800 hPa,,800 hPa 相对湿度,Relative humidity,%,中,
+GFS,r_isobaric_hl_700,r_isobaric,等压面,700 hPa,,700 hPa 相对湿度,Relative humidity,%,中,
+GFS,r_isobaric_hl_600,r_isobaric,等压面,600 hPa,,600 hPa 相对湿度,Relative humidity,%,低,
+GFS,r_isobaric_hl_500,r_isobaric,等压面,500 hPa,,500 hPa 相对湿度,Relative humidity,%,低,
+GFS,r_isobaric_hl_200,r_isobaric,等压面,200 hPa,,200 hPa 相对湿度,Relative humidity,%,低,
+GFS,tcc_isobaric_hl_1000,tcc_isobaric,等压面,1000 hPa,等压面总云量,1000 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_975,tcc_isobaric,等压面,975 hPa,,975 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_950,tcc_isobaric,等压面,950 hPa,,950 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_925,tcc_isobaric,等压面,925 hPa,,925 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_900,tcc_isobaric,等压面,900 hPa,,900 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_850,tcc_isobaric,等压面,850 hPa,,850 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_800,tcc_isobaric,等压面,800 hPa,,800 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_700,tcc_isobaric,等压面,700 hPa,,700 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_600,tcc_isobaric,等压面,600 hPa,,600 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_500,tcc_isobaric,等压面,500 hPa,,500 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,tcc_isobaric_hl_200,tcc_isobaric,等压面,200 hPa,,200 hPa 云量,Total cloud cover on isobaric level,%,中,
+GFS,u_isobaric_hl_1000,u_isobaric,等压面,1000 hPa,等压面风速U分量,1000 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_975,u_isobaric,等压面,975 hPa,,975 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_950,u_isobaric,等压面,950 hPa,,950 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_925,u_isobaric,等压面,925 hPa,,925 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_900,u_isobaric,等压面,900 hPa,,900 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_850,u_isobaric,等压面,850 hPa,,850 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_800,u_isobaric,等压面,800 hPa,,800 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_700,u_isobaric,等压面,700 hPa,,700 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_600,u_isobaric,等压面,600 hPa,,600 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_500,u_isobaric,等压面,500 hPa,,500 hPa U 向风,U component of wind,m/s,低,
+GFS,u_isobaric_hl_200,u_isobaric,等压面,200 hPa,,200 hPa U 向风,U component of wind,m/s,低,
+GFS,t_isobaric_hl_1000,t_isobaric,等压面,1000 hPa,等压面温度,1000 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_975,t_isobaric,等压面,975 hPa,,975 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_950,t_isobaric,等压面,950 hPa,,950 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_925,t_isobaric,等压面,925 hPa,,925 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_900,t_isobaric,等压面,900 hPa,,900 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_850,t_isobaric,等压面,850 hPa,,850 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_800,t_isobaric,等压面,800 hPa,,800 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_700,t_isobaric,等压面,700 hPa,,700 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_600,t_isobaric,等压面,600 hPa,,600 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_500,t_isobaric,等压面,500 hPa,,500 hPa 温度,Temperature,K,低,
+GFS,t_isobaric_hl_200,t_isobaric,等压面,200 hPa,,200 hPa 温度,Temperature,K,低,
+GFS,q_isobaric_hl_1000,q_isobaric,等压面,1000 hPa,等压面比湿,1000 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_975,q_isobaric,等压面,975 hPa,,975 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_950,q_isobaric,等压面,950 hPa,,950 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_925,q_isobaric,等压面,925 hPa,,925 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_900,q_isobaric,等压面,900 hPa,,900 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_850,q_isobaric,等压面,850 hPa,,850 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_800,q_isobaric,等压面,800 hPa,,800 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_700,q_isobaric,等压面,700 hPa,,700 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_600,q_isobaric,等压面,600 hPa,,600 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_500,q_isobaric,等压面,500 hPa,,500 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,q_isobaric_hl_200,q_isobaric,等压面,200 hPa,,200 hPa 比湿,Specific humidity,kg/kg,低,
+GFS,u_hl_20,u_height,离地高度,20 m,风速U分量,20 m U 向风,U component of wind at 20 m,m/s,低,
+GFS,u_hl_30,u_height,离地高度,30 m,,30 m U 向风,U component of wind at 30 m,m/s,低,
+GFS,u_hl_40,u_height,离地高度,40 m,,40 m U 向风,U component of wind at 40 m,m/s,低,
+GFS,u_hl_50,u_height,离地高度,50 m,,50 m U 向风,U component of wind at 50 m,m/s,低,
+GFS,u_hl_80,u_height,离地高度,80 m,,80 m U 向风,U component of wind at 80 m,m/s,低,
+GFS,v_hl_20,v_height,离地高度,20 m,风速V分量,20 m V 向风,V component of wind at 20 m,m/s,低,
+GFS,v_hl_30,v_height,离地高度,30 m,,30 m V 向风,V component of wind at 30 m,m/s,低,
+GFS,v_hl_40,v_height,离地高度,40 m,,40 m V 向风,V component of wind at 40 m,m/s,低,
+GFS,v_hl_50,v_height,离地高度,50 m,,50 m V 向风,V component of wind at 50 m,m/s,低,
+GFS,v_hl_80,v_height,离地高度,80 m,,80 m V 向风,V component of wind at 80 m,m/s,低,
+GFS,t_100_hl_80,t_height,离地高度,80 m,80米温度,80 m 温度,Temperature at 80 m,K,低,
+GFS,t_100_hl_100,t_height,离地高度,100 m,100米温度,100 m 温度,Temperature at 100 m,K,低,
