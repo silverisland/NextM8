@@ -18,7 +18,7 @@
 #   CKPT_DIR     模型配置目录      默认 $BASE_DIR/forecast_backbones/$MODEL
 #   STATION_DIR  17 站 test 数据  默认 $BASE_DIR/datasets/test
 #   OUT_DIR      结果输出目录     默认 $BASE_DIR/runs/$MODEL/pretrain_100m_v1/metrics_ens
-#   CAP_POWER    回退容量         默认 465（自带 cap_power_on 的站会用站容量）
+#   CAP_POWER    已不使用（容量只取站表 station_meta.csv 的 cap_mw；参数保留只为兼容）
 #   NUM_WORKERS  并行 worker 数   默认 8
 #   BATCH_SIZE   推理 batch       默认 512
 #   DRY_RUN      1=只打印分片       默认 0
