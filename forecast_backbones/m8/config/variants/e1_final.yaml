@@ -1,0 +1,9 @@
+# E1 最终组合 = a1 主干 + c8 训练调度 + d2 决策规则。第二轮结论：所有架构变体都在 a1 ±0.6 的种子噪声内；
+#    c8 的退火略好且无副作用；p* 决策高约 1 分（主要来自未见站）。
+#    跑法：bash train_m8_variants.sh --splits_dir ... --variants e1_final --seeds 0,1,2 --gpus 0,1,2 --batch_tag final
+#    测试集：bash eval_m8.sh --runs runs/m8/final/e1_final_s0,runs/m8/final/e1_final_s1,runs/m8/final/e1_final_s2 --test <测试目录>
+run: {tag: e1_final, out_dir: runs/m8/e1_final}
+train:
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
+  early_stop: {patience: 8}
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

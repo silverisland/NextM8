@@ -70,6 +70,30 @@ python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/conf
 读法：先看 a1 vs b4（协变量价值）与 a1 vs c1（配方价值）——调研表明这两项通常远大于骨干差异（2–5%）；骨干之间差异小于
 种子噪声时不要下结论，换 `run.seeds` 多跑几颗。强烈建议补一个 LightGBM 逐步特征基线（竞赛与 15 min PVDAQ 上仍是最强单模型）。
 
+## 测试集评估与集成（`evaluate.py` / `eval_m8.sh`）
+
+训练脚本只在验证集上打分；测试集要单独跑：
+
+```bash
+bash eval_m8.sh --runs runs/m8/round2a/a1_hybrid_s0 --test datasets/test                       # 单个产物
+bash eval_m8.sh --runs runs/m8/final/e1_final_s0,runs/m8/final/e1_final_s1,runs/m8/final/e1_final_s2 \
+     --test "datasets/test/*.parquet" --out runs/m8/final/ens_eval                              # 三种子集成
+bash eval_m8.sh --runs runs/m8/round2a/a1_hybrid_s0 --test datasets/test \
+     --decision_yaml forecast_backbones/m8/config/variants/d2_pstar_point.yaml                   # 换决策规则，不重训
+```
+
+- 多个 run 目录 = 集成：各成员的原始分位（真实单位）逐分位平均后再过一次决策层；`reports/members.csv` 另报每个成员单独的分数，
+  看集成收益。同一配置三颗种子的集成通常稳拿 0.3–0.5 分。
+- 决策层没有可训练参数，所以 `--point median|p_star|p_star_l1`（清空 by_step）或 `--decision_yaml`（合并某变体的 decision 段）
+  可以在评估时换规则。挑主干看 nrmse（不受决策规则影响），挑决策规则看南网分。
+- seen / unseen 按第一个成员 `model_config.yaml` 里的 `known_stations` 判定；测试集里训练没见过的站走未知站槽。
+- 产物：`result_test.parquet`（与 `result_val.parquet` 同 schema，多成员时多 `predict_m<k>` 列）、`reports/summary.csv`、
+  `reports/station_table.csv`、`reports/decision.json`。
+
+第二轮（2026-10-09，m8_v1 切分，三块验证 + 四个整站留出）的结论：所有架构变体（sLSTM、注意力、token 头、双流、大模型、
+recent_peak 归一、按站日采样）都在 a1 ±0.6 的种子噪声内；c8 调度略好无副作用；p* 决策高约 1 分（主要来自未见站）；
+站点嵌入对已见站 +0.5、对未见站 −0.7；未见站比已见站低 5–6 分且与嵌入无关。最终组合见 `config/variants/e1_final.yaml`。
+
 ## 本地测试
 
 `python -m pytest forecast_backbones/m8/tests -q`（CPU，约 15 s；含层因果性、CPM/夜间掩码语义、registry 发现、九种结构变体的

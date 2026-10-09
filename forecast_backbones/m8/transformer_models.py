@@ -113,13 +113,8 @@ class TransformersAdaptedM8Model(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     # ------------------------------------------------------------------ forward
-    def forward(self, batch_dict: dict, labels=None) -> TransformersAdaptedModelOutput:
-        L, H = self.context_len, self.pred_len
-        y_future = None
-        if labels is not None:
-            y = labels[self.label_col] if isinstance(labels, dict) else labels
-            y_future = y.detach().cpu().numpy() if isinstance(y, torch.Tensor) else np.asarray(y)
-        inp = self.fe.build(batch_dict, training=self.training, y_future=y_future, rng=self._rng)
+    def _run_core(self, inp: dict):
+        """特征 → 网络 → (q_norm [B,T,K] 归一化单位, scale_t [B], x [B,T,C])。"""
         dev = next(self.parameters()).device
         x = torch.as_tensor(inp["x"], dtype=torch.float32, device=dev)
         static = torch.as_tensor(inp["static"], dtype=torch.float32, device=dev)
@@ -130,6 +125,47 @@ class TransformersAdaptedM8Model(nn.Module):
         if self.fe.resid_col is not None:                                         # 残差学习：输出 = 提示基准 + 网络输出
             q_norm = q_norm + torch.as_tensor(inp["base"], dtype=torch.float32, device=dev)[:, :, None]
         scale_t = torch.as_tensor(inp["scale"], dtype=torch.float32, device=dev)
+        return q_norm, scale_t, x
+
+    def decide(self, q_raw: np.ndarray, night_fut: np.ndarray, p_clear_fut: np.ndarray, cap: np.ndarray, decision: dict | None = None):
+        """决策层（numpy，与 m6 同一套函数；没有可训练参数，所以评估时可换规则不用重训）。
+        q_raw [B,H,K] 真实单位的原始分位 → (point [B,H], q_cal, median, pstar, night_physics)。decision 缺省用 cfg['decision']。"""
+        dec = decision if decision is not None else self.cfg["decision"]
+        ph, pt = dec["physics"], dec["point"]
+        if pt.get("tail", "flat") != "flat":
+            raise ValueError(f"decision.point.tail: only 'flat' is implemented (got {pt.get('tail')!r})")
+        night_physics = night_fut if ph["night_zero"] else np.zeros_like(night_fut)
+        q_cal = physics_clip(enforce_monotone(q_raw), night_physics, p_clear_fut, cap[:, None],
+                             float(ph["clear_sky_cap_ratio"]), bool(ph["capacity_cap"]))
+        shrink = float(pt.get("shrink_factor") or 1.0)
+        point = select_point(q_cal, self.levels, cap, pt["default"], list(pt.get("by_step") or ()), shrink,
+                             float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
+        median = level_value(q_cal, self.levels, 0.5)
+        pstar = p_star(q_cal, self.levels, cap[:, None], float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
+        return point, q_cal, median, pstar, night_physics
+
+    @torch.no_grad()
+    def predict_raw(self, batch_dict: dict):
+        """推理态：→ (q_fut [B,H,K] 真实单位 numpy, ctx)。不过决策层，供多模型集成先平均分位再统一决策。"""
+        was = self.training
+        self.eval()
+        try:
+            inp = self.fe.build(batch_dict, training=False, y_future=None, rng=self._rng)
+            q_norm, scale_t, _ = self._run_core(inp)
+            q_fut = q_norm[:, self.context_len:, :] * scale_t[:, None, None]
+            return q_fut.detach().float().cpu().numpy().astype(float), inp["ctx"]
+        finally:
+            self.train(was)
+
+    def forward(self, batch_dict: dict, labels=None) -> TransformersAdaptedModelOutput:
+        L, H = self.context_len, self.pred_len
+        y_future = None
+        if labels is not None:
+            y = labels[self.label_col] if isinstance(labels, dict) else labels
+            y_future = y.detach().cpu().numpy() if isinstance(y, torch.Tensor) else np.asarray(y)
+        inp = self.fe.build(batch_dict, training=self.training, y_future=y_future, rng=self._rng)
+        dev = next(self.parameters()).device
+        q_norm, scale_t, x = self._run_core(inp)
         q_fut = q_norm[:, L:, :] * scale_t[:, None, None]                         # [B, H, K] 真实单位
         ctx = inp["ctx"]
         night_full = torch.as_tensor(ctx.night, device=dev)
@@ -138,20 +174,8 @@ class TransformersAdaptedM8Model(nn.Module):
         if labels is not None:
             loss = self._loss_from_parts(q_norm, y_mask, night_full, torch.as_tensor(inp["target"], device=dev))
 
-        # 决策层（numpy，与 m6 同一套函数）
-        q_raw = q_fut.detach().float().cpu().numpy().astype(float)
-        ph, pt = self.cfg["decision"]["physics"], self.cfg["decision"]["point"]
-        if pt.get("tail", "flat") != "flat":
-            raise ValueError(f"decision.point.tail: only 'flat' is implemented (got {pt.get('tail')!r})")
-        night_fut = ctx.night[:, L:]
-        night_physics = night_fut if ph["night_zero"] else np.zeros_like(night_fut)
-        q_cal = physics_clip(enforce_monotone(q_raw), night_physics, ctx.p_clear[:, L:], ctx.cap[:, None],
-                             float(ph["clear_sky_cap_ratio"]), bool(ph["capacity_cap"]))
-        shrink = float(pt.get("shrink_factor") or 1.0)
-        point = select_point(q_cal, self.levels, ctx.cap, pt["default"], list(pt.get("by_step") or ()), shrink,
-                             float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
-        median = level_value(q_cal, self.levels, 0.5)
-        pstar = p_star(q_cal, self.levels, ctx.cap[:, None], float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
+        point, q_cal, median, pstar, night_physics = self.decide(
+            q_fut.detach().float().cpu().numpy().astype(float), ctx.night[:, L:], ctx.p_clear[:, L:], ctx.cap)
         logits = torch.as_tensor(point, dtype=torch.float32, device=dev)
         aux = {
             "quantiles": q_fut,
@@ -159,7 +183,7 @@ class TransformersAdaptedM8Model(nn.Module):
             "levels_cal": list(self.levels),
             "p_star": torch.as_tensor(pstar, dtype=torch.float32, device=dev),
             "median": torch.as_tensor(median, dtype=torch.float32, device=dev),
-            "night": night_physics, "night_loss": night_fut,
+            "night": night_physics, "night_loss": ctx.night[:, L:],
             "elev_deg": ctx.elev_deg[:, L:], "p_clear": ctx.p_clear[:, L:],
             "var_bin": np.zeros(len(ctx.cap), int), "var_signal": ctx.var_signal, "station_id": ctx.station_id,
             "cap": ctx.cap, "degraded": ctx.degraded,
