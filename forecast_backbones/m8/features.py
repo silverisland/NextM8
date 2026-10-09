@@ -348,12 +348,13 @@ class FeatureBuilder:
         lat = np.array([(self.meta.get(s) or {}).get("lat", np.nan) for s in sid], float)
         lon = np.array([(self.meta.get(s) or {}).get("lon", np.nan) for s in sid], float)
         alt = np.array([(self.meta.get(s) or {}).get("alt_m", 0.0) for s in sid], float)
-        static[:, 0] = np.log1p(cap) / 7.0
-        if self.target_scale == "recent_peak":
-            static[:, 0] = np.log1p(scale) / 7.0
-        static[:, 1] = np.nan_to_num(lat) / 90.0
-        static[:, 2] = np.nan_to_num(lon) / 180.0
-        static[:, 3] = np.nan_to_num(alt) / 5000.0
+        # 坐标与容量能唯一标识训练站（17 个站 17 组数），模型可以按它们记住"这是哪个站"；关掉只留逐步太阳几何（物理量）
+        if self.static_cfg.get("log_cap", True):
+            static[:, 0] = np.log1p(scale if self.target_scale == "recent_peak" else cap) / 7.0
+        if self.static_cfg.get("coords", True):
+            static[:, 1] = np.nan_to_num(lat) / 90.0
+            static[:, 2] = np.nan_to_num(lon) / 180.0
+            static[:, 3] = np.nan_to_num(alt) / 5000.0
         static[:, 4] = degraded
         if self.n_static > 5:
             day_vis = visible & ~night[:, :L]

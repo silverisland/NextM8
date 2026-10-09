@@ -32,6 +32,9 @@ def test_single_run_matches_training_eval(trained, tmp_path):
     assert abs(s["nrmse_pct"] - tr["nrmse_pct"]) < 1e-3
     assert s["n_unseen_stations"] == 1 and np.isfinite(s["nanwang_unseen"])
     assert (tmp_path / "e" / "result_test.parquet").exists() and (tmp_path / "e" / "reports" / "station_table.csv").exists()
+    tab = r["station_table"]
+    assert {"degraded_frac", "nrmse_pct", "seen"} <= set(tab.columns) and np.isfinite(tab["nrmse_pct"]).all()
+    assert (tab["degraded_frac"] == 0).all()
 
 
 def test_decision_override_without_retrain(trained, tmp_path):

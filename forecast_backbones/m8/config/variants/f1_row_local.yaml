@@ -1,0 +1,6 @@
+# F1 行内自足（M4 式）：去掉所有能标识"这是哪个站"的输入——静态向量里的经纬高与 log 容量、站点嵌入——
+#    只留逐步太阳几何（由坐标算出的物理量，不是身份）、退化标志和本行窗口统计。
+#    诊断：已见 / 未见站的差距有多少来自模型按站点身份记忆而不是学通用映射。
+run: {tag: f1_row_local, out_dir: runs/m8/f1_row_local}
+features: {static: {coords: false, log_cap: false, station_embedding: false}}
+train: {slot_dropout: 0.0}

@@ -52,7 +52,8 @@ DEFAULT_CFG: dict = {
         "scales": {"ghi": [0.0, 1000.0], "ssrd": [0.0, 1000.0], "temp": [15.0, 15.0], "t2m": [15.0, 15.0], "default": [0.0, 1.0]},
         "clear_sky_index_col": "general_ghi_predict",       # 驱动 k_nwp / nwp_resid 的 GHI 类未来列（其历史列按 past_future 配对找）
         "derived": {"solar": True, "time_encoding": True, "nwp_resid": True},
-        "static": {"station_embedding": True, "n_station_slots": 4096, "context_stats": True},
+        # coords / log_cap：静态向量里的经纬高 / log 容量。它们能唯一标识训练站，关掉可查已见/未见站差距是否来自按站记忆
+        "static": {"station_embedding": True, "n_station_slots": 4096, "context_stats": True, "coords": True, "log_cap": True},
     },
     "model": {
         "layout": "fused",               # fused | split（目标流 / 协变量流双流 + 跨流混合）

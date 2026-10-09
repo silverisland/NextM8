@@ -152,3 +152,15 @@ def test_unknown_station_goes_to_slot_zero_and_slot_dropout(small_cfg, batch):
     cfg3, fb3 = _fb(small_cfg, train={"slot_dropout": 1.0})
     assert (fb3.build(batch["batch_dict"], training=True, rng=np.random.default_rng(0))["slot"] == 0).all()
     assert (fb3.build(batch["batch_dict"], training=False)["slot"] > 0).all()   # 推理不丢
+
+
+def test_static_identity_switches(small_cfg, batch):
+    """coords / log_cap / station_embedding 关掉后：静态向量前四维全 0、站槽全 0，其余维不变。"""
+    cfg, fb = _fb(small_cfg)
+    inp = fb.build(batch["batch_dict"], training=False)
+    assert np.abs(inp["static"][:, :4]).sum() > 0
+    cfg2, fb2 = _fb(small_cfg, features={"static": {"coords": False, "log_cap": False, "station_embedding": False}})
+    inp2 = fb2.build(batch["batch_dict"], training=False)
+    assert np.abs(inp2["static"][:, :4]).sum() == 0 and (inp2["slot"] == 0).all() and fb2.n_slots == 0
+    assert np.allclose(inp2["static"][:, 4:], inp["static"][:, 4:])
+    assert np.allclose(inp2["x"], inp["x"])                                      # 逐步通道（含太阳几何）不受影响

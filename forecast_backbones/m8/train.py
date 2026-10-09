@@ -78,6 +78,10 @@ def score_nanwang(model, ds_val, collate, cfg, res: pd.DataFrame | None = None) 
                           "accuracy_pct": g["mean"].astype(float), "n_days": g["count"].astype(int)})
     known = cfg["dataset"].get("known_stations")
     table["seen"] = True if not known else table["station_id"].isin([int(s) for s in known])
+    # 诊断列：这站的打分行有多少走了退化几何（缺坐标）；这站打分行上的 nrmse
+    by_sid = {int(s): g for s, g in res.groupby("station_id")}
+    table["degraded_frac"] = table["station_id"].map(lambda s: float(by_sid[s]["degraded"].mean()) if "degraded" in res else 0.0).round(3)
+    table["nrmse_pct"] = table["station_id"].map(lambda s: nrmse_pct(by_sid[s])).round(2)
     return float(sd["accuracy_pct"].mean()), table, res
 
 

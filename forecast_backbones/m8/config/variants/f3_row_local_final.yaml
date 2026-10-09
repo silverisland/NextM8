@@ -1,0 +1,8 @@
+# F3 = f1 行内自足 + c8 调度 + d2 p* 决策：若 f1 的未见站明显好于 a1，这是替代 e1_final 的候选
+run: {tag: f3_row_local_final, out_dir: runs/m8/f3_row_local_final}
+features: {static: {coords: false, log_cap: false, station_embedding: false}}
+train:
+  slot_dropout: 0.0
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
+  early_stop: {patience: 8}
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}
