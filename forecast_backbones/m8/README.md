@@ -92,6 +92,23 @@ bash eval_m8.sh --runs runs/m8/round2a/a1_hybrid_s0 --test datasets/test \
 - 产物：`result_test.parquet`（与 `result_val.parquet` 同 schema，多成员时多 `predict_m<k>` 列）、`reports/summary.csv`、
   `reports/station_table.csv`、`reports/decision.json`。
 
+**逐站完整评测**（`--full`，`station_report.py`）：全部起报行推理，产出与 M1–M7 的 `metrics_ens` 同构的
+`{站}-metrics.xlsx`（ods_ultra_short / ods_short / ultra_short / short / 48hours / nanwang 六张 sheet）和 `{站}-summary.json`，
+外加 `reports/station_metrics.csv`（逐站 ods_short_rmse_acc、ods_ultra_short_rmse_acc、nanwang_short_D+1、nanwang_ultra_short）
+与 `reports/summary.csv`（跨站均值、seen/unseen）：
+
+```bash
+bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/m8/refit/e1_final_s2 \
+     --test "datasets/test/*.parquet" --out runs/m8/refit/full_eval --full
+```
+
+- 推理默认走线上接口 `pipelines.pipeline_wrapper_inference.unified_inference`（M8 的 `forward(batch_dict)` 与 m6 契约相同，
+  `.logits` 就是决策后的提交曲线），每个成员各跑一遍、多成员取点预测平均；`--engine native` 走仓库内
+  `evaluate.run_inference`（分位平均后再决策）。单成员时两者结果逐位相同（测试里对过）。
+- `summary.json` 的键：仓库根有 `eval_station_script.py`（服务器）时用它的 `extract_summary`，与其它模型逐键一致；
+  没有时用回退实现（`<sheet>_<指标>`）。`station_metrics.csv` 的四个主指标直接从表里取，不受键名影响。
+- 超短期两项要测试文件里每 15 分钟一行起报（16 个连续 lead）；ods_short 要 09:00 行，nanwang_short_D+1 要 10:00 行。
+
 第二轮（2026-10-09，m8_v1 切分，三块验证 + 四个整站留出）的结论：所有架构变体（sLSTM、注意力、token 头、双流、大模型、
 recent_peak 归一、按站日采样）都在 a1 ±0.6 的种子噪声内；c8 调度略好无副作用；p* 决策高约 1 分（主要来自未见站）；
 站点嵌入对已见站 +0.5、对未见站 −0.7；未见站比已见站低 5–6 分且与嵌入无关。最终组合见 `config/variants/e1_final.yaml`。
