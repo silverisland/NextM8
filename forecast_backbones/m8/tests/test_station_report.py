@@ -56,6 +56,16 @@ def test_full_report_native(trained, tmp_path):
     # 与舰队评估（10:00 行、同一决策）的南网 D+1 一致：单月时月度 mean 就是日均值
     e = evaluate([run], [str(tdir / "station=1001.parquet")], out_dir=tmp_path / "e", progress=False)
     assert abs(float(tab.loc[tab["station"] == "S1001", "nanwang_short_D+1"].iloc[0]) - e["summary"]["nanwang_short_D+1"]) < 0.01   # 月度表取 2 位小数
+    # 诊断脚本：只出聚合表；同一文件当 --other 时 common 分数相等；median 决策下 nanwang_d1 == nanwang_d1_median
+    from forecast_backbones.m8.diagnose_test import main as diag
+    rp = str(tmp_path / "e" / "result_test.parquet")
+    diag(["--result", rp, "--other", rp, "--test", str(tdir), "--station", "S1001", "--out", str(tmp_path / "d")])
+    dg = pd.read_csv(tmp_path / "d" / "station_diag.csv").iloc[0]
+    assert dg["station"] == "S1001" and dg["d1_days"] >= 1 and abs(dg["nanwang_d1"] - dg["other_nanwang_d1_common"]) < 1e-6
+    assert abs(dg["nanwang_d1"] - dg["nanwang_d1_median"]) < 1e-6 and abs(dg["nanwang_d1"] - e["summary"]["nanwang_short_D+1"]) < 1e-3
+    assert {"hour", "obs_over_cap", "pred_over_cap", "other_pred_over_cap"} <= set(pd.read_csv(tmp_path / "d" / "S1001-hourly.csv").columns)
+    inp = pd.read_csv(tmp_path / "d" / "input_stats.csv")
+    assert len(inp) == 2 and (inp["rows_at_10:00"] == 3).all() and (inp["cap_nunique"] == 1).all()
 
 
 def test_full_report_unified_matches_native(trained, tmp_path, monkeypatch):

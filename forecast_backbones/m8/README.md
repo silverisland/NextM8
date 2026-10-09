@@ -109,6 +109,17 @@ bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/
   没有时用回退实现（`<sheet>_<指标>`）。`station_metrics.csv` 的四个主指标直接从表里取，不受键名影响。
 - 超短期两项要测试文件里每 15 分钟一行起报（16 个连续 lead）；ods_short 要 09:00 行，nanwang_short_D+1 要 10:00 行。
 
+**测试集诊断**（`diagnose_test.py`，只输出聚合统计，不含原始行，可以直接贴出来）：
+
+```bash
+python -m forecast_backbones.m8.diagnose_test --result runs/m8/refit/ens_eval/result_test.parquet \
+    --other <M4 的逐站结果.parquet> --test "datasets/test/*.parquet" --station 白马湖光伏电站
+```
+
+逐站一行：南网 D+1（提交曲线 / median / p* / 整体乘尺度后）、bias_ratio（预测总量/观测总量）、peak_over_cap、
+nrmse、日分数 <40 的占比、与 `--other` 模型在共同起报日上的对比；再加输入侧统计（起报节奏、10:00 行数、
+cap_power_on 取值、NWP 未来列缺失率、历史功率缺失/全零率）和指定站的逐小时平均曲线、逐日分数。
+
 第二轮（2026-10-09，m8_v1 切分，三块验证 + 四个整站留出）的结论：所有架构变体（sLSTM、注意力、token 头、双流、大模型、
 recent_peak 归一、按站日采样）都在 a1 ±0.6 的种子噪声内；c8 调度略好无副作用；p* 决策高约 1 分（主要来自未见站）；
 站点嵌入对已见站 +0.5、对未见站 −0.7；未见站比已见站低 5–6 分且与嵌入无关。最终组合见 `config/variants/e1_final.yaml`。
