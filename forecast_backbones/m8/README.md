@@ -35,6 +35,9 @@ Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU 
 - `train.py`：`train_m8(config, splits_dir, out_dir, max_steps, tag)`；`train_script.py --model_name m8` 走独立入口（同 m6）。
 - 配置真源 `config/configs.yaml`（= `config.py` 的 DEFAULT_CFG）；变体 `config/variants/*.yaml` 只写与默认不同的字段。
 - 站表：`dataset.station_meta`（默认与 m6 共用 `forecast_backbones/m6/station_meta.csv`，训练前填真实坐标；缺坐标站退化为钟表几何）。
+- **容量只来自站表 `cap_mw`，每站一个固定值**（2026-10-09 起）：模型归一化、晴空钳位、南网 / ods 指标的分母都是这一个数；
+  数据里的 `cap_power_on` 是随时间变的开机容量（白马湖并网首月 8.88 → 68），一律不用。站表没有的站直接报错。
+  之前的 checkpoint 按行 cap 训练，最终模型要在这个口径下重训（refit）。
 
 ## 训练
 

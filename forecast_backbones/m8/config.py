@@ -24,7 +24,6 @@ DEFAULT_CFG: dict = {
         "label_col": "observe_power_future",
         "ts_col": "timestamp_win",
         "station_id_col": "station_id",
-        "cap_col": "cap_power_on",
         "station_meta": "forecast_backbones/m6/station_meta.csv",   # 与 m6 共用一份站表（station_id, station, lat, lon, alt_m, cap_mw）
         "tz": "Asia/Shanghai",
         "step_min": 15,

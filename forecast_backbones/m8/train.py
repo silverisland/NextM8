@@ -25,6 +25,7 @@ from transformers import Trainer, TrainerCallback
 
 try:
     from .config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override
+    from .features import station_cap_mw
     from .transformer_trainer import evaluate_model, build_training_args
     from .transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
     from ..m6.train import _dataset_with_station_id, _check_presplit_dir
@@ -33,6 +34,7 @@ try:
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override
+    from forecast_backbones.m8.features import station_cap_mw
     from forecast_backbones.m8.transformer_trainer import evaluate_model, build_training_args
     from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
     from forecast_backbones.m6.train import _dataset_with_station_id, _check_presplit_dir
@@ -69,7 +71,7 @@ def score_nanwang(model, ds_val, collate, cfg, res: pd.DataFrame | None = None) 
             model.train(was)
     if res.empty:
         return float("nan"), pd.DataFrame(columns=TABLE_COLS), res
-    gccap = {model.station_meta.name(int(s)): float(c) for s, c in res.drop_duplicates("station_id")[["station_id", "cap"]].itertuples(index=False)}
+    gccap = {model.station_meta.name(int(s)): station_cap_mw(model.station_meta, int(s)) for s in res["station_id"].unique()}   # 每站固定容量
     sd = NanwangMetric().short_d1_daily(res, gccap)
     name_to_id = {model.station_meta.name(int(s)): int(s) for s in res["station_id"].unique()}
     if len(sd) == 0:

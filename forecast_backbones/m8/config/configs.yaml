@@ -10,7 +10,6 @@ dataset:
   label_col: observe_power_future
   ts_col: timestamp_win
   station_id_col: station_id
-  cap_col: cap_power_on
   station_meta: forecast_backbones/m6/station_meta.csv    # 与 m6 共用；训练前填真实站坐标
   tz: Asia/Shanghai
   step_min: 15

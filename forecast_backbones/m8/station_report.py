@@ -16,7 +16,8 @@
   auto     unified 能 import 就用 unified，否则 native。
 单成员时两种引擎结果逐位相同（同一个 forward、同一套决策）；决策规则都可用 --point / --decision-yaml 覆盖。
 summary.json 的键：仓库根的 eval_station_script.extract_summary 能 import 时用它（与其它模型逐键一致），
-否则用本模块的回退实现（键名 <sheet>_<指标>，如 ods_short_rmse_acc；南网两项 nanwang_short_D+1 / nanwang_ultra_short）。"""
+否则用本模块的回退实现（键名 <sheet>_<指标>，如 ods_short_rmse_acc；南网两项 nanwang_short_D+1 / nanwang_ultra_short）。
+容量：每站一个固定值，只取 station_meta.csv 的 cap_mw（模型归一化与两套指标的分母是同一个数）；数据里的 cap_power_on 不用。"""
 from __future__ import annotations
 
 import argparse
@@ -33,12 +34,14 @@ import torch
 
 try:
     from .evaluate import expand_paths, load_member, decision_override, describe_point, run_inference
+    from .features import station_cap_mw
     from ..m6.train import _dataset_with_station_id
     from ..m6.station_eval import station_key, RESULT_COLS
     from ..m6.features import attach_station_id, norm_station_name
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.evaluate import expand_paths, load_member, decision_override, describe_point, run_inference
+    from forecast_backbones.m8.features import station_cap_mw
     from forecast_backbones.m6.train import _dataset_with_station_id
     from forecast_backbones.m6.station_eval import station_key, RESULT_COLS
     from forecast_backbones.m6.features import attach_station_id, norm_station_name
@@ -172,11 +175,10 @@ def _naive(ts: pd.Series) -> pd.Series:
 
 
 def _row_caps(df: pd.DataFrame, cfg: dict, meta) -> np.ndarray:
-    """与 FeatureBuilder 同一优先级：数据自带 cap 列 > station_meta 的 cap_mw。"""
-    id_col, cap_col = str(cfg["dataset"]["station_id_col"]), str(cfg["dataset"]["cap_col"])
-    if cap_col in df.columns:
-        return pd.to_numeric(df[cap_col], errors="coerce").to_numpy(float)
-    return np.array([float((meta.get(int(s)) or {}).get("cap_mw", np.nan)) for s in df[id_col]], float)
+    """与 FeatureBuilder 同一口径：每站固定容量 = station_meta 的 cap_mw（不看数据里的 cap_power_on）。"""
+    id_col = str(cfg["dataset"]["station_id_col"])
+    caps = {int(s): station_cap_mw(meta, int(s)) for s in df[id_col].unique()}
+    return np.array([caps[int(s)] for s in df[id_col]], float)
 
 
 def predict_native(members, path, decision: dict, batch_size: int, scratch_dir, progress: bool) -> pd.DataFrame:
@@ -286,7 +288,9 @@ def evaluate_full(runs, test_paths, out_dir=None, engine: str = "unified", point
                else predict_native(members, p, decision, bs, scratch, progress))
         if res["station_id"].nunique() != 1:
             raise ValueError(f"{p} 映射成了多个 station_id {sorted(res['station_id'].unique())[:5]}，逐站评测只接受一站一文件")
-        cap = float(res["cap"].iloc[0])
+        cap = station_cap_mw(m0.station_meta, int(res["station_id"].iloc[0]))      # 指标分母 = 站表容量，与模型归一化同一个数
+        if not np.allclose(res["cap"].to_numpy(float), cap):
+            raise AssertionError(f"{p}：推理结果里的 cap 与站表不一致（{res['cap'].unique()[:3]} vs {cap}）")
         summ, row = write_station_report(res, st, cap, ens, extract_summary, encoder)
         row["seen"] = (int(res["station_id"].iloc[0]) in known) if known else True
         row["minutes"] = round((time.time() - t1) / 60.0, 3)

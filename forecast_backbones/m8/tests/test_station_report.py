@@ -97,6 +97,20 @@ def test_full_report_unified_matches_native(trained, tmp_path, monkeypatch):
     assert station_report.evaluate_full([run], [f], out_dir=tmp_path / "a", engine="auto", progress=False)["summary"]["engine"] == "native"
 
 
+def test_metric_cap_is_station_meta(trained, tmp_path):
+    """数据里的 cap_power_on 填错（50 而站表 500）：预测与分数都不变，station_metrics.csv 的 cap = 站表。"""
+    from forecast_backbones.m8.station_report import evaluate_full
+    run, tdir = trained
+    src = tdir / "station=1001.parquet"
+    bad = tmp_path / "station=1001.parquet"
+    pd.read_parquet(src).assign(cap_power_on=50.0).to_parquet(bad, index=False)
+    a = evaluate_full([run], [str(src)], out_dir=tmp_path / "a", engine="native", progress=False)["station_table"]
+    b = evaluate_full([run], [str(bad)], out_dir=tmp_path / "b", engine="native", progress=False)["station_table"]
+    assert float(a["cap"].iloc[0]) == 500.0 and float(b["cap"].iloc[0]) == 500.0
+    for k in MAIN:
+        assert abs(float(a[k].iloc[0]) - float(b[k].iloc[0])) < 1e-9
+
+
 def test_frame_with_station_id_variants(trained):
     from forecast_backbones.m8.station_report import frame_with_station_id
     from forecast_backbones.m8.evaluate import load_member

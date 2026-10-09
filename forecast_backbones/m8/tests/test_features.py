@@ -27,6 +27,23 @@ def test_channels_and_shapes(small_cfg, batch):
     assert np.isnan(inp["target"][:, 672:]).all()            # 没给标签 → 未来目标 NaN
 
 
+def test_cap_only_from_station_meta(small_cfg, batch):
+    """容量只来自站表：数据里 cap_power_on 改成 1/10 后特征逐位不变；站表没有的站 / 缺 station_id 列直接报错。"""
+    import torch
+    cfg, fb = _fb(small_cfg)
+    bd = batch["batch_dict"]
+    ref = fb.build(bd, training=False)
+    bd2 = {**bd, "cap_power_on": bd["cap_power_on"] * 0.1}
+    out = fb.build(bd2, training=False)
+    assert np.array_equal(ref["x"], out["x"]) and np.array_equal(ref["static"], out["static"])
+    assert set(np.unique(out["ctx"].cap)) <= {500.0, 300.0}
+    bd3 = {**bd, "station_id": torch.full_like(bd["station_id"], 4242)}
+    with pytest.raises(ValueError, match="station_meta"):
+        fb.build(bd3, training=False)
+    with pytest.raises(ValueError, match="station_id"):
+        fb.build({k: v for k, v in bd.items() if k != "station_id"}, training=False)
+
+
 def test_inference_is_deterministic_no_augmentation(small_cfg, batch):
     cfg, fb = _fb(small_cfg)
     a = fb.build(batch["batch_dict"], training=False, rng=np.random.default_rng(1))
