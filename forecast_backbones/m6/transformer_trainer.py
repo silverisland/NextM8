@@ -37,10 +37,12 @@ try:
     from .calibration import Calibrator, CalibrationConfig, result_to_long
     from .decision import (enforce_monotone, physics_clip, select_point, level_value, global_shrink_factor)
     from .config import load_config, deep_merge
+    from .features import station_cap_mw
 except ImportError:
     from calibration import Calibrator, CalibrationConfig, result_to_long
     from decision import enforce_monotone, physics_clip, select_point, level_value, global_shrink_factor
     from config import load_config, deep_merge
+    from features import station_cap_mw
 
 
 def _np(x):
@@ -319,8 +321,8 @@ def backfill_and_report(config_path, parquet_path, cal_start, cal_end, val_start
     res_cal = _clip_calibration_window(res_cal, cal_end, cfg["calibration"]["window_days"])
     calib = fit_calibrator_from_result(res_cal, cfg); calib.save(cfg["calibration"]["table_path"])
     f = fit_shrink_from_result(res_cal, cfg)
-    gccap = {model.station_meta.name(s): float(c) for s, c in
-             res_val.drop_duplicates("station_id")[["station_id", "cap"]].itertuples(index=False)}
+    gccap = {model.station_meta.name(int(s)): station_cap_mw(model.station_meta, int(s))
+             for s in res_val["station_id"].unique()}                                       # 每站固定容量（站表）
     rep = ladder_report(res_val, gccap, cfg, calib, f)
     rep.to_csv(report_dir / "ladder.csv", index=False)
     res_cal.to_parquet(out / "result_cal.parquet", index=False); res_val.to_parquet(out / "result_val.parquet", index=False)

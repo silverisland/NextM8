@@ -17,11 +17,11 @@ import numpy as np
 import pandas as pd
 
 try:
-    from ..m6.features import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta
+    from ..m6.features import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
     from ..m6._arrays import interp_nan
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from forecast_backbones.m6.features import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta
+    from forecast_backbones.m6.features import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
     from forecast_backbones.m6._arrays import interp_nan
 try:
     from .config import normalize_future_only
@@ -48,16 +48,6 @@ def _col(batch_dict: dict, col: str, keep_nan: bool) -> np.ndarray:
     if not keep_nan and not np.isfinite(a).all():
         a = interp_nan(a)
     return a
-
-
-def station_cap_mw(meta, station_id) -> float:
-    """每站一个固定容量：只取 station_meta 的 cap_mw。数据里的 cap_power_on 是随时间变的开机容量
-    （白马湖并网首月 8.88 → 68），训练 / 验证 / 测试一律不用它，模型归一化与指标分母才是同一个数。"""
-    row = meta.get(int(station_id)) or {}
-    cap = float(row.get("cap_mw", np.nan))
-    if not np.isfinite(cap) or cap <= 0:
-        raise ValueError(f"station_meta 里没有 station_id={int(station_id)} 的 cap_mw（或非正）；M8 的容量只来自站表，请补 station_meta.csv")
-    return cap
 
 
 def _scalar_per_row(v) -> np.ndarray:

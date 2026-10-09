@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
 
 from forecast_backbones.m5.conformal import Q_COLS, ReplayConfig, replay, summarize
 from forecast_backbones.m6.config import load_config
-from forecast_backbones.m6.features import StationMeta, build_row_context, norm_station_name
+from forecast_backbones.m6.features import StationMeta, build_row_context, norm_station_name, station_cap_mw
 from forecast_backbones.m6.rows import SHORT_ISSUE_TIME
 
 M5_CONFIG = ROOT / "forecast_backbones" / "m5" / "config" / "configs.yaml"
@@ -64,19 +64,11 @@ def _first_finite(v) -> float:
     return float(a[0]) if a.size else float("nan")
 
 
-def row_caps(rows: pd.DataFrame, cap_col: str, meta_cap, fallback: float) -> np.ndarray:
-    """逐行装机容量：数据的 cap 列 → station_meta 的 cap_mw → fallback。"""
-    cap = rows[cap_col].map(_first_finite).to_numpy(float) if cap_col in rows.columns else np.full(len(rows), np.nan)
-    if meta_cap is not None and np.isfinite(meta_cap):
-        cap = np.where(np.isfinite(cap), cap, float(meta_cap))
-    return np.where(np.isfinite(cap), cap, float(fallback))
-
-
 def predict_station_raw(model, station_path, m6cfg: dict, meta: StationMeta, cap_fallback: float,
                         batch_size: int = 64) -> pd.DataFrame:
     """单站：选行 → M5 推理原始 9 档分位 → 按 M6 口径算太阳几何/晴空功率/夜间/多变度档 → 原始分位表。
     真值列只写进结果表，不进模型输入。"""
-    ds = m6cfg["dataset"]; ts_col, label_col, cap_col = ds["ts_col"], ds["label_col"], ds["cap_col"]
+    ds = m6cfg["dataset"]; ts_col, label_col = ds["ts_col"], ds["label_col"]
     L = int(m6cfg["timesfm3"]["context_len"])
     station_path = Path(station_path)
     df = pd.read_parquet(station_path)
@@ -93,10 +85,11 @@ def predict_station_raw(model, station_path, m6cfg: dict, meta: StationMeta, cap
     if missing:
         raise KeyError(f"{station_path} 缺列 {missing}")
     sid = meta.id_of(st)
-    if sid is None or not meta.has_coords(sid):
+    if sid is None:
+        raise ValueError(f"站 {st} 不在 station_meta 里：容量只来自站表，请补 station_meta.csv")
+    if not meta.has_coords(sid):
         warnings.warn(f"站 {st} 在 station_meta 里没有坐标：按钟点伪几何处理（晴空功率 = 装机容量，高度角分档失效）")
-        sid = -1
-    cap = row_caps(rows, cap_col, (meta.get(sid) or {}).get("cap_mw") if sid >= 0 else None, cap_fallback)
+    cap = np.full(len(rows), station_cap_mw(meta, sid), float)                         # 每站固定容量（站表）；cap_fallback 不再使用
     epoch = ((rows[ts_col] - pd.Timestamp("1970-01-01")) // pd.Timedelta(seconds=1)).to_numpy(np.int64)
     out = []
     for a in range(0, len(rows), batch_size):
@@ -106,7 +99,7 @@ def predict_station_raw(model, station_path, m6cfg: dict, meta: StationMeta, cap
         bd[ts_col] = epoch[b]
         res = model(bd)
         q = res.aux["quantiles"].detach().cpu().numpy()                                  # [B,H,9]
-        ctx = build_row_context({**bd, ds["station_id_col"]: np.full(len(chunk), sid), cap_col: cap[b]}, m6cfg, meta)
+        ctx = build_row_context({**bd, ds["station_id_col"]: np.full(len(chunk), sid)}, m6cfg, meta)
         for i in range(len(chunk)):
             rec = {"station": st, "timestamp_win": chunk[ts_col].iloc[i], "cap": float(cap[b][i]),
                    "observe_power_future": np.asarray(chunk[label_col].iloc[i], np.float32)[:q.shape[1]],
@@ -199,7 +192,7 @@ def main(argv=None):
     p.add_argument("--m5_config", default=str(M5_CONFIG))
     p.add_argument("--m6_config", default=str(M6_CONFIG), help="取多变度档与站表路径口径")
     p.add_argument("--station_meta", default=str(STATION_META), help="station,station_id,lat,lon,alt_m,cap_mw")
-    p.add_argument("--cap_power", type=float, default=465.0, help="数据与站表都没有容量时的回退值")
+    p.add_argument("--cap_power", type=float, default=465.0, help="已不使用：容量只取站表 cap_mw")
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--device", default=None, help="auto|cuda|cpu，默认用 m5 配置里的")
     p.add_argument("--shard", type=int, default=0, help="多卡并行：本进程是第几份（从 0 起）")

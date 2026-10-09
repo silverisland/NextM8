@@ -16,7 +16,7 @@
 #   M6_CONFIG    训练用 yaml       默认空（读 $CKPT_DIR/model_config.yaml；旧 run 没有时才需要）
 #   STATION_DIR  test 数据          默认 $BASE_DIR/datasets/test
 #   OUT_DIR      结果输出目录       默认 $CKPT_DIR/metrics_ens
-#   CAP_POWER    回退容量           默认 465（自带 cap_power_on 的站会用站容量）
+#   CAP_POWER    已不使用（容量只取站表 station_meta.csv 的 cap_mw；参数保留只为兼容）
 #   NUM_WORKERS  并行 worker 数     默认 8
 #   BATCH_SIZE   推理 batch         默认空（用配置里的 eval.batch_size）
 #   PYTHON       python 解释器      默认 /home/ma-user/ts3/bin/python

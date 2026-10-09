@@ -34,11 +34,22 @@ def test_row_context_shapes_and_degradation(tmp_path, recwarn):
     assert ctx.p_clear[1, -1] == 300.0                                    # 退化站 p_clear = cap
     assert ctx.var_bin.shape == (2,) and set(ctx.var_bin.tolist()) <= {0, 1, 2}
 
-def test_cap_column_vector_form(tmp_path, recwarn):
+def test_cap_column_in_batch_is_ignored(tmp_path, recwarn):
+    """容量只来自站表：数据里的 cap_power_on 不管填什么（标量或向量）都不用。"""
     cfg = load_config({"timesfm3": {"context_len": 8, "pred_len": 4}})
-    b = _batch(); b["cap_power_on"] = np.tile(b["cap_power_on"][:, None], (1, 8))
-    ctx = build_row_context(b, cfg, _sm(tmp_path))
-    assert ctx.cap.tolist() == [500.0, 300.0]
+    b = _batch(); b["cap_power_on"] = np.array([5.0, 3.0])
+    assert build_row_context(b, cfg, _sm(tmp_path)).cap.tolist() == [500.0, 300.0]
+    b = _batch(); b["cap_power_on"] = np.tile(np.array([[5.0], [3.0]]), (1, 8))
+    assert build_row_context(b, cfg, _sm(tmp_path)).cap.tolist() == [500.0, 300.0]
+
+def test_station_missing_from_meta_or_no_station_id_raises(tmp_path, recwarn):
+    cfg = load_config({"timesfm3": {"context_len": 8, "pred_len": 4}})
+    b = _batch(); b["station_id"] = np.array([1001, 7])
+    with pytest.raises(ValueError, match="station_meta"):
+        build_row_context(b, cfg, _sm(tmp_path))
+    b = _batch(); del b["station_id"]
+    with pytest.raises(ValueError, match="station_id"):
+        build_row_context(b, cfg, _sm(tmp_path))
 
 def test_cap_falls_back_to_station_meta(tmp_path, recwarn):
     cfg = load_config({"timesfm3": {"context_len": 8, "pred_len": 4}})

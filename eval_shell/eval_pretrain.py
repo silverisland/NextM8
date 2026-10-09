@@ -12,7 +12,7 @@ fusion_station_script.py 同理：
 返回 logits [B,192]），无需改本脚本。
 
 其余推理 + 指标 + 写文件逻辑（unified_inference / SolarMetricCalculator /
-NanwangMetric / extract_summary / NumpyJSONEncoder / station_cap_from_df）逐行复用
+NanwangMetric / extract_summary / NumpyJSONEncoder）逐行复用；容量只取站表 station_meta.csv 的 cap_mw
 eval_station_script.py，输出与 M1-M4 的 metrics_ens 完全同构，可直接进
 make_models_summary 汇总。
 
@@ -60,7 +60,6 @@ import yaml
 from eval_station_script import (
     NumpyJSONEncoder,
     extract_summary,
-    station_cap_from_df,
 )
 
 CONFIG_CANDIDATES = ("model_config.yaml", "config/configs.yaml")
@@ -128,6 +127,26 @@ def scale_observe_power_tail(station_df, tail_len=4, factor=None):
     station_df = station_df.copy()
     station_df["observe_power"] = scaled
     return station_df
+
+
+STATION_META_DEFAULT = REPO_ROOT / "forecast_backbones" / "m6" / "station_meta.csv"
+
+
+def station_table_cap(station_df, st, station_meta=None) -> float:
+    """该站的固定容量：只取站表 cap_mw。数据有数值 station_id 列就按它查，否则按站名查；查不到直接报错。"""
+    import pandas as pd
+    from forecast_backbones.m6.features import StationMeta, norm_station_name, station_cap_mw
+    meta = station_meta if station_meta is not None else StationMeta.from_csv(STATION_META_DEFAULT)
+    sid = None
+    if "station_id" in station_df.columns:
+        v = pd.to_numeric(station_df["station_id"].map(norm_station_name), errors="coerce")
+        if v.notna().all() and v.nunique() == 1:
+            sid = int(v.iloc[0])
+    if sid is None:
+        sid = meta.id_of(norm_station_name(st))
+    if sid is None:
+        raise ValueError(f"站 {st!r} 不在 station_meta（{STATION_META_DEFAULT}）里，拿不到容量：容量只来自站表")
+    return station_cap_mw(meta, sid)
 
 
 def infer_station_pretrain(model_name, checkpoint_dir, station_path, cap_power,
@@ -199,10 +218,10 @@ def infer_station_pretrain(model_name, checkpoint_dir, station_path, cap_power,
             on=["timestamp_win", "station"], how="left",
         )
 
-    # 站名 + 该站真实 cap（参考版逐站回测：cap 用该站容量）
+    # 站名 + 该站固定容量（站表 cap_mw；cap_power 参数不再使用）
     st = str(result_df["station"].iloc[0])
-    cap = station_cap_from_df(station_df, cap_power)
-    print(f"[station] {st}  cap_power={cap}  行数={len(result_df)}")
+    cap = station_table_cap(station_df, st)
+    print(f"[station] {st}  cap_power={cap}（站表 cap_mw）  行数={len(result_df)}")
     return st, cap, result_df
 
 
@@ -272,7 +291,7 @@ def main():
                         help="dataset/test/station=<站>.parquet")
     parser.add_argument("--out_dir", type=str, required=True,
                         help="runs/<model>/pretrain_100m_v1/metrics_ens")
-    parser.add_argument("--cap_power", type=float, default=465.0, help="回退容量")
+    parser.add_argument("--cap_power", type=float, default=465.0, help="已不使用：容量只取站表 station_meta.csv 的 cap_mw")
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--tail_scale", type=float, default=None,

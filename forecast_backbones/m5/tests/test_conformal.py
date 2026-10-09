@@ -164,7 +164,7 @@ def test_predict_station_raw_one_row_per_day_at_or_before_ten(tmp_path):
     raw = predict_station_raw(model, path, load_config(None), meta, cap_fallback=465.0, batch_size=2)
     assert len(raw) == 3 and (raw["timestamp_win"].dt.hour == 10).all() and (raw["station"] == "1001").all()
     assert all("observe_power_future" not in s for s in seen)                          # 真值不进模型
-    assert (raw["cap"] == 80.0).all() and not raw["degraded"].any()
+    assert (raw["cap"] == 90.0).all() and not raw["degraded"].any()                   # 容量只取站表 cap_mw，数据里的 80 不用
     r = raw.iloc[0]
     assert r["q_0.5"].shape == (H,) and np.allclose(r["observe_power_future"], 7.0)
     assert r["night"].any() and (~r["night"]).any() and r["p_clear"].max() > 0

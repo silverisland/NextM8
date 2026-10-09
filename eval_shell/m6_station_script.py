@@ -10,7 +10,7 @@ M6 的 safetensors 只存微调增量，不能交给 eval_station_script.load_mo
 所以与 eval_pretrain.py 一样自己装模型：
   产物目录 -> forecast_backbones.m6.station_eval.load_trained_model -> 单站推理（与训练期验证同一条 evaluate_model）
 
-指标与写文件（SolarMetricCalculator / NanwangMetric / extract_summary / NumpyJSONEncoder / station_cap_from_df）
+指标与写文件（SolarMetricCalculator / NanwangMetric / extract_summary / NumpyJSONEncoder；容量只取站表 cap_mw）
 与 eval_pretrain.py 逐行一致，输出与 M1-M5 的 metrics_ens 同构，可直接进 make_models_summary 汇总。
 
 产出：
@@ -44,8 +44,8 @@ import torch
 from eval_station_script import (
     NumpyJSONEncoder,
     extract_summary,
-    station_cap_from_df,
 )
+from forecast_backbones.m6.features import station_cap_mw
 from forecast_backbones.m6.station_eval import RESULT_COLS, load_trained_model, predict_station
 
 
@@ -73,8 +73,8 @@ def infer_station_m6(checkpoint_dir, station_path, cap_power, batch_size=None, d
             raise ValueError(f"推理结果（{len(result_df)} 行）与 {station_path}（{len(station_df)} 行）的行序对不上")
         result_df["cap_power_on"] = station_df["cap_power_on"].to_numpy()
 
-    cap = station_cap_from_df(station_df, cap_power)
-    print(f"[station] {st}  cap_power={cap}  行数={len(result_df)}")
+    cap = station_cap_mw(model.station_meta, int(res["station_id"].iloc[0]))     # 站表容量；cap_power 参数不再使用
+    print(f"[station] {st}  cap_power={cap}（站表 cap_mw）  行数={len(result_df)}")
     return st, cap, result_df
 
 
@@ -137,7 +137,7 @@ def main():
                         help="datasets/test/station=<站>.parquet")
     parser.add_argument("--out_dir", type=str, required=True,
                         help="runs/m6/<run_id>/metrics_ens")
-    parser.add_argument("--cap_power", type=float, default=465.0, help="回退容量")
+    parser.add_argument("--cap_power", type=float, default=465.0, help="已不使用：容量只取站表 station_meta.csv 的 cap_mw")
     parser.add_argument("--batch_size", type=int, default=None,
                         help="推理 batch；不给用配置里的 eval.batch_size")
     parser.add_argument("--device", type=str, default=None)

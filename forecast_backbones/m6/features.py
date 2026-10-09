@@ -251,20 +251,25 @@ class RowContext:
     degraded: np.ndarray
 
 
+def station_cap_mw(meta: StationMeta, station_id) -> float:
+    """每站一个固定容量：只取 station_meta 的 cap_mw。数据里的 cap_power_on 是随时间变的开机容量
+    （白马湖并网首月 8.88 → 68），训练 / 验证 / 测试一律不用它，模型归一化与指标分母才是同一个数。"""
+    row = meta.get(int(station_id)) or {}
+    cap = float(row.get("cap_mw", np.nan))
+    if not np.isfinite(cap) or cap <= 0:
+        raise ValueError(f"station_meta 里没有 station_id={int(station_id)} 的 cap_mw（或非正）；容量只来自站表，请补 station_meta.csv")
+    return cap
+
+
 def build_row_context(batch_dict: dict, cfg: dict, station_meta: StationMeta) -> RowContext:
     ds = cfg["dataset"]; t3 = cfg["timesfm3"]; L = int(t3["context_len"]); H = int(t3["pred_len"])
     ts_epoch = _to_np(batch_dict[ds["ts_col"]]).astype(np.int64).reshape(-1)
     B = ts_epoch.shape[0]
-    sid = _to_np(batch_dict[ds["station_id_col"]]).astype(int).reshape(-1) if ds["station_id_col"] in batch_dict \
-        else np.zeros(B, int)
-    if ds["cap_col"] in batch_dict:
-        cap = _scalar_per_row(batch_dict[ds["cap_col"]])
-    else:
-        cap = np.array([(station_meta.get(s) or {}).get("cap_mw", np.nan) for s in sid], float)
-    bad_cap = ~np.isfinite(cap)
-    if bad_cap.any():
-        bad_ids = sorted(int(s) for s in np.unique(sid[bad_cap]))
-        raise ValueError(f"cap 非有限（station_meta 与 {ds['cap_col']!r} 均无有效值）：station_id={bad_ids}")
+    if ds["station_id_col"] not in batch_dict:
+        raise ValueError(f"batch_dict 缺 {ds['station_id_col']!r} 列：容量与坐标都按站查 station_meta，必须带数值 station_id")
+    sid = _to_np(batch_dict[ds["station_id_col"]]).astype(int).reshape(-1)
+    caps = {int(s): station_cap_mw(station_meta, int(s)) for s in np.unique(sid)}      # 每站固定容量（站表）
+    cap = np.array([caps[int(s)] for s in sid], float)
     ts = window_timestamps(ts_epoch, L, H, int(ds["step_min"]))
     elev = np.empty((B, L + H)); ghi = np.empty((B, L + H)); degraded = np.zeros(B, bool)
     for s in np.unique(sid):

@@ -117,8 +117,8 @@ def test_load_station_meta_relative_path_falls_back_to_package_file(tmp_path, mo
     with pytest.warns(UserWarning, match="station_meta"):
         sm = TransformersAdaptedM6Model._load_station_meta("some/relative/nonexistent/station_meta.csv")
     assert isinstance(sm, StationMeta)
-    assert sm.has_coords(1001)                      # 包内默认文件里的示例站
-    assert sm.get(1001)["cap_mw"] == 500.0
+    assert sm.has_coords(1001)                      # 包内默认文件里的真实站（2026-10-08 起填的是真实容量，不再硬编码数值）
+    assert sm.get(1001)["cap_mw"] > 0
 
 
 def test_load_station_meta_fully_absent_still_degrades_with_warning(tmp_path, monkeypatch):

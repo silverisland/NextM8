@@ -23,12 +23,14 @@ try:
     from .transformer_trainer import evaluate_model, fit_calibrator_from_result, recompute_points
     from .lora import lora_state_dict, save_lora_weights
     from .rows import SHORT_ISSUE_TIME, issue_grid_row_index, scored_row_index
+    from .features import station_cap_mw
     from . import _dist
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from transformer_trainer import evaluate_model, fit_calibrator_from_result, recompute_points
     from lora import lora_state_dict, save_lora_weights
     from rows import SHORT_ISSUE_TIME, issue_grid_row_index, scored_row_index
+    from features import station_cap_mw
     import _dist
 try:
     from ...pipelines.nanwang_metric import NanwangMetric
@@ -68,8 +70,8 @@ def score_split(model, ds_cal, ds_val, collate, cfg, *, calib=None,
                 return float("nan"), pd.DataFrame(columns=TABLE_COLS), calib
             ds_val = torch.utils.data.Subset(ds_val, idx.tolist())
         res_val = evaluate_model(model, ds_val, collate, cfg)
-        gccap = {model.station_meta.name(int(s)): float(c) for s, c in
-                 res_val.drop_duplicates("station_id")[["station_id", "cap"]].itertuples(index=False)}
+        gccap = {model.station_meta.name(int(s)): station_cap_mw(model.station_meta, int(s))
+                 for s in res_val["station_id"].unique()}                                   # 每站固定容量（站表）
         df = recompute_points(res_val, cfg, calib, "calibrated_pstar", shrink=1.0)
         sd = NanwangMetric().short_d1_daily(df, gccap)
         name_to_id = {model.station_meta.name(int(s)): int(s) for s in res_val["station_id"].unique()}

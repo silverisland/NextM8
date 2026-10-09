@@ -9,7 +9,6 @@ dataset:
   label_col: observe_power_future
   ts_col: timestamp_win
   station_id_col: station_id
-  cap_col: cap_power_on
   station_meta: forecast_backbones/m6/station_meta.csv
   info_csv: info.csv                   # 路线 A 不读
   tz: Asia/Shanghai
