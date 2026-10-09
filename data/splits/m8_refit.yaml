@@ -1,0 +1,14 @@
+# M8 全量重训（refit）切分：配方在 m8_v1 上选定之后，给最终模型用。
+#   不留验证块、不整站留出：每站测试起点前 purge 天之外全部进 train.parquet，valid.parquet 为 0 行。
+#   训练加 --refit（不验证、不早停，固定步数后存最终权重）；步数取该配方在 m8_v1 上各种子 best_step 的上限附近（c8 调度：5000）。
+#   python -m pipelines.time_splits --parquet "<训练文件夹>/*.parquet" --test-parquets "<测试文件夹>/*.parquet" \
+#       --split-yaml data/splits/m8_refit.yaml --dry-run                      # 先看逐站报告：验证天应全为 0
+#   …同上去掉 --dry-run 加 --out-dir data/splits/m8_refit                     # 落盘
+#   bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants e1_final --seeds 0,1,2 --refit --max_steps 5000 --batch_tag refit
+#   bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/m8/refit/e1_final_s2 --test "<测试文件夹>/*.parquet"
+train_start: null                  # 训练数据从最早一天起，不截
+val_blocks: []                     # 没有验证块（与 allow_stations_without_val: true 搭配才合法）
+cal_days: 0
+purge_days: 2                      # 测试起点前 2 天剔除（标签 192 步 = 2 天）
+embargo_days: 7                    # 没有验证块时不起作用；构造期检查仍要求 purge + embargo ≥ 9 天
+allow_stations_without_val: true   # 全量重训的开关：允许所有站都没有验证行

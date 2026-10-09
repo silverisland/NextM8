@@ -6,6 +6,7 @@
   3. EvalCallback：每 eval_every_steps 步在验证集上打分（nanwang_after_pstar：每站每天 10:00 前最晚一行 → 南网短期 D+1；
      或 nrmse：整点起报行 → 192 步容量归一 RMSE%），patience 按验证次数计，最优权重存 model.safetensors（完整 state_dict）
   4. 训后：加载最优权重 → 验证集推理 → result_val.parquet（默认只存整点起报行）→ reports/summary.csv、reports/station_table.csv
+  5. --refit（配方选定后给最终模型）：train ∪ valid 全当训练行，不验证、不早停，固定 max_steps 步后存最终权重；summary 里没有验证分数
 多卡：accelerate launch / torchrun 起多进程，每进程各持一份模型吃不同的批；打分、存盘、报表只在主进程做。
 训练模型的构造必须从零起步：train.weights_path 改指向 out_dir 下从不写入的 .fresh/ 哨兵路径。"""
 from __future__ import annotations
@@ -193,18 +194,59 @@ class _M8Trainer(Trainer):
 
 
 # ------------------------------------------------------------------ 数据
-def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir, reuse: bool = False):
+def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir, reuse: bool = False, refit: bool = False):
+    """refit=True：全量重训，train.parquet ∪ valid.parquet 全部当训练行（valid 可以是 0 行），不建验证集（返回 ds_val=None）。"""
+    import pyarrow.parquet as pq
     d = _check_presplit_dir(splits_dir, need_cal=False)
     man = json.loads((d / "split_manifest.json").read_text(encoding="utf-8"))
     load = functools.partial(_dataset_with_station_id, cfg=cfg, station_meta=station_meta, scratch_dir=scratch_dir, reuse=reuse)
+    if refit:
+        ds_train = load([str(_refit_rows(d, scratch_dir, reuse))])
+        if len(ds_train) == 0:
+            raise ValueError(f"{d} 的 train ∪ valid 为空")
+        return ds_train, None, man
+    if pq.read_metadata(d / "valid.parquet").num_rows == 0:
+        raise ValueError(f"{d} 的 valid.parquet 为 0 行：这是全量重训切分，训练请加 --refit（不验证、不早停、固定步数）")
     ds_train, ds_val = load([str(d / "train.parquet")]), load([str(d / "valid.parquet")])
     if len(ds_train) == 0 or len(ds_val) == 0:
         raise ValueError(f"{d} 的 train/valid 为空")
     return ds_train, ds_val, man
 
 
+def _refit_rows(d: Path, scratch_dir, reuse: bool) -> Path:
+    """train.parquet ∪ valid.parquet（去掉 split_block 列）→ scratch_dir/refit_rows.parquet；valid 为 0 行时直接用 train.parquet。
+    reuse=True（多卡的非主进程）：主进程已写好就直接用。"""
+    import pyarrow.parquet as pq
+    if pq.read_metadata(d / "valid.parquet").num_rows == 0:
+        return d / "train.parquet"
+    out = Path(scratch_dir) / "refit_rows.parquet"
+    if reuse and out.exists():
+        return out
+    tr = pd.read_parquet(d / "train.parquet")
+    va = pd.read_parquet(d / "valid.parquet").drop(columns=["split_block"], errors="ignore")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pd.concat([tr, va], ignore_index=True).to_parquet(out, index=False)
+    return out
+
+
+def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_train,
+                 nw=float("nan"), nr=float("nan"), seen=float("nan"), unseen=float("nan"), n_unseen=0) -> dict:
+    """reports/summary.csv 的一行（列序固定；collect_runs 按列名取）。refit 时分数列全是 NaN。"""
+    return {"tag": tag or cfg["run"].get("tag") or out.name, "nanwang_short_D+1": nw, "nrmse_pct": nr,
+            "nanwang_seen": seen, "nanwang_unseen": unseen, "n_unseen_stations": n_unseen,
+            "best_step": best_step, "n_evals": n_evals, "train_minutes": minutes,
+            "params": model.n_params(), "blocks": "+".join(cfg["model"]["blocks"]) or "none",
+            "layout": cfg["model"].get("layout", "fused"), "head_mode": cfg["model"].get("head_mode", "step_cov"),
+            "patch_len": cfg["model"]["patch_len"], "d_model": cfg["model"]["d_model"],
+            "target_scale": cfg["features"].get("target_scale", "cap"), "cpm": cfg["train"]["cpm"]["enabled"],
+            "cov_dropout": cfg["train"].get("cov_dropout", 0.0),
+            "future_only": "+".join(d["col"] for d in cfg["features"].get("future_only", [])) or "",
+            "residual": cfg["features"].get("residual_base_col") or "",
+            "n_val_rows": n_val, "n_train_rows": n_train}
+
+
 # ------------------------------------------------------------------ 主流程
-def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | None = None) -> dict:
+def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | None = None, refit: bool = False) -> dict:
     if out_dir is not None:
         config_path = deep_merge(raw_override(config_path), {"run": {"out_dir": str(out_dir)}})
     cfg = load_config(config_path)
@@ -220,6 +262,9 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     _check_presplit_dir(splits_dir, need_cal=False)
     train_cfg = {**cfg, "train": {**cfg["train"], "weights_path": str(out / ".fresh" / WEIGHTS_FILE)}}
     args = build_training_args(train_cfg, out, max_steps)
+    if refit and int(args.max_steps) <= 0:
+        raise ValueError("全量重训（refit）没有验证集、不能早停：train.schedule.max_steps（或 --max-steps）必须 > 0，"
+                         "按该配方在验证切分上各种子 best_step 的上限给（c8 调度约 5000）")
     _ = args.device                        # 多进程时在这里建进程组、绑卡；须先于模型构造
     if args.n_gpu > 1:
         raise ValueError(f"单进程看到 {args.n_gpu} 张卡：HF 会退到 DataParallel，dict batch 不支持。多卡请用 accelerate launch / torchrun")
@@ -230,10 +275,10 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     scratch = out / ".data"
     station_col, ts_col = str(cfg["dataset"]["station_id_col"]), str(cfg["dataset"]["ts_col"])
     if main:
-        loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=False)
+        loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=False, refit=refit)
     _dist.barrier()
     if not main:
-        loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=True)
+        loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=True, refit=refit)
     ds_train, ds_val, man = loaded
     known = model.set_known_stations(row_stations(ds_train, station_col).tolist())     # 验证/测试里名单外的站走未知站槽
     train_cfg["dataset"]["known_stations"] = known
@@ -241,28 +286,48 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     eval_every = sch.get("eval_every_steps")
     if main:
         dump_config(deep_merge(deep_merge(DEFAULT_CFG, raw_override(config_path)), {"dataset": {"known_stations": known}}), out / CONFIG_FILE)
-        n_unseen_val = len(set(row_stations(ds_val, station_col).tolist()) - set(known))
-        print(f"[m8] 训练集站 {len(known)} 个；验证集里训练没见过的站 {n_unseen_val} 个（走未知站槽，报表里 seen=False）")
+        if refit:
+            print(f"[m8] 全量重训（refit）：训练集站 {len(known)} 个（train ∪ valid），不验证、不早停，固定 {args.max_steps} 步后存最终权重")
+        else:
+            n_unseen_val = len(set(row_stations(ds_val, station_col).tolist()) - set(known))
+            print(f"[m8] 训练集站 {len(known)} 个；验证集里训练没见过的站 {n_unseen_val} 个（走未知站槽，报表里 seen=False）")
         (out / "split_manifest.json").write_text(json.dumps({"generated_by": "forecast_backbones.m8.train",
-            "splits_dir": str(Path(splits_dir).resolve()), "plan": man.get("plan"),
-            "counts": {"train": len(ds_train), "val": len(ds_val)}}, indent=2, ensure_ascii=False), encoding="utf-8")
+            "splits_dir": str(Path(splits_dir).resolve()), "plan": man.get("plan"), "refit": bool(refit),
+            "counts": {"train": len(ds_train), "val": 0 if ds_val is None else len(ds_val)}}, indent=2, ensure_ascii=False), encoding="utf-8")
         world, bs = _dist.world_size(), int(args.per_device_train_batch_size)
         budget = f"{args.max_steps} 步" if args.max_steps > 0 else f"不限步数（{sch['epochs_max']} 个 epoch）"
         print(f"[m8] tag={tag or cfg['run'].get('tag')} params={model.n_params():,} channels={len(model.fe.channel_names)} "
               f"blocks={cfg['model']['blocks']} layout={cfg['model'].get('layout', 'fused')} head={cfg['model'].get('head_mode', 'step_cov')}")
-        print(f"[m8] train={len(ds_train)} val={len(ds_val)} rows；{world} 个进程 × 每卡 batch {bs}；预算 {budget}；"
-              f"验证{f'每 {eval_every} 步' if eval_every else '每个 epoch 末'}，早停指标 {cfg['train']['early_stop']['metric']}，"
-              f"patience={cfg['train']['early_stop']['patience']}；采样 {sampling}；device={args.device}", flush=True)
+        how = ("无验证、不早停（refit）" if refit else
+               f"验证{f'每 {eval_every} 步' if eval_every else '每个 epoch 末'}，早停指标 {cfg['train']['early_stop']['metric']}，"
+               f"patience={cfg['train']['early_stop']['patience']}")
+        print(f"[m8] train={len(ds_train)} val={0 if ds_val is None else len(ds_val)} rows；{world} 个进程 × 每卡 batch {bs}；"
+              f"预算 {budget}；{how}；采样 {sampling}；device={args.device}", flush=True)
     best_path = out / WEIGHTS_FILE
-    cb = EvalCallback(model, ds_val, collate, train_cfg, best_path=best_path, patience=int(cfg["train"]["early_stop"]["patience"]),
-                      log_path=out / "train_log.json", eval_every_steps=eval_every)
+    cb = None if refit else EvalCallback(model, ds_val, collate, train_cfg, best_path=best_path,
+                                         patience=int(cfg["train"]["early_stop"]["patience"]),
+                                         log_path=out / "train_log.json", eval_every_steps=eval_every)
     model.train()
-    trainer = _M8Trainer(model=model, args=args, data_collator=collate, train_dataset=ds_train, callbacks=[cb],
+    trainer = _M8Trainer(model=model, args=args, data_collator=collate, train_dataset=ds_train, callbacks=[cb] if cb else [],
                          sampling=sampling, station_col=station_col, ts_col=ts_col)
     t0 = time.time()
     trainer.train()
     if not main:
         return {}
+    row = functools.partial(_summary_row, cfg, tag, out, model, n_train=len(ds_train))
+    if refit:
+        # 全量重训：没有验证分数；最终权重 = 第 max_steps 步的权重（cosine 调度在这一步退火到 0）
+        save_weights(model, best_path)
+        hist = [{"step": int(h["step"]), "train_loss": float(h["loss"])} for h in trainer.state.log_history if "loss" in h]
+        summary = pd.DataFrame([row(best_step=int(args.max_steps), n_evals=0, minutes=(time.time() - t0) / 60.0, n_val=0)])
+        summary.to_csv(report_dir / "summary.csv", index=False)
+        (out / "train_log.json").write_text(json.dumps({"history": hist, "best": None, "best_step": int(args.max_steps),
+                                                        "patience": None, "metric": None, "refit": True,
+                                                        "final": summary.to_dict("records")[0]},
+                                                       indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        print(summary.to_string(index=False))
+        print(f"[m8] 产物：{best_path} / {out / CONFIG_FILE} / {report_dir}（全量重训没有验证分数；测试集分数用 evaluate.py / eval_m8.sh）")
+        return {"summary": summary, "station_table": None, "history": hist, "best": None}
     if cb.best_step is None or not best_path.exists():
         raise ValueError(f"训练全程没有产出可用的最优权重：早停指标 {cb.metric} 在验证集上自始至终非有限，{best_path} 不存在。"
                          f"请检查验证集是否覆盖完整天、station_meta 是否填好。")
@@ -273,18 +338,8 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     nr, res_hourly = score_nrmse(model, ds_val, collate, train_cfg, int(cfg["train"]["early_stop"].get("nrmse_issue_every_min", 60)))
     res_hourly.to_parquet(out / "result_val.parquet", index=False)
     nw_seen, nw_unseen, n_unseen = seen_unseen_scores(station_tab)
-    summary = pd.DataFrame([{
-        "tag": tag or cfg["run"].get("tag") or out.name, "nanwang_short_D+1": nw_score, "nrmse_pct": nr,
-        "nanwang_seen": nw_seen, "nanwang_unseen": nw_unseen, "n_unseen_stations": n_unseen,
-        "best_step": cb.best_step, "n_evals": len(cb.history), "train_minutes": (time.time() - t0) / 60.0,
-        "params": model.n_params(), "blocks": "+".join(cfg["model"]["blocks"]) or "none",
-        "layout": cfg["model"].get("layout", "fused"), "head_mode": cfg["model"].get("head_mode", "step_cov"),
-        "patch_len": cfg["model"]["patch_len"], "d_model": cfg["model"]["d_model"],
-        "target_scale": cfg["features"].get("target_scale", "cap"), "cpm": cfg["train"]["cpm"]["enabled"],
-        "cov_dropout": cfg["train"].get("cov_dropout", 0.0),
-        "future_only": "+".join(d["col"] for d in cfg["features"].get("future_only", [])) or "",
-        "residual": cfg["features"].get("residual_base_col") or "",
-        "n_val_rows": len(ds_val), "n_train_rows": len(ds_train)}])
+    summary = pd.DataFrame([row(best_step=cb.best_step, n_evals=len(cb.history), minutes=(time.time() - t0) / 60.0, n_val=len(ds_val),
+                                nw=nw_score, nr=nr, seen=nw_seen, unseen=nw_unseen, n_unseen=n_unseen)])
     summary.to_csv(report_dir / "summary.csv", index=False)
     station_tab.to_csv(report_dir / "station_table.csv", index=False)
     log = json.loads((out / "train_log.json").read_text(encoding="utf-8"))
@@ -302,5 +357,7 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=None)
     ap.add_argument("--max-steps", type=int, default=None, help="覆盖 train.schedule.max_steps；0 = 不限步数（按 epochs_max）")
     ap.add_argument("--tag", default=None, help="写进 reports/summary.csv 的变体名")
+    ap.add_argument("--refit", action="store_true",
+                    help="全量重训：train ∪ valid 全当训练行，不验证、不早停，固定 max_steps 步后存最终权重（配方选定后给最终模型）")
     a = ap.parse_args()
-    train_m8(a.config, a.splits_dir, out_dir=a.out, max_steps=a.max_steps, tag=a.tag)
+    train_m8(a.config, a.splits_dir, out_dir=a.out, max_steps=a.max_steps, tag=a.tag, refit=a.refit)

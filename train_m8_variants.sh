@@ -7,6 +7,8 @@
 #   bash train_m8_variants.sh --splits_dir ... --gpus 0,1,2,3 --variants a1_hybrid,a2_slstm,a3_attention
 #   bash train_m8_variants.sh --splits_dir ... --max_steps 50 --gpus 0 --batch_tag smoke        # 全部变体冒烟
 #   bash train_m8_variants.sh --splits_dir ... --variants a1_hybrid,c1_no_cpm --seeds 0,1,2      # 每个变体 3 颗种子（tag 带 _s<seed>）
+#   bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants e1_final --seeds 0,1,2 --refit --max_steps 5000 --batch_tag refit
+#                                                                                   # 全量重训 3 颗种子（--refit 透传给 train_m8.sh）
 # 产物：runs/m8/<batch_tag>/<变体>/…，汇总 runs/m8/<batch_tag>/variants_summary.csv
 set -u
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

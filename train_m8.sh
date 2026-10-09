@@ -28,6 +28,7 @@ OVERWRITE=0
 ALLOW_CPU=0
 TAG=""
 SEED=""
+REFIT=0
 VENV_PY="/home/ma-user/ts3/bin/python"
 PRE_CUDA_LD="/usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu"
 
@@ -46,6 +47,8 @@ usage() {
   --precision <fp32|bf16>  训练精度（默认 fp32；V100 不支持 bf16）
   --tag <name>             写进 reports/summary.csv 的变体名（默认取配置 run.tag）
   --seed <n>               覆盖 run.seeds（模型初始化 + 数据顺序 + 增强随机数）
+  --refit                  全量重训：train ∪ valid 全当训练行，不验证、不早停，固定 --max_steps 步后存最终权重
+                           （配方选定后给最终模型；切分用 data/splits/m8_refit.yaml 落的目录，valid.parquet 为 0 行）
   --port <n>               多进程通信端口（默认 29700）
   --cpu_threads <n>        每个进程的 CPU 线程数
   --overwrite              产物目录已存在时删掉重训
@@ -66,6 +69,7 @@ while [ $# -gt 0 ]; do
     --precision)    PRECISION="$2";   shift 2 ;;
     --tag)          TAG="$2";         shift 2 ;;
     --seed)         SEED="$2";        shift 2 ;;
+    --refit)        REFIT=1;          shift   ;;
     --port)         PORT="$2";        shift 2 ;;
     --cpu_threads)  CPU_THREADS="$2"; shift 2 ;;
     --overwrite)    OVERWRITE=1;      shift   ;;
@@ -133,7 +137,7 @@ if [ $RC -eq 3 ]; then echo "❌ dataset.station_meta 路径不存在（见上�
 elif [ $RC -ne 0 ]; then echo "❌ 生成运行时配置失败" >&2; rm -f "$TMP_CFG"; exit 1; fi
 
 echo "=============================================================="
-echo "M8 训练   tag=$TAG${SEED:+   seed=$SEED}"
+echo "M8 训练   tag=$TAG${SEED:+   seed=$SEED}$([ "$REFIT" -eq 1 ] && echo '   [全量重训 refit：不验证、不早停]')"
 echo "CONFIG     : $CONFIG  (运行时副本: $TMP_CFG)"
 echo "SPLITS_DIR : $SPLITS_DIR"
 echo "RUN_DIR    : $RUN_DIR"
@@ -147,6 +151,7 @@ cmd=("$VENV_PY" -m accelerate.commands.launch --num_processes="$NP" --num_machin
 [ -z "$GPUS" ] && cmd+=(--cpu)
 cmd+=(-m forecast_backbones.m8.train --config "$TMP_CFG" --splits-dir "$SPLITS_DIR" --out "$RUN_DIR" --tag "$TAG")
 [ -n "$MAX_STEPS" ] && cmd+=(--max-steps "$MAX_STEPS")
+[ "$REFIT" -eq 1 ] && cmd+=(--refit)
 echo "CMD: ${cmd[*]}"
 "${cmd[@]}" 2>&1 | tee "$LOG_FILE"
 rc=${PIPESTATUS[0]}

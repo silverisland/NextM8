@@ -660,3 +660,34 @@ def test_val_only_stations_hold_out_whole_station(tmp_path, capsys):
     with pytest.raises(ValueError, match="同时写在"):
         main(["--parquet", str(tmp_path / "train" / "*.parquet"), "--split-yaml", str(tmp_path / "bad.yaml"), "--dry-run",
               "--test-parquets", str(tmp_path / "test" / "*.parquet")])
+
+
+def test_refit_split_without_val_blocks(tmp_path, capsys):
+    """全量重训切分：val_blocks 为空 + allow_stations_without_val → 每站测试起点前 purge 天之外全是训练行，valid.parquet 0 行。"""
+    with pytest.raises(ValueError, match="allow_stations_without_val"):
+        SplitPlan.from_dict({**FIXED, "val_blocks": [], "test_start": "2025-09-01"})
+    plan = SplitPlan.from_dict({**FIXED, "val_blocks": [], "test_start": "2025-09-01", "allow_stations_without_val": True})
+    assert plan.val_blocks == () and plan.train_exclusions == [(pd.Timestamp("2025-08-30"), None)] and plan.coverage_note is None
+    df = _span_frame(freq="60min")
+    starts = {s: b for s, (a, b) in SPANS.items()}
+    sp = StationSplitPlan.from_dict({**FIXED, "val_blocks": [], "allow_stations_without_val": True}, starts)
+    man = write_splits(df, sp, tmp_path / "r")
+    assert man["counts"]["val"] == 0 and man["blocks"] == [] and man["plan"]["val_blocks"] == []
+    rep = {r["station"]: r for r in man["station_report"]}
+    assert all(r["val_days"] == 0 and r["dropped_days"] == 2 and r["train_share"] > 0.98 for r in rep.values())
+    va = pd.read_parquet(tmp_path / "r" / "valid.parquet")
+    assert len(va) == 0 and "split_block" in va.columns
+    tr = pd.read_parquet(tmp_path / "r" / "train.parquet")
+    for s, (a, b) in SPANS.items():
+        assert tr[tr["station"] == s]["timestamp_win"].max() < pd.Timestamp(b) - pd.Timedelta(days=2)
+    # 命令行：--test-parquets 逐站推测试起点 + refit 配置 → 落盘、提示、可复现的 split_resolved.yaml
+    raw = tmp_path / "raw.parquet"; _frame().to_parquet(raw, index=False)
+    (tmp_path / "r.yaml").write_text(yaml.safe_dump({**SPLIT_NO_TEST, "val_blocks": [], "cal_days": 0, "allow_stations_without_val": True}),
+                                     encoding="utf-8")
+    _test_files(tmp_path, {"A": "2025-10-01", "B": "2025-06-01"})
+    man = main(["--parquet", str(raw), "--out-dir", str(tmp_path / "ds"), "--split-yaml", str(tmp_path / "r.yaml"),
+                "--test-parquets", str(tmp_path / "test_*.parquet")])
+    assert man["counts"]["val"] == 0 and man["plan"]["test_start"] == {"A": "2025-10-01", "B": "2025-06-01"}
+    assert "全量重训" in capsys.readouterr().out
+    resolved = yaml.safe_load((tmp_path / "ds" / "split_resolved.yaml").read_text(encoding="utf-8"))
+    assert resolved["val_blocks"] == [] and resolved["allow_stations_without_val"] is True

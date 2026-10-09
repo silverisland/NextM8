@@ -97,8 +97,10 @@ class SplitPlan:
         if cal < 0:
             raise ValueError(f"cal_days={cal} 不能为负")
         raw = list(split.get("val_blocks") or [])
-        if not raw and not allow_empty_blocks:
-            raise ValueError("val_blocks 为空：至少需要一个验证块 [start, end)")
+        allow_sw = bool(split.get("allow_stations_without_val", False))
+        if not raw and not (allow_empty_blocks or allow_sw):
+            raise ValueError("val_blocks 为空：至少需要一个验证块 [start, end)；全量重训切分（不留验证，见 data/splits/m8_refit.yaml）"
+                             "请同时写 allow_stations_without_val: true")
         blocks = []
         for i, pair in enumerate(raw):
             if len(pair) != 2:
@@ -951,6 +953,9 @@ def main(argv=None) -> dict:
         plan = StationSplitPlan.from_dict(split, starts, shift_days=a.shift_days, L=L, H=H, step_min=step_min)
     else:
         plan = SplitPlan.from_dict(split, shift_days=a.shift_days, L=L, H=H, step_min=step_min)
+    if not plan.val_blocks:
+        print("[time_splits] 没有验证块：全量重训切分，每站测试起点前 purge 天之外全部进 train.parquet，valid.parquet 为 0 行；"
+              "训练请加 --refit")
     man = write_splits(df, plan, a.out_dir, ts_col=a.ts_col, source=paths, shift_days=a.shift_days,
                        station_col=a.station_col, write=not a.dry_run, extra={"ignored_test_only_stations": test_only},
                        val_only=val_only)

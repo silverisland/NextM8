@@ -98,6 +98,27 @@ recent_peak 归一、按站日采样）都在 a1 ±0.6 的种子噪声内；c8 �
 
 第三轮（站点身份诊断，2 种子）：去掉全部身份输入（f1：坐标、log 容量、站点嵌入）已见站 −0.3、未见站 −1.0、nrmse +0.5，已见 / 未见差距没有收窄——差距来自留出站本身（冬季块、历史只有几周），不是按站记忆；只去坐标（f2）与 a1 逐位一致，坐标在静态向量里不起作用；f3 = f1 + c8 + p* 得 75.7，等于 d2 + c8 的预期，参数少 1M。e1_final 与 f3 谁做最终模型由测试集集成分数定。
 
+## 全量重训（refit，最终模型）
+
+验证切分是用来选配方和步数的；选定之后最终模型按两段式做：**用全部数据重训**，再在测试集上只评一次。
+m8_v1 切分为了量零样本，整站留出了 1006/1016/1022/泗洪，长站还剔掉三个验证块加隔离带；这些站在测试集里是未见站、
+会按验证集的差距（p* 决策下约 −3.7 分）压低测试分。全量重训把它们变回已见站、把数据全用上，白马湖仍是唯一的零样本站。
+
+```bash
+# 1. 落全量切分：没有验证块、不留出站，每站只剔测试起点前 2 天；valid.parquet 为 0 行
+python -m pipelines.time_splits --parquet "<训练文件夹>/*.parquet" --test-parquets "<测试文件夹>/*.parquet" \
+    --split-yaml data/splits/m8_refit.yaml --out-dir data/splits/m8_refit
+# 2. 用选定的配方训 3 颗种子：--refit 不验证、不早停，固定 --max_steps 步后存最终权重（cosine 在这一步退火到 0）
+bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants e1_final --seeds 0,1,2 --refit --max_steps 5000 --batch_tag refit
+# 3. 测试集集成评估（唯一一次）
+bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/m8/refit/e1_final_s2 --test "<测试文件夹>/*.parquet"
+```
+
+- 步数：取该配方在验证切分上各种子 `best_step` 的上限附近（c8 调度 2500–5500 → 5000）；三种子集成本身也抵消单一步数的运气。
+- `--refit` 也能直接用在 m8_v1 的切分目录上（train ∪ valid 合并训练），只是拿不回验证块前后的隔离带（约 5% 的行）。
+- 产物与普通 run 同构（`model.safetensors` / `model_config.yaml` / `reports/summary.csv`），只是 summary 的验证分数列是 NaN、
+  `n_val_rows` 为 0；`known_stations` 含全部训练站，所以 1006/1016/1022 在测试里按已见站判定。
+
 ## 本地测试
 
 `python -m pytest forecast_backbones/m8/tests -q`（CPU，约 15 s；含层因果性、CPM/夜间掩码语义、registry 发现、九种结构变体的
