@@ -48,7 +48,27 @@ except ImportError:
     from pipelines.nanwang_metric import NanwangMetric
 
 WEIGHTS_FILE, CONFIG_FILE = "model.safetensors", "model_config.yaml"
-EARLY_STOP_METRICS = {"nanwang_after_pstar": True, "nrmse": False}      # 指标 → 是否越高越好
+EARLY_STOP_METRICS = {"nanwang_after_pstar": True, "nrmse": False,          # 指标 → 是否越高越好
+                      "nanwang_ultra_proxy": True, "nanwang_combo": True}
+
+
+def ultra_proxy_pct(res: pd.DataFrame) -> float:
+    """超短期代理分（整点起报行）：每个目标时刻取能拿到的 lead（整点行只有 1h/2h/3h/4h 四个），
+    100·(1 − mean |y−p| / max(y, 0.2·cap))，负值 cap 到 0。与南网超短期同一相对误差与日窗，
+    区别是 lead 子集、按目标时刻平均而不是 /96；用于验证期选 checkpoint，不是正式超短期分（正式分要 15 分钟起报行，走 --full）。"""
+    if res is None or res.empty:
+        return float("nan")
+    nm = NanwangMetric()
+    df = nm._prep(res[["timestamp_win", "station", "observe_power_predict", "observe_power_future"]])
+    caps = res.groupby("station")["cap"].first()
+    parts = []
+    for st, g in df.groupby("station", sort=True):
+        s = nm._ultra_per_target(g, float(caps[st]), full_leads_only=False)
+        if len(s):
+            parts.append(s.to_numpy(float))
+    if not parts:
+        return float("nan")
+    return float(max(0.0, 100.0 * (1.0 - float(np.concatenate(parts).mean()))))
 TABLE_COLS = ["station_id", "station", "accuracy_pct", "n_days"]
 
 
@@ -135,12 +155,28 @@ class EvalCallback(TrainerCallback):
         self.best = -np.inf if self.higher_better else np.inf
         self.best_step, self.bad_evals, self.history = None, 0, []
         self.last_unseen = None
+        self.last_extra: dict = {}
+        cw = es.get("combo_weights") or {}
+        self.combo_w = (float(cw.get("short", 0.5)), float(cw.get("ultra", 0.5)))
 
     def _score(self) -> float:
         self.model._progress_desc = "[m8] 验证"
+        self.last_extra = {}
         try:
             if self.metric == "nrmse":
                 return score_nrmse(self.model, self.ds_val, self.collate, self.cfg, self.issue_every_min)[0]
+            if self.metric in ("nanwang_ultra_proxy", "nanwang_combo"):
+                # 整点行一次推理：超短期代理分 + nrmse；整点行里含 10:00 行，D+1 也从同一份结果算
+                nr, res_h = score_nrmse(self.model, self.ds_val, self.collate, self.cfg, self.issue_every_min)
+                up = ultra_proxy_pct(res_h)
+                self.last_extra = {"nanwang_ultra_proxy": up, "nrmse": nr}
+                if self.metric == "nanwang_ultra_proxy":
+                    return up
+                score, table, _ = score_nanwang(self.model, None, None, self.cfg, res=res_h)
+                _, unseen, n_unseen = seen_unseen_scores(table)
+                self.last_unseen = float(unseen) if n_unseen else None
+                self.last_extra["nanwang_short_D+1"] = score
+                return self.combo_w[0] * score + self.combo_w[1] * up
             score, table, _ = score_nanwang(self.model, self.ds_val, self.collate, self.cfg)
             _, unseen, n_unseen = seen_unseen_scores(table)
             self.last_unseen = float(unseen) if n_unseen else None
@@ -157,6 +193,7 @@ class EvalCallback(TrainerCallback):
             self.bad_evals += 1
         self.history.append({"step": int(step), "epoch": float(epoch), self.metric: float(score), "train_loss": loss,
                              **({"nanwang_unseen": self.last_unseen} if self.last_unseen is not None else {}),
+                             **{k: (float(v) if v == v else None) for k, v in self.last_extra.items()},
                              "best": self.best, "bad_evals": self.bad_evals, "time": time.time()})
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text(json.dumps({"history": self.history, "best": self.best, "best_step": self.best_step,
@@ -232,9 +269,9 @@ def _refit_rows(d: Path, scratch_dir, reuse: bool) -> Path:
 
 
 def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_train,
-                 nw=float("nan"), nr=float("nan"), seen=float("nan"), unseen=float("nan"), n_unseen=0) -> dict:
+                 nw=float("nan"), nr=float("nan"), seen=float("nan"), unseen=float("nan"), n_unseen=0, ultra=float("nan")) -> dict:
     """reports/summary.csv 的一行（列序固定；collect_runs 按列名取）。refit 时分数列全是 NaN。"""
-    return {"tag": tag or cfg["run"].get("tag") or out.name, "nanwang_short_D+1": nw, "nrmse_pct": nr,
+    return {"tag": tag or cfg["run"].get("tag") or out.name, "nanwang_short_D+1": nw, "nrmse_pct": nr, "nanwang_ultra_proxy": ultra,
             "nanwang_seen": seen, "nanwang_unseen": unseen, "n_unseen_stations": n_unseen,
             "best_step": best_step, "n_evals": n_evals, "train_minutes": minutes,
             "params": model.n_params(), "blocks": "+".join(cfg["model"]["blocks"]) or "none",
@@ -341,7 +378,7 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     res_hourly.to_parquet(out / "result_val.parquet", index=False)
     nw_seen, nw_unseen, n_unseen = seen_unseen_scores(station_tab)
     summary = pd.DataFrame([row(best_step=cb.best_step, n_evals=len(cb.history), minutes=(time.time() - t0) / 60.0, n_val=len(ds_val),
-                                nw=nw_score, nr=nr, seen=nw_seen, unseen=nw_unseen, n_unseen=n_unseen)])
+                                nw=nw_score, nr=nr, seen=nw_seen, unseen=nw_unseen, n_unseen=n_unseen, ultra=ultra_proxy_pct(res_hourly))])
     summary.to_csv(report_dir / "summary.csv", index=False)
     station_tab.to_csv(report_dir / "station_table.csv", index=False)
     log = json.loads((out / "train_log.json").read_text(encoding="utf-8"))

@@ -1,0 +1,7 @@
+# g2：e1_final + 超短期指标对齐项：前 16 步中位数的南网式相对 L1（|y−p| / max(y, 0.2·cap)），权重 0.5。
+run: {tag: g2_ultra_l1, out_dir: runs/m8/g2_ultra_l1}
+train:
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
+  early_stop: {patience: 8}
+  loss: {metric_aux: {ultra_l1: 0.5}}
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

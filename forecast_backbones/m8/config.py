@@ -69,6 +69,10 @@ DEFAULT_CFG: dict = {
         "head_hidden": 256,
         "pos_in_patch_dim": 32,
         "quantiles": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        # ---- 超短期 / 指标对齐模块（默认全关 = 原模型）----
+        "mean_head": False,                                   # 额外一路点预测，按南网相对 L2 训练（给 D+1 段用：decision by_step method=mean_head）
+        "recent_skip": {"enabled": False, "k": 16},           # 输出头直连最近 k 步观测 + 晴空指数持久化锚（NLinear / scaled-persistence 式）
+        "ultra_head": {"enabled": False, "n_steps": 16, "hidden": 256},   # 前 n 步的直出 MLP 头（TabM/TiDE 式），与主头按步门控融合
     },
     "train": {
         "cpm": {"enabled": True, "p_row": 0.5, "min_frac": 0.05, "max_frac": 0.25, "max_runs": 3},
@@ -80,7 +84,17 @@ DEFAULT_CFG: dict = {
         "schedule": {"lr": 5.0e-4, "weight_decay": 0.05, "batch_size": 64, "max_steps": 20000, "epochs_max": 20,
                      "warmup_steps": 500, "grad_clip": 1.0, "precision": "fp32", "logging_steps": 50,
                      "eval_every_steps": 500, "sampling": "random", "progress_bar": True, "num_workers": 0},
-        "early_stop": {"metric": "nanwang_after_pstar", "patience": 5, "nrmse_issue_every_min": 60},
+        # 损失：pinball（9 档分位）+ 可选的超短期加权 / 指标对齐项
+        #   horizon_weights.ultra_weight：前 ultra_steps 步的 pinball 权重（1 = 不加权）
+        #   metric_aux.ultra_l1：前 ultra_steps 步 中位数 的南网式相对 L1（|y-p| / max(y, 0.2·cap)）
+        #   metric_aux.short_l2：short_steps 段 点预测（有 mean_head 用它，否则中位数）的南网式相对 L2
+        #   metric_aux.mean_head_weight：mean_head 开着时，它在全部监督步上的相对 L2 权重
+        "loss": {"horizon_weights": {"ultra_steps": 16, "ultra_weight": 1.0},
+                 "metric_aux": {"ultra_l1": 0.0, "short_l2": 0.0, "short_steps": [55, 151], "floor_ratio": 0.2, "mean_head_weight": 1.0}},
+        # early_stop.metric：nanwang_after_pstar（D+1）| nrmse | nanwang_ultra_proxy（整点行上的超短期代理分）
+        #                    | nanwang_combo（combo_weights 加权的 D+1 与超短期代理分）
+        "early_stop": {"metric": "nanwang_after_pstar", "patience": 5, "nrmse_issue_every_min": 60,
+                       "combo_weights": {"short": 0.5, "ultra": 0.5}},
         "weights_path": "${run.out_dir}/model.safetensors",   # 存在即在构造时加载（推理）；训练入口会改指向哨兵路径
     },
     "decision": {

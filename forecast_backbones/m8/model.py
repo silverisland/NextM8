@@ -10,7 +10,13 @@ token 布局（model.layout）：
 输出头（model.head_mode）：
   step_cov —— 每步拼 [token 隐状态, patch 内位置嵌入, 该步原始通道向量] → ResidualMLP → K（TiDE temporal decoder /
               ChronosX OIB：未来 NWP 在输出侧二次注入）。
-  token    —— TiRex 式：token 隐状态 → ResidualMLP → P×K，不再看逐步协变量（用于消融输出侧注入的价值）。"""
+  token    —— TiRex 式：token 隐状态 → ResidualMLP → P×K，不再看逐步协变量（用于消融输出侧注入的价值）。
+超短期 / 指标对齐模块（默认关）：
+  mean_head   —— 头多出一路点预测（第 K+1 个输出），由 transformer_models 按南网相对 L2 训练，决策层可在 D+1 段直接用它。
+  recent_skip —— step_cov 头的每步输入再拼 [最近 k 步可见观测, 可见掩码, 末次晴空指数 k_last, k_last·p_clear_t]：
+                 最近观测与"晴空指数持久化"直连输出头（NLinear / scaled persistence 的做法），不再只靠 token 隐状态传递。
+  ultra_head  —— 前 n 步的直出 MLP 头（TabM / TiDE 式：最近窗口 + 这 n 步的原始协变量 + 第一个未来 token）→ n×K，
+                 与主头按步 sigmoid 门控融合（门初值 0.5，可学）。"""
 from __future__ import annotations
 
 import torch
@@ -39,15 +45,34 @@ class VariateMix(nn.Module):
 
 class PVRexCore(nn.Module):
     def __init__(self, n_channels: int, n_static: int, n_slots: int, context_len: int, pred_len: int, model_cfg: dict,
-                 target_channels: list[int] | None = None, cov_channels: list[int] | None = None):
+                 target_channels: list[int] | None = None, cov_channels: list[int] | None = None,
+                 chan_idx: dict | None = None):
         super().__init__()
         m = model_cfg
         self.P = int(m["patch_len"]); self.C = int(n_channels)
+        self.L = int(context_len)
         self.T = int(context_len) + int(pred_len)
         self.n_tok = self.T // self.P
         d = int(m["d_model"]); self.d = d
         K = len(m["quantiles"]); self.K = K
         dropout = float(m.get("dropout", 0.0))
+        # ---- 超短期 / 指标对齐模块 ----
+        self.mean_head = bool(m.get("mean_head", False))
+        self.n_out = K + (1 if self.mean_head else 0)
+        rs = m.get("recent_skip") or {}
+        uh = m.get("ultra_head") or {}
+        self.rs_k = int(rs.get("k", 16)) if bool(rs.get("enabled", False)) else 0
+        self.uh_n = int(uh.get("n_steps", 16)) if bool(uh.get("enabled", False)) else 0
+        self.rec_k = self.rs_k or (int(rs.get("k", 16)) if self.uh_n else 0)        # ultra_head 也要最近窗口
+        if self.rec_k:
+            if str(m.get("head_mode", "step_cov")) != "step_cov":
+                raise ValueError("model.recent_skip / ultra_head 只支持 head_mode=step_cov")
+            need = ("y", "y_mask", "p_clear")
+            if not chan_idx or any(k not in chan_idx for k in need):
+                raise ValueError(f"model.recent_skip / ultra_head 需要 chan_idx 给出 {need} 的通道下标")
+            if not (0 < self.rec_k <= self.L) or not (0 <= self.uh_n <= int(pred_len)):
+                raise ValueError(f"recent_skip.k={self.rec_k} 须在 (0, context_len]，ultra_head.n_steps={self.uh_n} 须在 [0, pred_len]")
+            self.ci_y, self.ci_ym, self.ci_pc = int(chan_idx["y"]), int(chan_idx["y_mask"]), int(chan_idx["p_clear"])
         self.layout = str(m.get("layout", "fused"))
         self.head_mode = str(m.get("head_mode", "step_cov"))
         if self.layout not in ("fused", "split"):
@@ -77,9 +102,30 @@ class PVRexCore(nn.Module):
         if self.head_mode == "step_cov":
             dp = int(m.get("pos_in_patch_dim", 32))
             self.pos_in_patch = nn.Parameter(torch.randn(self.P, dp) * 0.02)
-            self.head = ResidualMLP(d + dp + self.C, int(m.get("head_hidden", 256)), K, dropout)
+            rec_dim = (2 * self.rec_k + 2) if self.rs_k else 0
+            self.head = ResidualMLP(d + dp + self.C + rec_dim, int(m.get("head_hidden", 256)), self.n_out, dropout)
         else:
-            self.head = ResidualMLP(d, int(m.get("head_hidden", 256)), self.P * K, dropout)
+            self.head = ResidualMLP(d, int(m.get("head_hidden", 256)), self.P * self.n_out, dropout)
+        if self.uh_n:
+            n = self.uh_n
+            self.ultra = ResidualMLP(2 * self.rec_k + 1 + n + n * self.C + d, int(uh.get("hidden", 256)), n * self.n_out, dropout)
+            self.uh_gate = nn.Parameter(torch.zeros(n))                           # sigmoid(0) = 0.5：一开始主头与直出头各半
+
+    def _recent(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """最近窗口：→ (rec [B, 2k+1] = [最近 k 步可见观测, 可见掩码, 末次晴空指数 k_last], persist [B, T] = k_last·p_clear_t)。
+        k_last 取最近 k 步里最后一个可见且 p_clear>0.05 的 y/p_clear（夹到 [0, 1.5]），没有则 0。"""
+        L, k = self.L, self.rec_k
+        y = x[:, :L, self.ci_y]
+        vis = 1.0 - x[:, :L, self.ci_ym]
+        pc = x[:, :, self.ci_pc]
+        yk, vk, pck = y[:, L - k:], vis[:, L - k:], pc[:, L - k:L]
+        valid = (vk > 0.5) & (pck > 0.05)
+        ratio = torch.where(valid, yk / pck.clamp_min(0.05), torch.zeros_like(yk))
+        pos = torch.arange(k, device=x.device)[None].expand(valid.shape)
+        last = torch.where(valid, pos, torch.full_like(pos, -1)).max(dim=1).values           # [B]，-1 = 没有可见点
+        k_last = ratio.gather(1, last.clamp_min(0)[:, None])[:, 0]
+        k_last = torch.where(last >= 0, k_last, torch.zeros_like(k_last)).clamp(0.0, 1.5)
+        return torch.cat([yk, vk, k_last[:, None]], dim=1), k_last[:, None] * pc
 
     def encode(self, x: torch.Tensor, static: torch.Tensor, slot: torch.Tensor) -> torch.Tensor:
         """→ 目标流 token 隐状态 [B, n_tok, d]。"""
@@ -99,11 +145,27 @@ class PVRexCore(nn.Module):
             tok = vm(tok)
         return self.norm(tok[:, :, 0])
 
-    def forward(self, x: torch.Tensor, static: torch.Tensor, slot: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, static: torch.Tensor, slot: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """→ (q [B, T, K] 分位, mean [B, T] 或 None（model.mean_head 关时）)，都是归一化单位。"""
         B, T, C = x.shape
         h = self.encode(x, static, slot)
         if self.head_mode == "token":
-            return self.head(h).view(B, self.n_tok, self.P, self.K).reshape(B, T, self.K)
-        h_step = h[:, :, None, :].expand(B, self.n_tok, self.P, self.d).reshape(B, T, self.d)
-        pip = self.pos_in_patch[None, None].expand(B, self.n_tok, self.P, self.pos_in_patch.shape[-1]).reshape(B, T, -1)
-        return self.head(torch.cat([h_step, pip, x], dim=-1))                    # [B, T, K]
+            out = self.head(h).view(B, self.n_tok, self.P, self.n_out).reshape(B, T, self.n_out)
+        else:
+            h_step = h[:, :, None, :].expand(B, self.n_tok, self.P, self.d).reshape(B, T, self.d)
+            pip = self.pos_in_patch[None, None].expand(B, self.n_tok, self.P, self.pos_in_patch.shape[-1]).reshape(B, T, -1)
+            parts = [h_step, pip, x]
+            rec = persist = None
+            if self.rec_k:
+                rec, persist = self._recent(x)
+            if self.rs_k:
+                parts.append(torch.cat([rec[:, None, :].expand(B, T, rec.shape[1]), persist[:, :, None]], dim=-1))
+            out = self.head(torch.cat(parts, dim=-1))                              # [B, T, n_out]
+            if self.uh_n:
+                L, n = self.L, self.uh_n
+                z = torch.cat([rec, persist[:, L:L + n], x[:, L:L + n].reshape(B, n * C), h[:, L // self.P]], dim=-1)
+                u = self.ultra(z).view(B, n, self.n_out)
+                g = torch.sigmoid(self.uh_gate)[None, :, None]
+                out = torch.cat([out[:, :L], (1.0 - g) * out[:, L:L + n] + g * u, out[:, L + n:]], dim=1)
+        q = out[..., :self.K]
+        return q, (out[..., self.K] if self.mean_head else None)

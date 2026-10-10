@@ -1,0 +1,8 @@
+# g4：e1_final + 输出头直连最近 16 步观测与晴空指数持久化锚（NLinear / scaled persistence 的做法）。
+#     前几步的预报不再只靠 token 隐状态传递最后几个观测值。
+run: {tag: g4_recent_skip, out_dir: runs/m8/g4_recent_skip}
+model: {recent_skip: {enabled: true, k: 16}}
+train:
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
+  early_stop: {patience: 8}
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

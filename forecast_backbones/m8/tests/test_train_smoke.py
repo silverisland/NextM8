@@ -5,7 +5,7 @@ import pytest
 from .conftest import write_splits, write_station_meta
 
 
-@pytest.mark.parametrize("metric", ["nanwang_after_pstar", "nrmse"])
+@pytest.mark.parametrize("metric", ["nanwang_after_pstar", "nrmse", "nanwang_combo", "nanwang_ultra_proxy"])
 def test_train_m8_end_to_end(tmp_path, metric):
     from forecast_backbones.m8.train import train_m8
     meta = write_station_meta(tmp_path)
@@ -22,8 +22,14 @@ def test_train_m8_end_to_end(tmp_path, metric):
     assert len(log["history"]) >= 2 and log["best_step"] is not None
     s = pd.read_csv(out / "reports" / "summary.csv")
     assert s.loc[0, "tag"] == "smoke" and s.loc[0, "nanwang_short_D+1"] == s.loc[0, "nanwang_short_D+1"]   # 非 NaN
+    assert np.isfinite(s.loc[0, "nanwang_ultra_proxy"]) and 0 <= s.loc[0, "nanwang_ultra_proxy"] <= 100
     assert (out / "result_val.parquet").exists() and (out / "reports" / "station_table.csv").exists()
     assert not (out / ".fresh" / "model.safetensors").exists()
+    if metric in ("nanwang_combo", "nanwang_ultra_proxy"):
+        h = log["history"][0]
+        assert metric in h and np.isfinite(h[metric]) and "nanwang_ultra_proxy" in h and "nrmse" in h
+        if metric == "nanwang_combo":
+            assert abs(h["nanwang_combo"] - 0.5 * (h["nanwang_short_D+1"] + h["nanwang_ultra_proxy"])) < 1e-6
 
 
 def test_train_m8_reports_unseen_station(tmp_path):

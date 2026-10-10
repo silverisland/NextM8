@@ -31,7 +31,7 @@ from tqdm.auto import tqdm
 try:
     from .config import deep_merge, raw_override
     from .transformer_models import TransformersAdaptedM8Model
-    from .train import score_nanwang, seen_unseen_scores, nrmse_pct, WEIGHTS_FILE, CONFIG_FILE
+    from .train import score_nanwang, seen_unseen_scores, nrmse_pct, ultra_proxy_pct, WEIGHTS_FILE, CONFIG_FILE
     from ..m6.train import _dataset_with_station_id
     from ..m6.rows import scored_row_index, issue_grid_row_index
     from ..m6.calibration import quantile_cols
@@ -39,7 +39,7 @@ except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.config import deep_merge, raw_override
     from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model
-    from forecast_backbones.m8.train import score_nanwang, seen_unseen_scores, nrmse_pct, WEIGHTS_FILE, CONFIG_FILE
+    from forecast_backbones.m8.train import score_nanwang, seen_unseen_scores, nrmse_pct, ultra_proxy_pct, WEIGHTS_FILE, CONFIG_FILE
     from forecast_backbones.m6.train import _dataset_with_station_id
     from forecast_backbones.m6.rows import scored_row_index, issue_grid_row_index
     from forecast_backbones.m6.calibration import quantile_cols
@@ -114,14 +114,16 @@ def run_inference(members, ds, idx, collate, decision: dict, batch_size: int, sh
             bd, labels = (batch["batch_dict"], batch.get("labels")) if isinstance(batch, dict) and "batch_dict" in batch else (batch, None)
             bd = {k: v for k, v in bd.items() if k != label_col}                  # 绝不喂未来真值
             truth = _np(labels[label_col]) if labels is not None and label_col in labels else None
-            qs, ctx = [], None
+            qs, ms, ctx = [], [], None
             for m in members:
-                q, c = m.predict_raw(bd); qs.append(q)
+                q, mh, c = m.predict_raw_full(bd); qs.append(q); ms.append(mh)
                 ctx = ctx if ctx is not None else c
             q_mean = np.mean(qs, axis=0)
+            extra = {"mean_head": np.mean(ms, axis=0)} if all(v is not None for v in ms) else None
             night_fut, p_clear_fut = ctx.night[:, L:], ctx.p_clear[:, L:]
-            point, q_cal, median, pstar, night_physics = m0.decide(q_mean, night_fut, p_clear_fut, ctx.cap, decision)
-            member_points = [m0.decide(q, night_fut, p_clear_fut, ctx.cap, decision)[0] for q in qs] if len(members) > 1 else []
+            point, q_cal, median, pstar, night_physics = m0.decide(q_mean, night_fut, p_clear_fut, ctx.cap, decision, extra=extra)
+            member_points = ([m0.decide(q, night_fut, p_clear_fut, ctx.cap, decision, extra=None if mh is None else {"mean_head": mh})[0]
+                              for q, mh in zip(qs, ms)] if len(members) > 1 else [])
             ts = _np(bd[ts_col]).astype(np.int64).reshape(-1)
             for i in range(point.shape[0]):
                 sid = int(ctx.station_id[i])
@@ -172,7 +174,8 @@ def evaluate(runs, test_paths, out_dir=None, point: str | None = None, decision_
     seen, unseen, n_unseen = seen_unseen_scores(table)
     tag = tag or ("+".join(Path(r).name for r in runs) if len(runs) <= 3 else f"ens{len(runs)}_{Path(runs[0]).name}")
     summary = {"tag": tag, "nanwang_short_D+1": nw, "nanwang_seen": seen, "nanwang_unseen": unseen, "n_unseen_stations": n_unseen,
-               "nrmse_pct": nrmse_pct(hourly), "n_members": len(members), "point_rule": describe_point(decision),
+               "nrmse_pct": nrmse_pct(hourly), "nanwang_ultra_proxy": ultra_proxy_pct(hourly),
+               "n_members": len(members), "point_rule": describe_point(decision),
                "n_stations": int(table["station_id"].nunique()) if len(table) else 0, "n_station_days": int(table["n_days"].sum()) if len(table) else 0,
                "n_scored_rows": len(res), "eval_minutes": (time.time() - t0) / 60.0, "members": "|".join(runs), "test": "|".join(paths)}
     members_tab = pd.DataFrame()

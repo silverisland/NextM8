@@ -129,6 +129,40 @@ recent_peak 归一、按站日采样）都在 a1 ±0.6 的种子噪声内；c8 �
 
 第三轮（站点身份诊断，2 种子）：去掉全部身份输入（f1：坐标、log 容量、站点嵌入）已见站 −0.3、未见站 −1.0、nrmse +0.5，已见 / 未见差距没有收窄——差距来自留出站本身（冬季块、历史只有几周），不是按站记忆；只去坐标（f2）与 a1 逐位一致，坐标在静态向量里不起作用；f3 = f1 + c8 + p* 得 75.7，等于 d2 + c8 的预期，参数少 1M。e1_final 与 f3 谁做最终模型由测试集集成分数定。
 
+## 超短期模块（g 系列，2026-10-10）
+
+动机：南网超短期 / ods_ultra_short 偏低。超短期（前 16 步、4 小时）主要靠最近观测与晴空指数的持久化，不靠长上下文；
+文献上（AutoPV 基准、SolarBench、LTSF-Linear/NLinear、Persistence-Initialization Transformer、TiDE）短 lead 上简单直连 /
+MLP 直出常不输甚至优于 Transformer 类，iTransformer 只在长任务上有优势，TabM 本身是表格模型、没有时序直出的证据。
+所以不换骨干，只加五个**默认全关**的可开关模块，每个变体在 e1_final 之上只改一处，单项有效再叠加（g7）：
+
+| 变体 | 改动 | 针对的问题 |
+|---|---|---|
+| g1_ultra_weight | `train.loss.horizon_weights.ultra_weight: 3`：前 16 步 pinball 权重 ×3 | 最便宜的杠杆 |
+| g2_ultra_l1 | `train.loss.metric_aux.ultra_l1: 0.5`：前 16 步中位数的南网式相对 L1 `|y−p| / max(y, 0.2·cap)` | 损失直接对齐超短期指标（MAE 型） |
+| g3_mean_head | `model.mean_head: true` + `metric_aux.short_l2: 0.5` + 决策 D+1 段 `method: mean_head` | D+1 是 RMSE 型，最优点是相对权重下的均值；直接学一路均值替代 p* 近似 |
+| g4_recent_skip | `model.recent_skip: {enabled: true, k: 16}`：输出头每步再拼最近 16 步观测、掩码、末次晴空指数 k_last、k_last·p_clear_t | 最近观测与 scaled persistence 直连输出头（NLinear 式） |
+| g5_ultra_head | `model.ultra_head: {enabled: true, n_steps: 16}`：前 16 步直出 MLP（最近窗口 + 这 16 步原始协变量 + 第一个未来 token），与主头按步门控融合（门初值 0.5 可学） | 检验"超短期直接点预测更好"，不丢主头 |
+| g6_combo_stop | `train.early_stop.metric: nanwang_combo`（D+1 与超短期代理分各半） | 选 checkpoint 不再只看 D+1 |
+| g7_ultra_stack | g1 + g2 + g4 + g6 | 可加性 |
+
+关于损失的结论：pinball 在 τ=0.5 就是 MAE，直接换 MAE 等于只留中位数、丢掉分位信息与 p* 决策；换 MSE 则目标变成均值，
+对超短期（MAE 型指标）反而错。两个指标各自的最优点不同（超短期 → 相对加权中位数 = p_star_l1；D+1 → 相对加权均值 = p* / mean_head），
+现有"分位 + 分段决策"已经是对齐的，所以这里做的是**在 pinball 之外加指标形状的辅助项**，而不是替换。
+
+验证 / 早停新增两个指标（都在整点起报行一次推理里算，不多花推理）：`nanwang_ultra_proxy`（每个目标时刻取整点行能拿到的
+1h/2h/3h/4h 四个 lead，100·(1 − mean |y−p| / max(y, 0.2·cap))，是正式超短期分的代理，正式分要 15 分钟起报行走 `--full`）
+与 `nanwang_combo`（`early_stop.combo_weights` 加权的 D+1 与代理分）。summary.csv / variants_summary.csv / 舰队评估 summary 多一列
+`nanwang_ultra_proxy`，train_log.json 的 history 在 combo / proxy 早停下同时记 D+1、代理分、nrmse。
+
+```bash
+bash train_m8_variants.sh --splits_dir data/splits/m8_v1 --variants e1_final,g1_ultra_weight,g2_ultra_l1,g3_mean_head,g4_recent_skip,g5_ultra_head,g6_combo_stop,g7_ultra_stack \
+     --seeds 0,1 --batch_tag round4_ultra
+```
+看 variants_summary.csv 的 `nanwang_ultra_proxy` 与 `nanwang_short_D+1` 两列：要的是前者涨、后者不跌（±0.6 以内算噪声）。
+g3 的 mean_head 决策规则在评估时也可以用 `--decision-yaml` 对 g3 的产物切换 p* / mean_head 对比，不用重训；
+多成员集成会把各成员的 mean_head 一起平均。
+
 ## 全量重训（refit，最终模型）
 
 验证切分是用来选配方和步数的；选定之后最终模型按两段式做：**用全部数据重训**，再在测试集上只评一次。
