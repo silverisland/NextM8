@@ -17,8 +17,8 @@
 token = ResidualMLP(patch 展平) + static_proj + station_emb + pos_emb
 Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU FFN）
 输出头（step_cov）：每步拼 [token 隐状态, patch 内位置嵌入, 该步原始通道向量] → ResidualMLP → 9 档分位（归一化单位）× scale
-决策层：复用 m6.decision（分位排序 → 夜间归零 / 1.05·晴空 / 装机容量钳位 → 中位数或 p*）
-损失：pinball（m6.losses），监督步 = 未来段 + CPM 掩码的历史段，掩夜间与缺测
+决策层：复用 m6.decision（分位排序 → 1.05·晴空 / 装机容量钳位 → 中位数或 p*；夜间归零 night_zero 默认关，见下）
+损失：pinball（m6.losses），监督步 = 未来段 + CPM 掩码的历史段，掩缺测；夜间步按 train.loss.night_weight（默认 1）参与
 ```
 
 混合器（`layers.py`，全部因果）：`conv` 门控长卷积（Reverso；线性零填充卷积而非循环 FFT）、`deltanet` Gated DeltaNet
@@ -135,6 +135,18 @@ recent_peak 归一、按站日采样）都在 a1 ±0.6 的种子噪声内；c8 �
 python -m forecast_backbones.m8.diagnose_test --result runs/m8/refit_capfix/g4_full/result_test.parquet \
        --test "datasets/test/*.parquet" --station 国能和煦光储电站 华能北方润达光伏电站 --out runs/m8/refit_capfix/g4_full/diag
 ```
+
+## 夜间口径（2026-10-12 起：不做夜间归零）
+
+M1–M7 都不做夜间后处理，而四个指标都是全点含夜间、分母下限 0.2·容量：夜间报容量 2% 的噪声就扣约 1 分，5% 扣约 5–6 分。
+M8 以前在决策层把夜间强制归零，等于比别的模型多了一道后处理，分数不可比。现在：
+- `decision.physics.night_zero` 默认 **false**，夜间预测由模型自己给（输入仍有 is_night / elev / p_clear 通道）；
+- `train.loss.night_weight` 默认 **1**：夜间步与白天同权进 pinball（以前夜间不监督，所以旧权重的夜间输出是没训过的，
+  不能只关 night_zero 不重训）。想回到旧行为：`night_zero: true` + `night_weight: 0`，重训。
+- 旧 run 的 model_config.yaml 里存的是 `night_zero: true`，评估旧 run 仍会归零；要看旧 run 不归零的分数用 `--decision_yaml`
+  传 `decision: {physics: {night_zero: false}}`，但它夜间没训过，分数只能当下界。
+- 晴空 / 容量钳位保留（它们只裁掉物理上不可能的值）；想完全裸对比可在 decision yaml 里设
+  `physics: {capacity_cap: false, clear_sky_cap_ratio: 1.0e9}`、`point: {default: median, by_step: []}`。
 
 ## 超短期模块（g 系列，2026-10-10）
 

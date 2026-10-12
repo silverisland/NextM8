@@ -89,7 +89,9 @@ DEFAULT_CFG: dict = {
         #   metric_aux.ultra_l1：前 ultra_steps 步 中位数 的南网式相对 L1（|y-p| / max(y, 0.2·cap)）
         #   metric_aux.short_l2：short_steps 段 点预测（有 mean_head 用它，否则中位数）的南网式相对 L2
         #   metric_aux.mean_head_weight：mean_head 开着时，它在全部监督步上的相对 L2 权重
-        "loss": {"horizon_weights": {"ultra_steps": 16, "ultra_weight": 1.0},
+        #   night_weight：夜间步在损失里的权重。1 = 与白天同权（默认，模型自己学夜间为 0，与 M1–M7 不做夜间后处理的口径一致）；
+        #                 0 = 夜间不监督（2026-10-12 之前的旧行为，须配合 decision.physics.night_zero: true 用）
+        "loss": {"horizon_weights": {"ultra_steps": 16, "ultra_weight": 1.0}, "night_weight": 1.0,
                  "metric_aux": {"ultra_l1": 0.0, "short_l2": 0.0, "short_steps": [55, 151], "floor_ratio": 0.2, "mean_head_weight": 1.0}},
         # early_stop.metric：nanwang_after_pstar（D+1）| nrmse | nanwang_ultra_proxy（整点行上的超短期代理分）
         #                    | nanwang_combo（combo_weights 加权的 D+1 与超短期代理分）
@@ -98,7 +100,9 @@ DEFAULT_CFG: dict = {
         "weights_path": "${run.out_dir}/model.safetensors",   # 存在即在构造时加载（推理）；训练入口会改指向哨兵路径
     },
     "decision": {
-        "physics": {"night_zero": True, "clear_sky_cap_ratio": 1.05, "capacity_cap": True},
+        # night_zero 默认关（2026-10-12）：其它模型都不做夜间归零，指标又全点含夜间，开着会把 M8 的分数虚高；
+        # 模型靠 is_night 输入通道 + 夜间进损失自己学 0。开它必须同时把 train.loss.night_weight 设回 0 重训
+        "physics": {"night_zero": False, "clear_sky_cap_ratio": 1.05, "capacity_cap": True},
         "point": {"default": "median", "by_step": [], "floor_ratio": 0.2, "tau_grid_step": 0.005,
                   "tail": "flat", "shrink_factor": None},
     },

@@ -242,12 +242,15 @@ class TransformersAdaptedM8Model(nn.Module):
 
     def _loss_from_parts(self, q_norm: torch.Tensor, m_norm, y_mask: torch.Tensor, night_full: torch.Tensor,
                          target_full: torch.Tensor, scale_t: torch.Tensor, cap_t: torch.Tensor) -> torch.Tensor:
-        """pinball（可按步加权）+ 可选指标对齐项（见 config train.loss）。全部在归一化单位里算；
+        """pinball（可按步加权、夜间按 night_weight 加权）+ 可选指标对齐项（见 config train.loss）。全部在归一化单位里算；
         南网分母 max(y, 0.2·cap) 在归一化单位里是 max(y_norm, 0.2·cap/scale)。"""
         L = self.context_len
         lc = self.cfg["train"].get("loss") or {}
         hw, ma = (lc.get("horizon_weights") or {}), (lc.get("metric_aux") or {})
-        mask = ((y_mask > 0.5) & torch.isfinite(target_full) & (~night_full)).to(q_norm.dtype)      # [B, T]
+        mask = ((y_mask > 0.5) & torch.isfinite(target_full)).to(q_norm.dtype)                      # [B, T]
+        nw = float(lc.get("night_weight", 1.0))
+        if nw != 1.0:                                                                                 # 0 = 夜间不监督（旧行为）
+            mask = mask * torch.where(night_full, torch.full_like(mask, nw), torch.ones_like(mask))
         y = torch.nan_to_num(target_full)
         n_u, uw = int(hw.get("ultra_steps", 16)), float(hw.get("ultra_weight", 1.0))
         w = torch.ones(mask.shape[1], dtype=q_norm.dtype, device=q_norm.device)

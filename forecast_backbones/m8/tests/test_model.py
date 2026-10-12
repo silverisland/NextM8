@@ -123,13 +123,34 @@ def test_compute_loss_path_matches_forward_loss(small_cfg, batch):
 
 
 def test_night_zero_and_physics_clip(small_cfg, batch):
+    """night_zero 显式打开时夜间归零；默认关（与其它模型同口径）：aux['night'] 全 False、夜间预测不被强制为 0。"""
     m = _model(small_cfg); m.eval()
+    assert m.cfg["decision"]["physics"]["night_zero"] is False and m.cfg["train"]["loss"]["night_weight"] == 1.0
     with torch.no_grad():
         out = m(batch["batch_dict"])
-    night = out.aux["night"]; pred = out.logits.numpy()
-    assert (pred[night] == 0).all()
+    pred = out.logits.numpy(); night_true = out.aux["night_loss"]
+    assert not out.aux["night"].any() and night_true.any()
     assert (pred >= 0).all() and (pred <= out.aux["cap"][:, None] * 1.0001).all()
     assert (pred <= 1.05 * out.aux["p_clear"] * (1 + 1e-5) + 1e-3).all()
+    m.cfg["decision"]["physics"]["night_zero"] = True
+    with torch.no_grad():
+        out2 = m(batch["batch_dict"])
+    assert out2.aux["night"].any() and (out2.logits.numpy()[out2.aux["night"]] == 0).all()
+    assert np.allclose(out2.logits.numpy()[~night_true], pred[~night_true])          # 白天不受影响
+
+
+def test_night_steps_enter_loss_by_default(small_cfg, batch):
+    """night_weight=1（默认）时夜间步参与监督：改成 0（旧行为）损失变化；夜间全 0 的目标在归零后两者差异来自夜间项。"""
+    import copy
+    m = _model(small_cfg); m.eval()
+    bd, labels = batch["batch_dict"], batch["labels"]
+    with torch.no_grad():
+        l_full = m(bd, labels=labels).loss
+        m.cfg["train"]["loss"]["night_weight"] = 0.0
+        l_day = m(bd, labels=labels).loss
+        out = m(bd); l_day2 = m.compute_loss(out, labels)
+    assert torch.isfinite(l_full) and torch.isfinite(l_day) and not torch.allclose(l_full, l_day)
+    assert torch.allclose(l_day, l_day2, atol=1e-6)
 
 
 def test_eval_does_not_read_future_truth(small_cfg, batch):

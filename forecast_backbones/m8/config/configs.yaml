@@ -70,7 +70,7 @@ train:
   early_stop: {metric: nanwang_after_pstar, patience: 5, nrmse_issue_every_min: 60}
   weights_path: ${run.out_dir}/model.safetensors
 decision:
-  physics: {night_zero: true, clear_sky_cap_ratio: 1.05, capacity_cap: true}
+  physics: {night_zero: false, clear_sky_cap_ratio: 1.05, capacity_cap: true}   # 夜间不归零（与其它模型同口径；夜间步进损失）
   point: {default: median, by_step: [], floor_ratio: 0.2, tau_grid_step: 0.005, tail: flat, shrink_factor: null}
 eval:
   batch_size: 256
