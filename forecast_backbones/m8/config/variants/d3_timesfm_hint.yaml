@@ -1,5 +1,9 @@
-# D3 外部提示：TimesFM-3 单变量预测（列 timesfm_predict，每行 192 步、起报时刻生成）作为只有未来段的协变量通道，
-#    按容量归一、随幅度调制、独立 dropout(0.3) 防止模型只抄它；历史段恒 0，不会泄漏 CPM 掩掉的历史
+# D3 外部提示：TimesFM-3 零样本预测（数据列 timesfm3，每行 192 步、起报时刻生成）作为只有未来段的协变量通道，
+#    按容量归一、随幅度调制、独立 dropout(0.3) 防止模型只抄它；历史段恒 0，不会泄漏 CPM 掩掉的历史。e1_final 配方。
 run: {tag: d3_timesfm_hint, out_dir: runs/m8/d3_timesfm_hint}
-features: {future_only: [{col: timesfm_predict, scale: target}]}
-train: {hint_dropout: 0.3}
+features: {future_only: [{col: timesfm3, scale: target}]}
+train:
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
+  early_stop: {patience: 8}
+  hint_dropout: 0.3
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

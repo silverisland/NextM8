@@ -104,6 +104,7 @@ class RowCtx:
     k_steps: np.ndarray         # [B, H] NWP 晴空指数（未来段）
     var_signal: np.ndarray      # [B] 未来白天 k_nwp 均值
     degraded: np.ndarray        # [B] bool
+    cs_ratio: np.ndarray = None # [B] 按站自适应晴空出力比（features.derived.clear_sky_ratio 关时恒 1）
 
 
 def cpm_token_mask(rng: np.random.Generator, B: int, n_tok: int, p_row: float, min_frac: float, max_frac: float,
@@ -291,6 +292,21 @@ class FeatureBuilder:
         visible = ~y_mask_hist
         y_vis = np.where(visible, np.nan_to_num(y_norm), 0.0)
 
+        # 按站自适应晴空出力比：历史可见段里近正午（p_clear > near_noon_frac·窗内最大）点的 y / p_clear 高分位，
+        # 夹到 [lo, hi]；缩放 p_clear 本身（通道 + ctx，决策层的晴空上限随之抬高）。k_nwp 是辐照比，不动
+        cs = self.derived.get("clear_sky_ratio") or {}
+        cs_ratio = np.ones(B)
+        if bool(cs.get("enabled", False)):
+            pc_h = p_clear[:, :L]
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                thr = float(cs.get("near_noon_frac", 0.6)) * np.max(pc_h, axis=1, keepdims=True)
+                ok = visible & (pc_h > thr) & (pc_h > 0) & ~degraded[:, None]
+                ratio = np.where(ok, np.nan_to_num(y_hist) / np.maximum(pc_h, 1e-6), np.nan)
+                r = np.nanquantile(ratio, float(cs.get("quantile", 0.98)), axis=1) if ok.any() else np.full(B, np.nan)
+            cs_ratio = np.clip(np.where(np.isfinite(r), r, 1.0), float(cs.get("lo", 1.0)), float(cs.get("hi", 2.5)))
+            p_clear = p_clear * cs_ratio[:, None]
+
         x[:, :L, self.idx["y"]] = y_vis
         x[:, :L, self.idx["y_mask"]] = y_mask_hist
         x[:, L:, self.idx["y_mask"]] = 1.0
@@ -386,6 +402,6 @@ class FeatureBuilder:
         fut_day = ~night[:, L:]
         var_signal = np.where(fut_day, k_nwp[:, L:], 0.0).sum(1) / np.maximum(fut_day.sum(1), 1)
         ctx = RowCtx(station_id=sid, cap=cap, elev_deg=elev, ghi_clear=ghi, p_clear=p_clear, night=night,
-                     k_steps=k_nwp[:, L:], var_signal=var_signal, degraded=degraded)
+                     k_steps=k_nwp[:, L:], var_signal=var_signal, degraded=degraded, cs_ratio=cs_ratio)
         return {"x": x, "static": static, "slot": slot, "target": target, "amp": amp.astype(np.float32),
                 "scale": scale.astype(np.float32), "base": base, "ctx": ctx}

@@ -136,6 +136,7 @@ def run_inference(members, ds, idx, collate, decision: dict, batch_size: int, sh
                     "night": night_physics[i].astype(bool), "elev_deg": ctx.elev_deg[i, L:].astype(np.float32),
                     "p_clear": p_clear_fut[i].astype(np.float32),
                     "var_bin": 0, "var_signal": float(ctx.var_signal[i]), "degraded": bool(ctx.degraded[i]),
+                    "cs_ratio": float(ctx.cs_ratio[i]) if ctx.cs_ratio is not None else 1.0,
                 }
                 for j, c in enumerate(qcols):
                     rec[c] = q_mean[i, :, j].astype(np.float32)

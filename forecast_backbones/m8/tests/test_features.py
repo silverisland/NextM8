@@ -27,6 +27,30 @@ def test_channels_and_shapes(small_cfg, batch):
     assert np.isnan(inp["target"][:, 672:]).all()            # 没给标签 → 未来目标 NaN
 
 
+def test_clear_sky_ratio_module(small_cfg, batch):
+    """默认关：比值恒 1、通道不变。开：p_clear 通道与 ctx.p_clear 同乘比值，辐照比 k_nwp 不动；
+    历史出力 ×3（倾斜阵列冬季 y/p_clear 可到 1.6）比值上升，×0.1 卡在下限 1。"""
+    bd = batch["batch_dict"]
+    cfg0, fb0 = _fb(small_cfg)
+    base = fb0.build(bd, training=False)
+    assert base["ctx"].cs_ratio is not None and np.allclose(base["ctx"].cs_ratio, 1.0)
+    cfg1, fb1 = _fb(small_cfg, features={"derived": {"clear_sky_ratio": {"enabled": True}}})
+    assert cfg1["features"]["derived"]["clear_sky_ratio"]["quantile"] == 0.98          # 其余键保留默认
+    on = fb1.build(bd, training=False)
+    r = on["ctx"].cs_ratio; i = fb1.idx
+    assert r.shape == (len(r),) and np.isfinite(r).all() and (r >= 1.0).all() and (r <= 2.5).all()
+    assert np.allclose(on["x"][:, :, i["p_clear"]], base["x"][:, :, i["p_clear"]] * r[:, None], atol=1e-6)
+    assert np.allclose(on["ctx"].p_clear, base["ctx"].p_clear * r[:, None])
+    assert np.allclose(on["ctx"].ghi_clear, base["ctx"].ghi_clear) and np.allclose(on["x"][:, :, i["k_nwp"]], base["x"][:, :, i["k_nwp"]])
+    bd3 = dict(bd); bd3["observe_power"] = bd["observe_power"] * 3.0
+    r3 = fb1.build(bd3, training=False)["ctx"].cs_ratio
+    bd01 = dict(bd); bd01["observe_power"] = bd["observe_power"] * 0.1
+    r01 = fb1.build(bd01, training=False)["ctx"].cs_ratio
+    assert (r3 >= r - 1e-9).all() and (r3 > 1.0).any() and np.allclose(r01, 1.0)
+    tr = fb1.build(bd3, training=True, y_future=batch["labels"]["observe_power_future"], rng=np.random.default_rng(0))   # CPM 掩码下也有限
+    assert np.isfinite(tr["ctx"].cs_ratio).all() and np.isfinite(tr["x"]).all()
+
+
 def test_cap_only_from_station_meta(small_cfg, batch):
     """容量只来自站表：数据里 cap_power_on 改成 1/10 后特征逐位不变；站表没有的站 / 缺 station_id 列直接报错。"""
     import torch

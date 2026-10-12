@@ -50,7 +50,11 @@ DEFAULT_CFG: dict = {
         # 列名（小写）含某个键时按 [shift, scale] 归一：(x - shift) / scale；都不含用 default
         "scales": {"ghi": [0.0, 1000.0], "ssrd": [0.0, 1000.0], "temp": [15.0, 15.0], "t2m": [15.0, 15.0], "default": [0.0, 1.0]},
         "clear_sky_index_col": "general_ghi_predict",       # 驱动 k_nwp / nwp_resid 的 GHI 类未来列（其历史列按 past_future 配对找）
-        "derived": {"solar": True, "time_encoding": True, "nwp_resid": True},
+        "derived": {"solar": True, "time_encoding": True, "nwp_resid": True,
+                    # 按站自适应晴空出力比（2026-10-12）：历史可见段近正午点 y / p_clear 的高分位，用它缩放 p_clear 通道与决策层晴空上限。
+                    # p_clear 按水平面 GHI 算（1000 W/m² = 满容量），对倾斜 / 跟踪 / 双面阵列在冬季高纬会偏低 30–60%，
+                    # 固定 1.05 倍上限会把峰值裁掉（华能北方润达 12 月：上限 0.51·cap，观测峰 0.78·cap）。缺坐标的退化站比值恒 1
+                    "clear_sky_ratio": {"enabled": False, "quantile": 0.98, "near_noon_frac": 0.6, "lo": 1.0, "hi": 2.5}},
         # coords / log_cap：静态向量里的经纬高 / log 容量。它们能唯一标识训练站，关掉可查已见/未见站差距是否来自按站记忆
         "static": {"station_embedding": True, "n_station_slots": 4096, "context_stats": True, "coords": True, "log_cap": True},
     },

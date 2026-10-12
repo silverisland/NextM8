@@ -136,6 +136,24 @@ python -m forecast_backbones.m8.diagnose_test --result runs/m8/refit_capfix/g4_f
        --test "datasets/test/*.parquet" --station 国能和煦光储电站 华能北方润达光伏电站 --out runs/m8/refit_capfix/g4_full/diag
 ```
 
+## 晴空出力比（h 系列，2026-10-12）
+
+p_clear 按水平面 GHI 算（1000 W/m² = 满容量），决策层再裁到 1.05·p_clear。对倾斜 / 跟踪 / 双面阵列，冬季高纬的
+平面辐照是水平 GHI 的 1.5–2 倍，低温再加效率，电站出力远超这个"晴空功率"。华能北方润达（达拉特旗，40.3N，1108 m，
+双面双玻 + 20 MW 平单轴跟踪）12 月：上限 0.51·cap，观测峰 0.78·cap；bias_ratio 0.66；测试集上只把晴空比放大到 3
+就从 75.9 升到 77.6，剩下的偏低在网络本身（p_clear 输入通道给了错的先验）。坐标核过是对的，问题在公式不在坐标。
+
+`features.derived.clear_sky_ratio`（默认关）：每行从历史可见段取近正午点（p_clear > near_noon_frac·窗内最大）的
+y / p_clear 的 quantile 分位，夹到 [lo, hi]，乘到 p_clear 上（通道 + 决策上限一起变；k_nwp 是辐照比不动；
+缺坐标的退化站恒 1）。按窗滚动，季节变化自然跟随，未见站也能用。评估结果表多一列 cs_ratio。
+
+| 变体 | 改动 |
+|---|---|
+| h1_cs_ratio | e1_final + 晴空出力比 |
+| h2_cs_ratio_skip | g4_recent_skip + 晴空出力比 |
+| d3_timesfm_hint / d4_timesfm_resid | e1_final + TimesFM-3 零样本预测列 `timesfm3` 作提示 / 作残差基准（列名已按数据改） |
+| h3_stack | g4 + 晴空出力比 + TimesFM 残差 |
+
 ## 夜间口径（2026-10-12 起：不做夜间归零）
 
 M1–M7 都不做夜间后处理，而四个指标都是全点含夜间、分母下限 0.2·容量：夜间报容量 2% 的噪声就扣约 1 分，5% 扣约 5–6 分。

@@ -1,0 +1,8 @@
+# H1：e1_final + 按站自适应晴空出力比（features.derived.clear_sky_ratio）。
+#    针对倾斜 / 跟踪 / 双面阵列冬季出力远超水平面 GHI 晴空功率的站（华能北方润达 bias 0.66，去掉上限 +1.7 分，网络本身仍偏低）。
+run: {tag: h1_cs_ratio, out_dir: runs/m8/h1_cs_ratio}
+features: {derived: {clear_sky_ratio: {enabled: true}}}
+train:
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
+  early_stop: {patience: 8}
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}
