@@ -160,10 +160,11 @@ class TransformersAdaptedM8Model(nn.Module):
             raise ValueError("decision.point.default 不能是 mean_head（请写进 by_step，如 {steps: [55, 151], method: mean_head}）")
         # night_zero=false 时决策层对夜间不做任何强制归零：夜间掩码不用，晴空上限也不在 p_clear<=0 的步生效
         # （否则 upper = ratio·0 = 0 会把夜间悄悄钳成 0，与 M1–M7 不做夜间后处理的口径仍然不齐；2026-10-12 之前就是这样）
-        nz = bool(ph["night_zero"])
+        nz, cn = bool(ph["night_zero"]), bool(ph.get("clip_negative", True))
         night_physics = night_fut if nz else np.zeros_like(night_fut)
         ratio, capcap = float(ph["clear_sky_cap_ratio"]), bool(ph["capacity_cap"])
-        q_cal = physics_clip(enforce_monotone(q_raw), night_physics, p_clear_fut, cap[:, None], ratio, capcap, night_ceiling=nz)
+        q_cal = physics_clip(enforce_monotone(q_raw), night_physics, p_clear_fut, cap[:, None], ratio, capcap,
+                             night_ceiling=nz, clip_negative=cn)
         shrink = float(pt.get("shrink_factor") or 1.0)
         rules = list(pt.get("by_step") or ())
         mh_rules = [r for r in rules if r["method"] == "mean_head"]
@@ -174,7 +175,7 @@ class TransformersAdaptedM8Model(nn.Module):
             if mh is None:
                 raise ValueError("decision.point.by_step 用了 mean_head，但模型没有 mean_head 输出（需 model.mean_head: true 训练）")
             mh = physics_clip(np.asarray(mh, float)[..., None], night_physics, p_clear_fut, cap[:, None], ratio, capcap,
-                              night_ceiling=nz)[..., 0]
+                              night_ceiling=nz, clip_negative=cn)[..., 0]
             for r in mh_rules:
                 lo, hi = int(r["steps"][0]), int(r["steps"][1])
                 point[:, lo:hi] = mh[:, lo:hi]

@@ -121,6 +121,11 @@ def test_physics_clip_night_ceiling_switch():
     d = physics_clip(np.array([[[5000.0]]]), np.array([[False]]), np.array([[0.0]]), np.array([[1000.0]]),
                      capacity_cap=False, night_ceiling=False)
     assert d.tolist() == [[[1000.0]]]
+    # clip_negative=False：负值保留（严格裸对比）；默认截到 0
+    e = physics_clip(np.array([[[-5.0], [-5.0]]]), np.array([[False, False]]), np.array([[0.0, 500.0]]), np.array([[1000.0]]),
+                     night_ceiling=False, clip_negative=False)
+    assert e[0, :, 0].tolist() == [-5.0, -5.0]
+    assert physics_clip(np.array([[[-5.0]]]), np.array([[False]]), np.array([[500.0]]), np.array([[1000.0]])).tolist() == [[[0.0]]]
 
 def test_select_point_routes_by_step():
     B, T, K = 1, 200, 9

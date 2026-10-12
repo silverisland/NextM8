@@ -170,7 +170,9 @@ M8 以前在决策层把夜间强制归零，等于比别的模型多了一道�
   拉代码后用同一批 checkpoint 重新 `eval_m8.sh` 即得真正对齐的数字，不用重训。
 - 想量化"夜间对齐"值多少分：`config/variants/e1_night_old.yaml`（= e1_final + night_weight 0 + night_zero true，
   即旧口径）与 e1_final 同切分同种子各跑一遍，差值就是夜间强制归零的红利。
-- 想完全裸对比可在 decision yaml 里设 `physics: {capacity_cap: false, clear_sky_cap_ratio: 1.0e9}`、
+- 决策层还剩一道对夜间有一点帮助的处理：负值截到 0（`physics.clip_negative`，默认 true）。略负的夜间输出截成 0 就是全对，
+  M1–M7 不截。想严格裸对比在 decision yaml 里设 `clip_negative: false`，不用重训。
+- 想完全裸对比可在 decision yaml 里设 `physics: {capacity_cap: false, clear_sky_cap_ratio: 1.0e9, clip_negative: false}`、
   `point: {default: median, by_step: []}`。
 
 ## 超短期模块（g 系列，2026-10-10）

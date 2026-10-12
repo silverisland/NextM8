@@ -148,6 +148,15 @@ def test_night_zero_and_physics_clip(small_cfg, batch):
     assert np.allclose(out2.logits.numpy()[~night_true], pred[~night_true])          # 白天不受影响
     pt2, *_ = m.decide(q_syn, night_true, pc, out.aux["cap"])
     assert (pt2[night_true] == 0).all() and np.allclose(pt2[day], pt[day])
+    # clip_negative：默认把负值截到 0；decision yaml 设 false 时负值原样进提交曲线（严格裸对比）
+    import copy
+    dec = copy.deepcopy(m.cfg["decision"]); dec["physics"]["night_zero"] = False
+    q_neg = np.full((B, H, K), -0.01, float) * out.aux["cap"][:, None, None]
+    p0, *_ = m.decide(q_neg, night_true, pc, out.aux["cap"], dec)
+    assert (p0 == 0).all()
+    dec["physics"]["clip_negative"] = False
+    p1, *_ = m.decide(q_neg, night_true, pc, out.aux["cap"], dec)
+    assert (p1 < 0).all()
 
 
 def test_night_steps_enter_loss_by_default(small_cfg, batch):

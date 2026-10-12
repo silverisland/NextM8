@@ -106,7 +106,9 @@ DEFAULT_CFG: dict = {
     "decision": {
         # night_zero 默认关（2026-10-12）：其它模型都不做夜间归零，指标又全点含夜间，开着会把 M8 的分数虚高；
         # 模型靠 is_night 输入通道 + 夜间进损失自己学 0。开它必须同时把 train.loss.night_weight 设回 0 重训
-        "physics": {"night_zero": False, "clear_sky_cap_ratio": 1.05, "capacity_cap": True},
+        # clip_negative：负值截到 0（负功率物理上不可能）。它对夜间有一点帮助（略负的夜间输出变成 0 = 全对），
+        # 想和 M1–M7 严格裸对比可在 decision yaml 里设 false，不用重训
+        "physics": {"night_zero": False, "clear_sky_cap_ratio": 1.05, "capacity_cap": True, "clip_negative": True},
         "point": {"default": "median", "by_step": [], "floor_ratio": 0.2, "tau_grid_step": 0.005,
                   "tail": "flat", "shrink_factor": None},
     },
