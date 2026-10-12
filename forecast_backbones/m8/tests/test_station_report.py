@@ -53,6 +53,9 @@ def test_full_report_native(trained, tmp_path):
     fleet = r["summary"]
     assert fleet["engine"] == "native" and fleet["n_unseen_stations"] == 1 and fleet["n_stations"] == 2
     assert (tmp_path / "f" / "reports" / "summary.csv").exists() and (tmp_path / "f" / "reports" / "station_metrics.csv").exists()
+    raw = pd.read_parquet(tmp_path / "f" / "result_test.parquet")          # 逐行预测落盘，diagnose_test 直接可读
+    assert set(raw["station"]) == {"S1001", "S1002"} and len(raw) == int(tab["rows"].sum())
+    assert {"timestamp_win", "station", "cap", "observe_power_predict", "observe_power_future"} <= set(raw.columns)
     # 与舰队评估（10:00 行、同一决策）的南网 D+1 一致：单月时月度 mean 就是日均值
     e = evaluate([run], [str(tdir / "station=1001.parquet")], out_dir=tmp_path / "e", progress=False)
     assert abs(float(tab.loc[tab["station"] == "S1001", "nanwang_short_D+1"].iloc[0]) - e["summary"]["nanwang_short_D+1"]) < 0.01   # 月度表取 2 位小数
@@ -66,6 +69,10 @@ def test_full_report_native(trained, tmp_path):
     assert {"hour", "obs_over_cap", "pred_over_cap", "other_pred_over_cap"} <= set(pd.read_csv(tmp_path / "d" / "S1001-hourly.csv").columns)
     inp = pd.read_csv(tmp_path / "d" / "input_stats.csv")
     assert len(inp) == 2 and (inp["rows_at_10:00"] == 3).all() and (inp["cap_nunique"] == 1).all()
+    # --full 落盘的 result_test.parquet 同样可诊断：D+1（10:00 行）与逐站表一致
+    diag(["--result", str(tmp_path / "f" / "result_test.parquet"), "--station", "S1001", "--out", str(tmp_path / "d2")])
+    dg2 = pd.read_csv(tmp_path / "d2" / "station_diag.csv").iloc[0]
+    assert abs(dg2["nanwang_d1"] - float(tab.loc[tab["station"] == "S1001", "nanwang_short_D+1"].iloc[0])) < 0.01
 
 
 def test_full_report_unified_matches_native(trained, tmp_path, monkeypatch):

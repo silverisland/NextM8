@@ -280,7 +280,7 @@ def evaluate_full(runs, test_paths, out_dir=None, engine: str = "unified", point
     id_col = str(cfg["dataset"]["station_id_col"])
     print(f"[m8-full] 成员 {len(members)} 个，站文件 {len(paths)} 个，引擎 {engine}，决策 {describe_point(decision)}，"
           f"summary 键来自 {src}，device={device}", flush=True)
-    rows, summaries = [], {}
+    rows, summaries, frames = [], {}, []
     for p in paths:
         st = station_key(p, id_col)
         t1 = time.time()
@@ -296,10 +296,13 @@ def evaluate_full(runs, test_paths, out_dir=None, engine: str = "unified", point
         row["minutes"] = round((time.time() - t1) / 60.0, 3)
         rows.append(row)
         summaries[st] = summ
+        frames.append(res.assign(station=st))
         print(f"[m8-full] 站 {st} cap={cap:g} 行 {len(res)}：" +
               "  ".join(f"{k}={row[k]:.4g}" if row[k] is not None else f"{k}=nan" for k in MAIN_METRICS), flush=True)
     table = pd.DataFrame(rows)
     table.to_csv(rep / "station_metrics.csv", index=False)
+    # 原始逐行预测（全部起报行、已过决策层），与 evaluate.py 的 result_test.parquet 同列，可直接喂 diagnose_test.py
+    pd.concat(frames, ignore_index=True).to_parquet(out / "result_test.parquet", index=False)
     tag = tag or ("+".join(Path(r).name for r in runs) if len(runs) <= 3 else f"ens{len(runs)}_{Path(runs[0]).name}")
     num = {k: pd.to_numeric(table[k], errors="coerce") for k in MAIN_METRICS}
     fleet = {"tag": tag, "engine": engine, "n_members": len(members), "point_rule": describe_point(decision),
@@ -316,7 +319,8 @@ def evaluate_full(runs, test_paths, out_dir=None, engine: str = "unified", point
     with pd.option_context("display.width", 220, "display.max_columns", 30):
         print(table.to_string(index=False))
         print(pd.DataFrame([{k: v for k, v in fleet.items() if k not in ("members", "test")}]).to_string(index=False))
-    print(f"[m8-full] 产物：{ens}/{{站}}-metrics.xlsx + {{站}}-summary.json / {rep}/station_metrics.csv / {rep}/summary.csv")
+    print(f"[m8-full] 产物：{ens}/{{站}}-metrics.xlsx + {{站}}-summary.json / {rep}/station_metrics.csv / {rep}/summary.csv / "
+          f"{out}/result_test.parquet（逐行预测，供 diagnose_test.py）")
     return {"summary": fleet, "station_table": table, "summaries": summaries}
 
 

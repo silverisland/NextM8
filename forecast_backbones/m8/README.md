@@ -129,6 +129,13 @@ recent_peak 归一、按站日采样）都在 a1 ±0.6 的种子噪声内；c8 �
 
 第三轮（站点身份诊断，2 种子）：去掉全部身份输入（f1：坐标、log 容量、站点嵌入）已见站 −0.3、未见站 −1.0、nrmse +0.5，已见 / 未见差距没有收窄——差距来自留出站本身（冬季块、历史只有几周），不是按站记忆；只去坐标（f2）与 a1 逐位一致，坐标在静态向量里不起作用；f3 = f1 + c8 + p* 得 75.7，等于 d2 + c8 的预期，参数少 1M。e1_final 与 f3 谁做最终模型由测试集集成分数定。
 
+`--full` 的产物目录下还会落一份 `result_test.parquet`（全部起报行、已过决策层的逐行预测，列与 evaluate.py 的同名文件一致），
+可以直接喂 `diagnose_test.py`，不用再跑一次推理：
+```bash
+python -m forecast_backbones.m8.diagnose_test --result runs/m8/refit_capfix/g4_full/result_test.parquet \
+       --test "datasets/test/*.parquet" --station 国能和煦光储电站 华能北方润达光伏电站 --out runs/m8/refit_capfix/g4_full/diag
+```
+
 ## 超短期模块（g 系列，2026-10-10）
 
 动机：南网超短期 / ods_ultra_short 偏低。超短期（前 16 步、4 小时）主要靠最近观测与晴空指数的持久化，不靠长上下文；
