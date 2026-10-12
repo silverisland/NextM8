@@ -103,6 +103,25 @@ def test_physics_clip_handles_nonfinite_p_clear():
     assert not np.isnan(out).any()
     assert np.allclose(out[0, :, 0], [1000.0, 525.0, 0.0])   # clip-to-cap / clip-to-1.05·p_clear / 0
 
+def test_physics_clip_night_ceiling_switch():
+    # 默认 night_ceiling=True：p_clear=0 的步 upper=0 → 钳成 0（隐式夜间归零，m6 口径不变）
+    # night_ceiling=False：p_clear<=0 的步只用 cap 钳位；NaN 步与白天步两种口径一致
+    q = np.array([[[1500.0], [600.0], [999.0], [-5.0]]])          # [B=1,T=4,K=1]
+    night = np.array([[False, False, False, False]])
+    p_clear = np.array([[np.nan, 500.0, 0.0, 0.0]])
+    cap = np.array([[1000.0]])
+    a = physics_clip(q, night, p_clear, cap)
+    b = physics_clip(q, night, p_clear, cap, night_ceiling=False)
+    assert np.allclose(a[0, :, 0], [1000.0, 525.0, 0.0, 0.0])
+    assert np.allclose(b[0, :, 0], [1000.0, 525.0, 999.0, 0.0])    # 夜间正值保留（≤cap），负值仍截到 0
+    # night 掩码为 True 的步无论哪种口径都归零
+    c = physics_clip(q, np.array([[False, False, True, False]]), p_clear, cap, night_ceiling=False)
+    assert np.allclose(c[0, :, 0], [1000.0, 525.0, 0.0, 0.0])
+    # capacity_cap=False 时夜间步仍用 cap 钳位（与非有限值的处理一致，不会无上界）
+    d = physics_clip(np.array([[[5000.0]]]), np.array([[False]]), np.array([[0.0]]), np.array([[1000.0]]),
+                     capacity_cap=False, night_ceiling=False)
+    assert d.tolist() == [[[1000.0]]]
+
 def test_select_point_routes_by_step():
     B, T, K = 1, 200, 9
     q = np.tile((60.0 * np.linspace(0.6, 1.4, K))[None, None, :], (B, T, 1))

@@ -101,7 +101,8 @@ def test_mean_head_decision_rule(small_cfg, batch):
     with torch.no_grad():
         out = m(batch["batch_dict"])
     mh = out.aux["mean_head"].numpy()
-    exp = physics_clip(mh[..., None], out.aux["night"], out.aux["p_clear"], out.aux["cap"][:, None], 1.05, True)[..., 0]
+    exp = physics_clip(mh[..., None], out.aux["night"], out.aux["p_clear"], out.aux["cap"][:, None], 1.05, True,
+                       night_ceiling=m.cfg["decision"]["physics"]["night_zero"])[..., 0]
     assert np.allclose(out.logits.numpy()[:, 55:151], exp[:, 55:151], atol=1e-5)
     assert not np.allclose(out.logits.numpy()[:, :55], exp[:, :55])          # 其它步仍走分位规则
     m2 = _model(small_cfg); m2.cfg["decision"] = dec
@@ -123,20 +124,30 @@ def test_compute_loss_path_matches_forward_loss(small_cfg, batch):
 
 
 def test_night_zero_and_physics_clip(small_cfg, batch):
-    """night_zero 显式打开时夜间归零；默认关（与其它模型同口径）：aux['night'] 全 False、夜间预测不被强制为 0。"""
+    """night_zero 显式打开时夜间归零；默认关（与其它模型同口径）：aux['night'] 全 False、夜间预测不被强制为 0，
+    包括晴空上限也不能在夜间（p_clear=0）把输出钳成 0；白天仍受 1.05·p_clear 与 cap 钳位。"""
     m = _model(small_cfg); m.eval()
     assert m.cfg["decision"]["physics"]["night_zero"] is False and m.cfg["train"]["loss"]["night_weight"] == 1.0
     with torch.no_grad():
         out = m(batch["batch_dict"])
-    pred = out.logits.numpy(); night_true = out.aux["night_loss"]
-    assert not out.aux["night"].any() and night_true.any()
+    pred = out.logits.numpy(); night_true = out.aux["night_loss"]; pc = out.aux["p_clear"]
+    assert not out.aux["night"].any() and night_true.any() and (pc[night_true] == 0).all()
     assert (pred >= 0).all() and (pred <= out.aux["cap"][:, None] * 1.0001).all()
-    assert (pred <= 1.05 * out.aux["p_clear"] * (1 + 1e-5) + 1e-3).all()
+    day = ~night_true
+    assert (pred[day] <= 1.05 * pc[day] * (1 + 1e-5) + 1e-3).all()
+    # 决策层直接喂一个夜间为正的分位阵：默认不归零（只受 cap 钳位），night_zero=True 才归零
+    (B, H), K = pred.shape, len(m.levels)
+    q_syn = np.full((B, H, K), 0.5, float) * out.aux["cap"][:, None, None]
+    pt, *_ = m.decide(q_syn, night_true, pc, out.aux["cap"])
+    assert np.allclose(pt[night_true], 0.5 * np.broadcast_to(out.aux["cap"][:, None], pt.shape)[night_true])
+    assert (pt[day] <= np.minimum(1.05 * pc[day], np.broadcast_to(out.aux["cap"][:, None], pt.shape)[day]) + 1e-6).all()
     m.cfg["decision"]["physics"]["night_zero"] = True
     with torch.no_grad():
         out2 = m(batch["batch_dict"])
     assert out2.aux["night"].any() and (out2.logits.numpy()[out2.aux["night"]] == 0).all()
     assert np.allclose(out2.logits.numpy()[~night_true], pred[~night_true])          # 白天不受影响
+    pt2, *_ = m.decide(q_syn, night_true, pc, out.aux["cap"])
+    assert (pt2[night_true] == 0).all() and np.allclose(pt2[day], pt[day])
 
 
 def test_night_steps_enter_loss_by_default(small_cfg, batch):

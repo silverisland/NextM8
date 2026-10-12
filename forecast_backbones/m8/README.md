@@ -163,8 +163,15 @@ M8 以前在决策层把夜间强制归零，等于比别的模型多了一道�
   不能只关 night_zero 不重训）。想回到旧行为：`night_zero: true` + `night_weight: 0`，重训。
 - 旧 run 的 model_config.yaml 里存的是 `night_zero: true`，评估旧 run 仍会归零；要看旧 run 不归零的分数用 `--decision_yaml`
   传 `decision: {physics: {night_zero: false}}`，但它夜间没训过，分数只能当下界。
-- 晴空 / 容量钳位保留（它们只裁掉物理上不可能的值）；想完全裸对比可在 decision yaml 里设
-  `physics: {capacity_cap: false, clear_sky_cap_ratio: 1.0e9}`、`point: {default: median, by_step: []}`。
+- 晴空 / 容量钳位保留（它们只裁掉物理上不可能的值），但 **晴空上限在夜间不生效**：夜间晴空 GHI 恒为 0，
+  上限 1.05·p_clear = 0 会把夜间悄悄钳成 0，等于换个地方做夜间归零。所以 `night_zero: false` 时 p_clear<=0 的步
+  只用容量钳位（`physics_clip(..., night_ceiling=False)`），夜间完全由模型给。
+  **注意**：这一条是第二次提交才补上的；之前用 `night_zero: false` 评出来的分数夜间其实仍是 0。决策层没有可训练参数，
+  拉代码后用同一批 checkpoint 重新 `eval_m8.sh` 即得真正对齐的数字，不用重训。
+- 想量化"夜间对齐"值多少分：`config/variants/e1_night_old.yaml`（= e1_final + night_weight 0 + night_zero true，
+  即旧口径）与 e1_final 同切分同种子各跑一遍，差值就是夜间强制归零的红利。
+- 想完全裸对比可在 decision yaml 里设 `physics: {capacity_cap: false, clear_sky_cap_ratio: 1.0e9}`、
+  `point: {default: median, by_step: []}`。
 
 ## 超短期模块（g 系列，2026-10-10）
 
