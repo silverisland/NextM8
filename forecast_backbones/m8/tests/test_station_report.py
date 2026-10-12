@@ -69,6 +69,17 @@ def test_full_report_native(trained, tmp_path):
     assert {"hour", "obs_over_cap", "pred_over_cap", "other_pred_over_cap"} <= set(pd.read_csv(tmp_path / "d" / "S1001-hourly.csv").columns)
     inp = pd.read_csv(tmp_path / "d" / "input_stats.csv")
     assert len(inp) == 2 and (inp["rows_at_10:00"] == 3).all() and (inp["cap_nunique"] == 1).all()
+    # --pred-col：直接给数据里的预测列打分（这里用真值列 = 完美预报 → D+1 100、bias 1）；--other-pred-col 同口径对比
+    import yaml
+    meta_csv = yaml.safe_load((run / "model_config.yaml").read_text(encoding="utf-8"))["dataset"]["station_meta"]
+    diag(["--result", str(tdir), "--pred-col", "observe_power_future", "--station-meta", meta_csv, "--station", "S1001", "--out", str(tmp_path / "pc")])
+    pc = pd.read_csv(tmp_path / "pc" / "station_diag.csv").set_index("station")
+    assert set(pc.index) == {"S1001", "S1002"} and np.allclose(pc["nanwang_d1"], 100.0) and np.allclose(pc["bias_ratio"], 1.0)
+    assert float(pc.loc["S1001", "cap"]) == 500.0 and pc["d1_days"].min() >= 1
+    diag(["--result", rp, "--other", str(tdir / "station=1001.parquet"), "--other-pred-col", "observe_power_future", "--station-meta", meta_csv,
+          "--station", "S1001", "--out", str(tmp_path / "pc2")])
+    pc2 = pd.read_csv(tmp_path / "pc2" / "station_diag.csv").iloc[0]
+    assert abs(pc2["other_nanwang_d1_common"] - 100.0) < 1e-6 and abs(pc2["nanwang_d1_common"] - dg["nanwang_d1"]) < 1e-6
     # --full 落盘的 result_test.parquet 同样可诊断：D+1（10:00 行）与逐站表一致
     diag(["--result", str(tmp_path / "f" / "result_test.parquet"), "--station", "S1001", "--out", str(tmp_path / "d2")])
     dg2 = pd.read_csv(tmp_path / "d2" / "station_diag.csv").iloc[0]

@@ -10,6 +10,10 @@
           例如 M4 的逐站结果；按站名对齐，南网分数只比两边都有的起报日
 --test    测试 parquet（一站一文件）：统计输入侧——起报节奏、10:00 行数、cap_power_on 取值、NWP 未来列缺失率、历史功率缺失/全零率
 --station 要出逐小时曲线与逐日分数的站（默认：南网 D+1 最差的两个站）
+--pred-col <列>        把 --result 当作测试 parquet（文件 / 目录 / glob），直接拿数据里的某个 192 步预测列当提交曲线打分，
+                       例如 --pred-col timesfm3 = TimesFM 零样本基线，不用跑任何模型；容量取 --station-meta 站表
+--other-pred-col <列>  同上，作用于 --other（如 --result <M8 结果> --other "datasets/test/*.parquet" --other-pred-col timesfm3，
+                       按公共起报日逐站比 M8 与 TimesFM）
 
 逐站表的列：
   nanwang_d1          该模型提交曲线的南网 D+1（起报日均值，日分数负值 cap 到 0，与月度表同口径）
@@ -45,17 +49,65 @@ def _arr(col: pd.Series) -> np.ndarray:
     return np.stack([np.asarray(v, float).reshape(-1) for v in col.to_numpy()])
 
 
-def load_result(path) -> pd.DataFrame:
-    p = Path(path)
-    if p.suffix == ".parquet":
-        df = pd.read_parquet(p)
-    elif p.suffix in (".pkl", ".pickle"):
-        df = pd.read_pickle(p)
+def _expand(t: str) -> list[str]:
+    """文件 / 目录 / glob → parquet 路径列表。"""
+    if any(ch in t for ch in "*?["):
+        return sorted(glob.glob(t))
+    return [str(q) for q in sorted(Path(t).glob("*.parquet"))] if Path(t).is_dir() else [t]
+
+
+DEFAULT_META = Path(__file__).resolve().parent.parent / "m6" / "station_meta.csv"
+
+
+def result_from_data(paths: list[str], pred_col: str, meta_path=None) -> pd.DataFrame:
+    """测试 parquet（一站一文件）里的某个 192 步预测列 → 与 evaluate.py 同格式的结果表（cap 取站表 cap_mw）。
+    用途：给 timesfm3 之类的外部预测列打一个与 M8 完全同口径的基线分。"""
+    try:
+        from .station_report import frame_with_station_id
+        from .transformer_models import load_station_meta
+        from .features import station_cap_mw
+    except ImportError:
+        from forecast_backbones.m8.station_report import frame_with_station_id
+        from forecast_backbones.m8.transformer_models import load_station_meta
+        from forecast_backbones.m8.features import station_cap_mw
+    meta = load_station_meta(meta_path or DEFAULT_META)
+    cfg = {"dataset": {"station_id_col": "station_id"}}
+    frames = []
+    for f in paths:
+        df = pd.read_parquet(f)
+        miss = [c for c in ("timestamp_win", pred_col, "observe_power_future") if c not in df.columns]
+        if miss:
+            raise KeyError(f"{f} 缺列 {miss}")
+        df = frame_with_station_id(df, cfg, meta)
+        sid = df["station_id"].astype(int)
+        caps = {int(s): station_cap_mw(meta, int(s)) for s in sid.unique()}
+        frames.append(pd.DataFrame({
+            "timestamp_win": df["timestamp_win"].to_numpy(),
+            "station": (df["station"] if "station" in df.columns else sid).astype(str).to_numpy(),
+            "station_id": sid.to_numpy(), "cap": sid.map(caps).astype(float).to_numpy(),
+            "observe_power_predict": [np.asarray(v, float).reshape(-1) for v in df[pred_col].to_numpy()],
+            "observe_power_future": [np.asarray(v, float).reshape(-1) for v in df["observe_power_future"].to_numpy()],
+        }))
+    if not frames:
+        raise FileNotFoundError(f"没有 parquet：{paths}")
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_result(path, pred_col: str | None = None, meta_path=None) -> pd.DataFrame:
+    """evaluate.py / station_report.py 落的结果表；pred_col 给定时 path 是测试 parquet（文件 / 目录 / glob），见 result_from_data。"""
+    if pred_col:
+        df = result_from_data(_expand(str(path)), pred_col, meta_path)
     else:
-        df = pd.read_csv(p)
-        for c in ("observe_power_predict", "observe_power_future"):
-            if df[c].dtype == object and isinstance(df[c].iloc[0], str):
-                df[c] = df[c].map(lambda s: np.asarray(json.loads(s), float))
+        p = Path(path)
+        if p.suffix == ".parquet":
+            df = pd.read_parquet(p)
+        elif p.suffix in (".pkl", ".pickle"):
+            df = pd.read_pickle(p)
+        else:
+            df = pd.read_csv(p)
+            for c in ("observe_power_predict", "observe_power_future"):
+                if df[c].dtype == object and isinstance(df[c].iloc[0], str):
+                    df[c] = df[c].map(lambda s: np.asarray(json.loads(s), float))
     need = ["timestamp_win", "station", "observe_power_predict", "observe_power_future"]
     miss = [c for c in need if c not in df.columns]
     if miss:
@@ -234,9 +286,12 @@ def main(argv=None):
     ap.add_argument("--out", default=None)
     ap.add_argument("--cap", type=float, default=None, help="结果里没有 cap 列时统一用这个容量（或 --cap-json）")
     ap.add_argument("--cap-json", default=None, help='{"站名": 容量} 的 json 文件')
+    ap.add_argument("--pred-col", default=None, help="把 --result 当测试 parquet，用这个 192 步列当提交曲线（如 timesfm3）")
+    ap.add_argument("--other-pred-col", default=None, help="把 --other 当测试 parquet，用这个列当对方的提交曲线")
+    ap.add_argument("--station-meta", default=None, help=f"--pred-col / --other-pred-col 取容量用的站表（默认 {DEFAULT_META}）")
     a = ap.parse_args(argv)
-    res = load_result(a.result)
-    other = load_result(a.other) if a.other else None
+    res = load_result(a.result, a.pred_col, a.station_meta)
+    other = load_result(a.other, a.other_pred_col, a.station_meta) if a.other else None
     if "cap" in res.columns:
         caps = res.groupby("station")["cap"].first().astype(float).to_dict()
     elif a.cap_json:
@@ -253,7 +308,7 @@ def main(argv=None):
     print("\n=== 逐站诊断（station_diag.csv）===")
     print(table.to_string(index=False))
     if a.test:
-        paths = sorted(sum([glob.glob(t) if any(ch in t for ch in "*?[") else ([str(q) for q in sorted(Path(t).glob("*.parquet"))] if Path(t).is_dir() else [t]) for t in a.test], []))
+        paths = sorted(sum([_expand(t) for t in a.test], []))
         inp = input_stats(paths)
         inp.to_csv(out / "input_stats.csv", index=False)
         print("\n=== 输入侧统计（input_stats.csv）===")
