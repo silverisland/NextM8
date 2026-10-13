@@ -71,6 +71,8 @@ python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/conf
 | D 数据/决策 | d1_members（需 SSRD_pos_* 列）/ d2_pstar_point / d3_timesfm_hint / d4_timesfm_resid（需 timesfm_predict 列） | 集合成员；p* vs 中位数；TimesFM 单变量预测作为未来提示通道；在其上做残差学习 |
 | E 组合 | e1_final | a1 + c8 调度 + d2 决策（第二轮结论的组合） |
 | F 站点身份 | f1_row_local / f2_no_coords / f3_row_local_final | 去掉能标识站点的输入（坐标、log 容量、站点嵌入）后已见 / 未见站差距是否收窄；f3 = f1 + c8 + d2 |
+| H 物理先验 | h1_cs_ratio / h2_cs_ratio_skip / h3_stack / h4_envelope | 按站晴空出力比；缺坐标站的历史日形包络（见下文两节） |
+| I 训练协议 | i1_protocol / i2_ema_only | 小模型 + 低学习率 + 权重 EMA + 平滑选点；只开 EMA + 平滑选点（见「训练协议」一节） |
 
 读法：先看 a1 vs b4（协变量价值）与 a1 vs c1（配方价值）——调研表明这两项通常远大于骨干差异（2–5%）；骨干之间差异小于
 种子噪声时不要下结论，换 `run.seeds` 多跑几颗。强烈建议补一个 LightGBM 逐步特征基线（竞赛与 15 min PVDAQ 上仍是最强单模型）。
@@ -168,6 +170,27 @@ y / p_clear 的 quantile 分位，夹到 [lo, hi]，乘到 p_clear 上（通道 
 评估结果表 ctx 里多一个 envelope_used 标志。
 
 跑 h4_envelope 看国能和煦单站；舰队其它站与 h1 应完全一致。
+
+## 训练协议（i 系列，2026-10-13）
+
+三轮消融里所有骨干 / 融合 / 规模变体都落在 a1 ±0.6 的种子噪声内，而验证分在 1,500–2,500 步见顶后来回晃 1.5–3 分：
+按单次验证挑 checkpoint 挑的是噪声。调研（`docs/survey_m8_architecture_review.md` §6）对这个数据量级（≈ ETTh1）的处方一致：
+小模型、低学习率、权重 EMA、按多次验证均值选点、多种子集成。两个开关：
+
+- `train.ema_decay`（默认 null）：每个优化步后 shadow ← d·shadow + (1−d)·θ，前几步 d = min(decay, (1+n)/(10+n)) 让 shadow 快速
+  跟上（decay 0.999 时 n=1000 步 d≈0.991，n=4000 步 d≈0.998，有效窗口数百步）。验证、存最优、refit 的最终权重都用 shadow；
+  训练继续用原权重。train_log.json / summary.csv 记 ema_decay。
+- `train.early_stop.smooth_k`（默认 1）：best 与早停按最近 k 次验证分的均值判；history 里原始分（`nanwang_after_pstar`）与
+  平滑分（`nanwang_after_pstar_smooth`）都记，best_step 指平滑分最高的那次。
+
+| 变体 | 改动 |
+|---|---|
+| i1_protocol | e1_final + d_model 128 / d_ff 512 / head_hidden 128 + lr 1e-4、cosine 8000 步 + EMA 0.999 + smooth_k 3 |
+| i2_ema_only | e1_final + EMA 0.999 + smooth_k 3（模型与学习率不动，拆开两部分贡献） |
+
+跑法 `--seeds 0,1,2,3,4`，看三样：与 e1_final 同种子的 nanwang_short_D+1、train_log.json 里验证分的波动幅度、5 成员集成分。
+
+## 夜间口径（2026-10-12 起：不做夜间归零）
 
 M1–M7 都不做夜间后处理，而四个指标都是全点含夜间、分母下限 0.2·容量：夜间报容量 2% 的噪声就扣约 1 分，5% 扣约 5–6 分。
 M8 以前在决策层把夜间强制归零，等于比别的模型多了一道后处理，分数不可比。现在：

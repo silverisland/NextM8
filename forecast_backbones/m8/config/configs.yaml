@@ -68,7 +68,8 @@ train:
     sampling: random                   # random | station_day
     progress_bar: true
     num_workers: 0
-  early_stop: {metric: nanwang_after_pstar, patience: 5, nrmse_issue_every_min: 60}
+  early_stop: {metric: nanwang_after_pstar, patience: 5, nrmse_issue_every_min: 60, smooth_k: 1}   # smooth_k>1：按最近 k 次验证均值选点 / 早停
+  ema_decay: null                    # 权重 EMA 衰减（如 0.999）；null = 关。验证与最优权重都用 EMA 权重
   weights_path: ${run.out_dir}/model.safetensors
 decision:
   physics: {night_zero: false, clear_sky_cap_ratio: 1.05, capacity_cap: true, clip_negative: true}   # 夜间不归零（与其它模型同口径；夜间步进损失）；负值截 0

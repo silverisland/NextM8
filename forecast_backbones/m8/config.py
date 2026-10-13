@@ -105,8 +105,13 @@ DEFAULT_CFG: dict = {
                  "metric_aux": {"ultra_l1": 0.0, "short_l2": 0.0, "short_steps": [55, 151], "floor_ratio": 0.2, "mean_head_weight": 1.0}},
         # early_stop.metric：nanwang_after_pstar（D+1）| nrmse | nanwang_ultra_proxy（整点行上的超短期代理分）
         #                    | nanwang_combo（combo_weights 加权的 D+1 与超短期代理分）
+        # early_stop.smooth_k（2026-10-13）：最优权重 / 早停按"最近 k 次验证分的均值"判，1 = 按单次分（旧行为）。
+        #   验证分在见顶后来回晃 1.5–3 分而种子差只有 0.4，按单次挑 checkpoint 挑的是噪声；history 里原始分与平滑分都记
         "early_stop": {"metric": "nanwang_after_pstar", "patience": 5, "nrmse_issue_every_min": 60,
-                       "combo_weights": {"short": 0.5, "ultra": 0.5}},
+                       "combo_weights": {"short": 0.5, "ultra": 0.5}, "smooth_k": 1},
+        # 权重 EMA（2026-10-13）：null = 关；0.999 等 = 每个优化步后 shadow ← d·shadow + (1−d)·θ（前几步 d = min(decay, (1+n)/(10+n)) 快速跟上），
+        #   验证、存最优（refit 的最终权重）都用 shadow。针对验证分评估间震荡；对应文献 TSPP / Morales-Brotons 2024
+        "ema_decay": None,
         "weights_path": "${run.out_dir}/model.safetensors",   # 存在即在构造时加载（推理）；训练入口会改指向哨兵路径
     },
     "decision": {

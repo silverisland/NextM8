@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
 import json
 import sys
@@ -141,9 +142,57 @@ def score_nrmse(model, ds_val, collate, cfg, issue_every_min: int = 60) -> tuple
 
 
 # ------------------------------------------------------------------ 回调
+class WeightEma:
+    """权重指数滑动平均（train.ema_decay）：每个优化步后 shadow ← d_n·shadow + (1−d_n)·θ，d_n = min(decay, (1+n)/(10+n))
+    （前几步 d 小，shadow 快速跟上随机初始化之后的权重）；浮点张量平均，其它缓冲直接拷贝。
+    applied(model) 期间模型权重换成 shadow（验证、存最优），退出复原。"""
+
+    def __init__(self, model: torch.nn.Module, decay: float):
+        self.decay, self.n, self.last_decay = float(decay), 0, float("nan")
+        if not 0.0 <= self.decay <= 1.0:
+            raise ValueError(f"train.ema_decay 须在 [0, 1]，得到 {decay!r}")
+        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        self.n += 1
+        d = min(self.decay, (1.0 + self.n) / (10.0 + self.n))
+        self.last_decay = d
+        for k, v in model.state_dict().items():
+            s = self.shadow[k]
+            if s.dtype.is_floating_point:
+                s.mul_(d).add_(v.detach().to(s.device), alpha=1.0 - d)
+            else:
+                s.copy_(v.detach().to(s.device))
+
+    @contextlib.contextmanager
+    def applied(self, model: torch.nn.Module):
+        backup = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        model.load_state_dict(self.shadow, strict=True)
+        try:
+            yield
+        finally:
+            model.load_state_dict(backup, strict=True)
+
+    def load_into(self, model: torch.nn.Module) -> None:
+        """把 shadow 永久写进模型（refit 的最终权重）。"""
+        model.load_state_dict(self.shadow, strict=True)
+
+
+class EmaCallback(TrainerCallback):
+    """每个优化步后更新 EMA；须排在 EvalCallback 前面（同一步的验证用更新后的 shadow）。"""
+
+    def __init__(self, ema: WeightEma, model: torch.nn.Module):
+        self.ema, self.model = ema, model
+
+    def on_step_end(self, args, state, control, **kwargs):
+        self.ema.update(self.model)
+        return control
+
+
 class EvalCallback(TrainerCallback):
-    def __init__(self, model, ds_val, collate, cfg, best_path, patience: int, log_path, eval_every_steps=None):
-        self.model, self.ds_val, self.collate, self.cfg = model, ds_val, collate, cfg
+    def __init__(self, model, ds_val, collate, cfg, best_path, patience: int, log_path, eval_every_steps=None, ema: WeightEma | None = None):
+        self.model, self.ds_val, self.collate, self.cfg, self.ema = model, ds_val, collate, cfg, ema
         self.best_path, self.log_path, self.patience = Path(best_path), Path(log_path), int(patience)
         self.eval_every_steps = int(eval_every_steps) if eval_every_steps else None
         es = cfg["train"]["early_stop"]
@@ -152,8 +201,11 @@ class EvalCallback(TrainerCallback):
             raise ValueError(f"train.early_stop.metric={self.metric!r} 未知，可选 {sorted(EARLY_STOP_METRICS)}")
         self.higher_better = EARLY_STOP_METRICS[self.metric]
         self.issue_every_min = int(es.get("nrmse_issue_every_min", 60))
+        self.smooth_k = int(es.get("smooth_k", 1) or 1)
+        if self.smooth_k < 1:
+            raise ValueError(f"train.early_stop.smooth_k 须 ≥ 1，得到 {self.smooth_k}")
         self.best = -np.inf if self.higher_better else np.inf
-        self.best_step, self.bad_evals, self.history = None, 0, []
+        self.best_step, self.bad_evals, self.history, self.raw_scores = None, 0, [], []
         self.last_unseen = None
         self.last_extra: dict = {}
         cw = es.get("combo_weights") or {}
@@ -185,27 +237,38 @@ class EvalCallback(TrainerCallback):
             self.model._progress_desc = None
 
     def _record(self, step: int, epoch: float, score: float, loss: float | None) -> bool:
-        better = score > self.best if self.higher_better else score < self.best
-        if np.isfinite(score) and better:
-            self.best, self.best_step, self.bad_evals = float(score), int(step), 0
+        """score = 本次原始验证分；best / 早停按最近 smooth_k 次原始分（非有限的不算）的均值判。"""
+        self.raw_scores.append(float(score))
+        window = [s for s in self.raw_scores[-self.smooth_k:] if np.isfinite(s)]
+        sel = float(np.mean(window)) if window else float("nan")
+        better = sel > self.best if self.higher_better else sel < self.best
+        if np.isfinite(sel) and better:
+            self.best, self.best_step, self.bad_evals = float(sel), int(step), 0
             save_weights(self.model, self.best_path)
         else:
             self.bad_evals += 1
-        self.history.append({"step": int(step), "epoch": float(epoch), self.metric: float(score), "train_loss": loss,
+        self.history.append({"step": int(step), "epoch": float(epoch), self.metric: float(score),
+                             **({f"{self.metric}_smooth": sel} if self.smooth_k > 1 else {}), "train_loss": loss,
                              **({"nanwang_unseen": self.last_unseen} if self.last_unseen is not None else {}),
                              **{k: (float(v) if v == v else None) for k, v in self.last_extra.items()},
                              "best": self.best, "bad_evals": self.bad_evals, "time": time.time()})
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text(json.dumps({"history": self.history, "best": self.best, "best_step": self.best_step,
-                                             "patience": self.patience, "metric": self.metric,
+                                             "patience": self.patience, "metric": self.metric, "smooth_k": self.smooth_k,
+                                             "ema_decay": None if self.ema is None else self.ema.decay,
                                              "higher_better": self.higher_better}, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"[m8] step {step} (epoch {epoch:.3g}): {self.metric}={score:.4f} best={self.best:.4f}@step {self.best_step} "
+        sm = f" smooth{self.smooth_k}={sel:.4f}" if self.smooth_k > 1 else ""
+        print(f"[m8] step {step} (epoch {epoch:.3g}): {self.metric}={score:.4f}{sm} best={self.best:.4f}@step {self.best_step} "
               f"bad={self.bad_evals}/{self.patience}", flush=True)
         return self.bad_evals >= self.patience
 
     def _evaluate(self, state, control):
         loss = next((h["loss"] for h in reversed(state.log_history) if "loss" in h), None)
-        stop = self._record(int(state.global_step or 0), float(state.epoch or 0.0), self._score(), loss) if _dist.is_main() else False
+        if _dist.is_main():
+            with (self.ema.applied(self.model) if self.ema is not None else contextlib.nullcontext()):   # 验证与存最优都用 EMA 权重
+                stop = self._record(int(state.global_step or 0), float(state.epoch or 0.0), self._score(), loss)
+        else:
+            stop = False
         if _dist.broadcast_from_main(stop) and control is not None:
             control.should_training_stop = True
 
@@ -226,10 +289,10 @@ class _M8Trainer(Trainer):
         super().__init__(*a, **kw)
         self._sampling, self._station_col, self._ts_col = sampling, station_col, ts_col
 
-    def _get_train_sampler(self):
+    def _get_train_sampler(self, *a, **kw):          # transformers>=4.46 多传一个 dataset 位置参数，4.40 不传：两种签名都接
         if self._sampling == "station_day":
             return StationDaySampler(self.train_dataset, self._station_col, self._ts_col, seed=self.args.seed)
-        return super()._get_train_sampler()
+        return super()._get_train_sampler(*a, **kw)
 
 
 # ------------------------------------------------------------------ 数据
@@ -281,6 +344,7 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
             "cov_dropout": cfg["train"].get("cov_dropout", 0.0),
             "future_only": "+".join(d["col"] for d in cfg["features"].get("future_only", [])) or "",
             "residual": cfg["features"].get("residual_base_col") or "",
+            "ema_decay": float("nan") if cfg["train"].get("ema_decay") is None else float(cfg["train"]["ema_decay"]), "smooth_k": int(cfg["train"]["early_stop"].get("smooth_k", 1) or 1),
             "n_val_rows": n_val, "n_train_rows": n_train}
 
 
@@ -343,11 +407,16 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
         print(f"[m8] train={len(ds_train)} val={0 if ds_val is None else len(ds_val)} rows；{world} 个进程 × 每卡 batch {bs}；"
               f"预算 {budget}；{how}；采样 {sampling}；device={args.device}", flush=True)
     best_path = out / WEIGHTS_FILE
+    ema_decay = cfg["train"].get("ema_decay")
+    ema = WeightEma(model, float(ema_decay)) if ema_decay is not None else None
+    if main and ema is not None:
+        print(f"[m8] 权重 EMA 开：decay={ema.decay}；验证与最优权重都用 EMA 权重")
     cb = None if refit else EvalCallback(model, ds_val, collate, train_cfg, best_path=best_path,
                                          patience=int(cfg["train"]["early_stop"]["patience"]),
-                                         log_path=out / "train_log.json", eval_every_steps=eval_every)
+                                         log_path=out / "train_log.json", eval_every_steps=eval_every, ema=ema)
+    callbacks = ([EmaCallback(ema, model)] if ema is not None else []) + ([cb] if cb else [])    # EMA 更新排在验证前
     model.train()
-    trainer = _M8Trainer(model=model, args=args, data_collator=collate, train_dataset=ds_train, callbacks=[cb] if cb else [],
+    trainer = _M8Trainer(model=model, args=args, data_collator=collate, train_dataset=ds_train, callbacks=callbacks,
                          sampling=sampling, station_col=station_col, ts_col=ts_col)
     t0 = time.time()
     trainer.train()
@@ -355,13 +424,15 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
         return {}
     row = functools.partial(_summary_row, cfg, tag, out, model, n_train=len(ds_train))
     if refit:
-        # 全量重训：没有验证分数；最终权重 = 第 max_steps 步的权重（cosine 调度在这一步退火到 0）
+        # 全量重训：没有验证分数；最终权重 = 第 max_steps 步的权重（cosine 调度在这一步退火到 0）；开了 EMA 就是 EMA 权重
+        if ema is not None:
+            ema.load_into(model)
         save_weights(model, best_path)
         hist = [{"step": int(h["step"]), "train_loss": float(h["loss"])} for h in trainer.state.log_history if "loss" in h]
         summary = pd.DataFrame([row(best_step=int(args.max_steps), n_evals=0, minutes=(time.time() - t0) / 60.0, n_val=0)])
         summary.to_csv(report_dir / "summary.csv", index=False)
         (out / "train_log.json").write_text(json.dumps({"history": hist, "best": None, "best_step": int(args.max_steps),
-                                                        "patience": None, "metric": None, "refit": True,
+                                                        "patience": None, "metric": None, "refit": True, "ema_decay": ema_decay,
                                                         "final": summary.to_dict("records")[0]},
                                                        indent=2, ensure_ascii=False, default=str), encoding="utf-8")
         print(summary.to_string(index=False))
