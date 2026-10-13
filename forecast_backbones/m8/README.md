@@ -78,6 +78,7 @@ python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/conf
 | F 站点身份 | f1_row_local / f2_no_coords / f3_row_local_final | 去掉能标识站点的输入（坐标、log 容量、站点嵌入）后已见 / 未见站差距是否收窄；f3 = f1 + c8 + d2 |
 | H 物理先验 | h1_cs_ratio / h2_cs_ratio_skip / h3_stack / h4_envelope | 按站晴空出力比；缺坐标站的历史日形包络（见下文两节） |
 | I 训练协议 | i1_protocol / i2_ema_only | 小模型 + 低学习率 + 权重 EMA + 平滑选点；只开 EMA + 平滑选点（见「训练协议」一节） |
+| J 最终组合候选 | j1_final2（需 timesfm3 列） | e1_final + h4（晴空出力比 + 历史包络）+ d3（TimesFM 提示）：round5 里两者各自高于 e1_final，叠加看是否相加 |
 
 读法：先看 a1 vs b4（协变量价值）与 a1 vs c1（配方价值）——调研表明这两项通常远大于骨干差异（2–5%）；骨干之间差异小于
 种子噪声时不要下结论，换 `run.seeds` 多跑几颗。强烈建议补一个 LightGBM 逐步特征基线（竞赛与 15 min PVDAQ 上仍是最强单模型）。

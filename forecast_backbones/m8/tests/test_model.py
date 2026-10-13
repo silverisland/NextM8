@@ -228,7 +228,7 @@ def test_residual_variant_is_identity_shift_of_hint(small_cfg, batch):
     assert torch.isfinite(out.loss)
 
 
-@pytest.mark.parametrize("name", ["d3_timesfm_hint", "d4_timesfm_resid"])
+@pytest.mark.parametrize("name", ["d3_timesfm_hint", "d4_timesfm_resid", "j1_final2"])
 def test_timesfm_variant_files_train_step(small_cfg, batch, name):
     from forecast_backbones.m8.tests.conftest import ROOT
     cfg = load_config(str(ROOT / "forecast_backbones/m8/config/variants" / f"{name}.yaml"))
@@ -237,6 +237,17 @@ def test_timesfm_variant_files_train_step(small_cfg, batch, name):
     m = build_model(model_name="m8", model_config=cfg); m.train()
     out = m(batch["batch_dict"], labels=batch["labels"]); out.loss.backward()
     assert torch.isfinite(out.loss) and out.logits.shape == (batch["labels"]["observe_power_future"].shape[0], 192)
+
+
+def test_j1_final2_stacks_d3_and_h4_on_e1_final():
+    """j1_final2 = e1_final 调度 / 决策 + h4（晴空出力比 + 历史包络）+ d3（timesfm3 未来提示 + hint_dropout）。"""
+    from forecast_backbones.m8.tests.conftest import ROOT
+    v = ROOT / "forecast_backbones/m8/config/variants"
+    j1, e1 = load_config(str(v / "j1_final2.yaml")), load_config(str(v / "e1_final.yaml"))
+    assert j1["features"]["derived"]["clear_sky_ratio"]["enabled"] and j1["features"]["derived"]["history_envelope"]["enabled"]
+    assert j1["features"]["future_only"] == [{"col": "timesfm3", "scale": "target"}] and j1["train"]["hint_dropout"] == 0.3
+    assert j1["train"]["schedule"] == e1["train"]["schedule"] and j1["train"]["early_stop"] == e1["train"]["early_stop"]
+    assert j1["decision"]["point"] == e1["decision"]["point"] and j1["model"] == e1["model"]
 
 
 def test_all_variant_configs_load(small_cfg):

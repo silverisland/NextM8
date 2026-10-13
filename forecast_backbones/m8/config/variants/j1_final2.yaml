@@ -1,0 +1,14 @@
+# J1 最终组合候选（2026-10-14）= e1_final 调度 / 决策 + h4（按站晴空出力比 + 缺坐标站历史日形包络）+ d3（TimesFM-3 未来提示通道）。
+#    round5 里 d3_timesfm_hint 与 h4_envelope 分别高于 e1_final；两条线互不相干（一条改晴空先验与夜间掩码，一条加未来协变量），
+#    这里叠加看是否相加。上线前提：线上每次起报要能提供 timesfm3 列（每站 192 步的 TimesFM-3 零样本预测）。
+#    跑法：bash train_m8_variants.sh --splits_dir <m8_v1> --variants e1_final,h4_envelope,d3_timesfm_hint,j1_final2 --seeds 0,1,2 --batch_tag round6
+#    refit：bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants j1_final2 --seeds 0,1,2 --refit --max_steps <best_step 上限> --batch_tag refit_r6
+run: {tag: j1_final2, out_dir: runs/m8/j1_final2}
+features:
+  derived: {clear_sky_ratio: {enabled: true}, history_envelope: {enabled: true}}
+  future_only: [{col: timesfm3, scale: target}]
+train:
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
+  early_stop: {patience: 8}
+  hint_dropout: 0.3
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}
