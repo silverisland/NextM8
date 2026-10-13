@@ -93,7 +93,7 @@ def test_loss_options_change_loss_and_keep_compute_loss_path(small_cfg, batch):
 
 def test_mean_head_decision_rule(small_cfg, batch):
     import copy
-    from forecast_backbones.m6.decision import physics_clip
+    from forecast_backbones.m8.decision import physics_clip
     m = _model(small_cfg, mean_head=True); m.eval()
     dec = copy.deepcopy(m.cfg["decision"])
     dec["point"]["by_step"] = [{"steps": [55, 151], "method": "mean_head"}]

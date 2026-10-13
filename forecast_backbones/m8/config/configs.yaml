@@ -10,7 +10,7 @@ dataset:
   label_col: observe_power_future
   ts_col: timestamp_win
   station_id_col: station_id
-  station_meta: forecast_backbones/m6/station_meta.csv    # 与 m6 共用；训练前填真实站坐标
+  station_meta: forecast_backbones/m8/station_meta.csv    # M8 自己的站表；训练前填真实站坐标
   tz: Asia/Shanghai
   step_min: 15
   known_stations: null               # 训练入口自动写入训练集里的站号；推理时名单外的站走"未知站"槽位 0

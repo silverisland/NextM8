@@ -29,18 +29,18 @@ try:
     from .features import station_cap_mw
     from .transformer_trainer import evaluate_model, build_training_args
     from .transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
-    from ..m6.train import _dataset_with_station_id, _check_presplit_dir
-    from ..m6.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
-    from ..m6 import _dist
+    from .data import _dataset_with_station_id, _check_presplit_dir
+    from .rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
+    from . import _dist
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override
     from forecast_backbones.m8.features import station_cap_mw
     from forecast_backbones.m8.transformer_trainer import evaluate_model, build_training_args
     from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
-    from forecast_backbones.m6.train import _dataset_with_station_id, _check_presplit_dir
-    from forecast_backbones.m6.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
-    from forecast_backbones.m6 import _dist
+    from forecast_backbones.m8.data import _dataset_with_station_id, _check_presplit_dir
+    from forecast_backbones.m8.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
+    from forecast_backbones.m8 import _dist
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
     from ...pipelines.nanwang_metric import NanwangMetric

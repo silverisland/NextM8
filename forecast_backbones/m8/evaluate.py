@@ -32,17 +32,17 @@ try:
     from .config import deep_merge, raw_override
     from .transformer_models import TransformersAdaptedM8Model
     from .train import score_nanwang, seen_unseen_scores, nrmse_pct, ultra_proxy_pct, WEIGHTS_FILE, CONFIG_FILE
-    from ..m6.train import _dataset_with_station_id
-    from ..m6.rows import scored_row_index, issue_grid_row_index
-    from ..m6.calibration import quantile_cols
+    from .data import _dataset_with_station_id
+    from .rows import scored_row_index, issue_grid_row_index
+    from .decision import quantile_cols
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.config import deep_merge, raw_override
     from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model
     from forecast_backbones.m8.train import score_nanwang, seen_unseen_scores, nrmse_pct, ultra_proxy_pct, WEIGHTS_FILE, CONFIG_FILE
-    from forecast_backbones.m6.train import _dataset_with_station_id
-    from forecast_backbones.m6.rows import scored_row_index, issue_grid_row_index
-    from forecast_backbones.m6.calibration import quantile_cols
+    from forecast_backbones.m8.data import _dataset_with_station_id
+    from forecast_backbones.m8.rows import scored_row_index, issue_grid_row_index
+    from forecast_backbones.m8.decision import quantile_cols
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
 except ImportError:

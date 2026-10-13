@@ -29,23 +29,23 @@ try:
     from .config import load_config
     from .features import FeatureBuilder
     from .model import PVRexCore
-    from ..m6.features import StationMeta
-    from ..m6.decision import enforce_monotone, physics_clip, select_point, level_value, p_star
-    from ..m6.losses import pinball_loss
+    from .solar import StationMeta
+    from .decision import enforce_monotone, physics_clip, select_point, level_value, p_star
+    from .losses import pinball_loss
 except ImportError:
     from forecast_backbones.m8.config import load_config
     from forecast_backbones.m8.features import FeatureBuilder
     from forecast_backbones.m8.model import PVRexCore
-    from forecast_backbones.m6.features import StationMeta
-    from forecast_backbones.m6.decision import enforce_monotone, physics_clip, select_point, level_value, p_star
-    from forecast_backbones.m6.losses import pinball_loss
+    from forecast_backbones.m8.solar import StationMeta
+    from forecast_backbones.m8.decision import enforce_monotone, physics_clip, select_point, level_value, p_star
+    from forecast_backbones.m8.losses import pinball_loss
 
 
 def load_station_meta(path) -> StationMeta:
     p = Path(path)
     if not p.exists():
         if not p.is_absolute():
-            fallback = Path(__file__).parent.parent / "m6" / "station_meta.csv"
+            fallback = Path(__file__).parent / "station_meta.csv"
             if fallback.exists():
                 warnings.warn(f"station_meta {p} 不存在（相对当前工作目录解析失败）：回退到 {fallback}")
                 return StationMeta.from_csv(fallback)
@@ -149,7 +149,7 @@ class TransformersAdaptedM8Model(nn.Module):
 
     def decide(self, q_raw: np.ndarray, night_fut: np.ndarray, p_clear_fut: np.ndarray, cap: np.ndarray, decision: dict | None = None,
                extra: dict | None = None):
-        """决策层（numpy，与 m6 同一套函数；没有可训练参数，所以评估时可换规则不用重训）。
+        """决策层（numpy，decision.py；没有可训练参数，所以评估时可换规则不用重训）。
         q_raw [B,H,K] 真实单位的原始分位 → (point [B,H], q_cal, median, pstar, night_physics)。decision 缺省用 cfg['decision']。
         extra: {"mean_head": [B,H] 真实单位} —— by_step 里 method=mean_head 的步直接用它（经同一套物理裁剪），优先于其它规则。"""
         dec = decision if decision is not None else self.cfg["decision"]

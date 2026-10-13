@@ -1,19 +1,48 @@
 # -*- coding: utf-8 -*-
 # forecast_backbones/m8/config.py
-"""M8 配置：yaml → dict，与 DEFAULT_CFG 深合并，解析 ${run.out_dir}。
-deep_merge / interpolate / dump_config 直接复用 m6.config（语义相同，不另写一份）。"""
+"""M8 配置：yaml → dict，与 DEFAULT_CFG 深合并，解析 ${run.out_dir}。deep_merge / interpolate / dump_config 自带（2026-10-13 起不再引用 m6）。"""
 from __future__ import annotations
 
-import sys
+import copy
+import json
 from pathlib import Path
 
 import yaml
 
-try:
-    from ..m6.config import deep_merge, interpolate, dump_config
-except ImportError:
-    sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from forecast_backbones.m6.config import deep_merge, interpolate, dump_config
+
+def deep_merge(base: dict, override: dict) -> dict:
+    """dict 递归合并；非 dict（含 list）整体替换。"""
+    out = copy.deepcopy(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
+def interpolate(cfg: dict) -> dict:
+    """把字符串里的 ${run.out_dir} 替换成 cfg['run']['out_dir']。只支持这一个占位符。"""
+    out_dir = str(cfg.get("run", {}).get("out_dir", ""))
+
+    def _walk(x):
+        if isinstance(x, dict):
+            return {k: _walk(v) for k, v in x.items()}
+        if isinstance(x, list):
+            return [_walk(v) for v in x]
+        if isinstance(x, str) and "${run.out_dir}" in x:
+            return x.replace("${run.out_dir}", out_dir)
+        return x
+
+    return _walk(cfg)
+
+
+def dump_config(cfg: dict, path) -> None:
+    """配置写成 yaml（元组转列表，键序不变）。"""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    plain = json.loads(json.dumps(cfg, ensure_ascii=False, default=str))
+    Path(path).write_text(yaml.safe_dump(plain, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
 
 __all__ = ["DEFAULT_CFG", "load_config", "deep_merge", "interpolate", "dump_config", "raw_override"]
 
@@ -24,7 +53,7 @@ DEFAULT_CFG: dict = {
         "label_col": "observe_power_future",
         "ts_col": "timestamp_win",
         "station_id_col": "station_id",
-        "station_meta": "forecast_backbones/m6/station_meta.csv",   # 与 m6 共用一份站表（station_id, station, lat, lon, alt_m, cap_mw）
+        "station_meta": "forecast_backbones/m8/station_meta.csv",   # M8 自己的站表（station_id, station, lat, lon, alt_m, cap_mw）；与 m6 那份内容相同但各自维护
         "tz": "Asia/Shanghai",
         "step_min": 15,
         # 训练入口自动写入：训练集里出现过的整数站号。推理时不在名单里的站走"未知站"槽位 0（见 train.slot_dropout）
@@ -128,7 +157,7 @@ DEFAULT_CFG: dict = {
 
 
 def raw_override(config_path) -> dict:
-    """yaml 路径 / dict / None → 尚未合并、未插值的 override dict（同 m6.transformer_trainer._raw_override）。"""
+    """yaml 路径 / dict / None → 尚未合并、未插值的 override dict。"""
     if config_path is None:
         return {}
     if isinstance(config_path, dict):

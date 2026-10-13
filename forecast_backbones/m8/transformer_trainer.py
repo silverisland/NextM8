@@ -20,11 +20,11 @@ from transformers import TrainingArguments
 
 try:
     from .config import load_config
-    from ..m6.calibration import quantile_cols
+    from .decision import quantile_cols
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.config import load_config
-    from forecast_backbones.m6.calibration import quantile_cols
+    from forecast_backbones.m8.decision import quantile_cols
 
 
 def _np(x):

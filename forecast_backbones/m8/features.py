@@ -17,15 +17,13 @@ import numpy as np
 import pandas as pd
 
 try:
-    from ..m6.features import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
-    from ..m6._arrays import interp_nan
-except ImportError:
-    sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from forecast_backbones.m6.features import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
-    from forecast_backbones.m6._arrays import interp_nan
-try:
+    from .solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
+    from ._arrays import interp_nan
     from .config import normalize_future_only
 except ImportError:
+    sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+    from forecast_backbones.m8.solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
+    from forecast_backbones.m8._arrays import interp_nan
     from forecast_backbones.m8.config import normalize_future_only
 
 _WARNED_MISSING: set = set()

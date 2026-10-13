@@ -59,7 +59,7 @@ def _expand(t: str) -> list[str]:
     return [str(q) for q in sorted(Path(t).glob("*.parquet"))] if Path(t).is_dir() else [t]
 
 
-DEFAULT_META = Path(__file__).resolve().parent.parent / "m6" / "station_meta.csv"
+DEFAULT_META = Path(__file__).resolve().parent / "station_meta.csv"
 
 
 def result_from_data(paths: list[str], pred_col: str, meta_path=None) -> pd.DataFrame:

@@ -17,8 +17,8 @@
 token = ResidualMLP(patch 展平) + static_proj + station_emb + pos_emb
 Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU FFN）
 输出头（step_cov）：每步拼 [token 隐状态, patch 内位置嵌入, 该步原始通道向量] → ResidualMLP → 9 档分位（归一化单位）× scale
-决策层：复用 m6.decision（分位排序 → 1.05·晴空 / 装机容量钳位 → 中位数或 p*；夜间归零 night_zero 默认关，见下）
-损失：pinball（m6.losses），监督步 = 未来段 + CPM 掩码的历史段，掩缺测；夜间步按 train.loss.night_weight（默认 1）参与
+决策层：decision.py（分位排序 → 1.05·晴空 / 装机容量钳位 → 中位数或 p*；夜间归零 night_zero 默认关，见下）
+损失：pinball（losses.py），监督步 = 未来段 + CPM 掩码的历史段，掩缺测；夜间步按 train.loss.night_weight（默认 1）参与
 ```
 
 混合器（`layers.py`，全部因果）：`conv` 门控长卷积（Reverso；线性零填充卷积而非循环 FFT）、`deltanet` Gated DeltaNet
@@ -34,7 +34,12 @@ Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU 
 - `transformer_trainer.py`：`evaluate_model(model, ds, collate, cfg)`（result_df 与 m6 同 schema）、`M8_build_training_args`。
 - `train.py`：`train_m8(config, splits_dir, out_dir, max_steps, tag)`；`train_script.py --model_name m8` 走独立入口（同 m6）。
 - 配置真源 `config/configs.yaml`（= `config.py` 的 DEFAULT_CFG）；变体 `config/variants/*.yaml` 只写与默认不同的字段。
-- 站表：`dataset.station_meta`（默认与 m6 共用 `forecast_backbones/m6/station_meta.csv`，训练前填真实坐标；缺坐标站退化为钟表几何）。
+- 站表：`dataset.station_meta`（默认 `forecast_backbones/m8/station_meta.csv`，训练前填真实坐标；缺坐标站退化为钟表几何或历史日形包络）。
+- **自包含（2026-10-13 起）**：m8 目录不再引用 `forecast_backbones/m6` 的任何代码或数据。原来从 m6 拿的东西都在本目录自带一份：
+  `solar.py`（站表 StationMeta / 太阳几何 / 钟表几何 / 站名映射 / 固定容量）、`decision.py`（决策层 + quantile_cols）、`losses.py`（pinball）、
+  `rows.py`（打分行 / 整点行 / 站日采样）、`data.py`（切分目录 → UnifiedDataset）、`_dist.py`、`_arrays.py`、`station_meta.csv`。
+  m6 那边改了不会自动同步到这里（站表两份要一起改）。所有模型共享的 `pipelines/`、`interfaces/` 仍然引用，不复制。
+  `tests/test_standalone.py` 守住这条：m8 源码里出现 m6 引用、或 import m8 时加载了 m6 模块，测试即失败。
 - **容量只来自站表 `cap_mw`，每站一个固定值**（2026-10-09 起）：模型归一化、晴空钳位、南网 / ods 指标的分母都是这一个数；
   数据里的 `cap_power_on` 是随时间变的开机容量（白马湖并网首月 8.88 → 68），一律不用。站表没有的站直接报错。
   之前的 checkpoint 按行 cap 训练，最终模型要在这个口径下重训（refit）。

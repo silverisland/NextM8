@@ -35,24 +35,39 @@ import torch
 try:
     from .evaluate import expand_paths, load_member, decision_override, describe_point, run_inference
     from .features import station_cap_mw
-    from ..m6.train import _dataset_with_station_id
-    from ..m6.station_eval import station_key, RESULT_COLS
-    from ..m6.features import attach_station_id, norm_station_name
+    from .data import _dataset_with_station_id
+    from .solar import attach_station_id, norm_station_name
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.evaluate import expand_paths, load_member, decision_override, describe_point, run_inference
     from forecast_backbones.m8.features import station_cap_mw
-    from forecast_backbones.m6.train import _dataset_with_station_id
-    from forecast_backbones.m6.station_eval import station_key, RESULT_COLS
-    from forecast_backbones.m6.features import attach_station_id, norm_station_name
+    from forecast_backbones.m8.data import _dataset_with_station_id
+    from forecast_backbones.m8.solar import attach_station_id, norm_station_name
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
     from ...pipelines.metric import SolarMetricCalculator, MIN_DAYS
     from ...pipelines.nanwang_metric import NanwangMetric
+    from ...pipelines.time_splits import station_keys
 except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
     from pipelines.metric import SolarMetricCalculator, MIN_DAYS
     from pipelines.nanwang_metric import NanwangMetric
+    from pipelines.time_splits import station_keys
+
+RESULT_COLS = ["timestamp_win", "station", "observe_power_predict", "observe_power_future"]
+
+
+def station_key(station_path, station_id_col: str = "station_id") -> str:
+    """单站 parquet 的站号：优先 station 列，没有再用 station_id 列；文件里不止一个站直接报错。"""
+    import pyarrow.parquet as pq
+    names = pq.read_schema(str(station_path)).names
+    col = "station" if "station" in names else station_id_col if station_id_col in names else None
+    if col is None:
+        raise ValueError(f"{station_path} 既没有 station 列也没有 {station_id_col!r} 列")
+    keys = pd.unique(station_keys(pd.read_parquet(station_path, columns=[col])[col].to_numpy()))
+    if len(keys) != 1:
+        raise ValueError(f"{station_path} 里有 {len(keys)} 个站 {list(keys)[:5]}，单站评测只接受一个站")
+    return str(keys[0])
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ODS_SHEETS = ("ods_ultra_short", "ods_short")
@@ -149,7 +164,7 @@ def fallback_extract_summary(report: dict, nanwang_tables: dict) -> dict:
 
 # ------------------------------------------------------------------ 推理
 def frame_with_station_id(df: pd.DataFrame, cfg: dict, meta) -> pd.DataFrame:
-    """与 m6.train._dataset_with_station_id 同一口径，但作用在 DataFrame 上（unified_inference 吃 DataFrame）：
+    """与 data._dataset_with_station_id 同一口径，但作用在 DataFrame 上（unified_inference 吃 DataFrame）：
     station_id 列是文本 → 数字文本直接转整数，站名按 station_meta 映射；没有 station_id 列 → 按 station 列映射；
     没有 station 列 → 用 station_meta 的站名补上（unified_inference 的 entity_cols 要用）。"""
     id_col = str(cfg["dataset"]["station_id_col"])

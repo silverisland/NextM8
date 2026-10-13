@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from forecast_backbones.m8.config import load_config
 from forecast_backbones.m8.features import FeatureBuilder, cpm_token_mask
-from forecast_backbones.m6.features import StationMeta
+from forecast_backbones.m8.solar import StationMeta
 
 
 def _fb(small_cfg, **over):
@@ -120,7 +120,7 @@ def test_cpm_mask_runs():
 
 
 def test_solar_cache_matches_direct(small_cfg, batch):
-    from forecast_backbones.m6.features import solar_geometry, window_timestamps
+    from forecast_backbones.m8.solar import solar_geometry, window_timestamps
     cfg, fb = _fb(small_cfg)
     ts = window_timestamps(batch["batch_dict"]["timestamp_win"].numpy(), 672, 192, 15)
     e_c, g_c, deg = fb.solar.geometry(1001, ts[:2])
@@ -216,7 +216,7 @@ def _all_rows_batch(dataset, collate):
 def _tod_hours(fb, bd):
     """[B, T] 每步的本地小时数（含小数），与 FeatureBuilder 里的 window_timestamps 同口径。"""
     import pandas as pd
-    from forecast_backbones.m6.features import window_timestamps
+    from forecast_backbones.m8.solar import window_timestamps
     ts = window_timestamps(np.asarray(bd["timestamp_win"]).astype(np.int64).reshape(-1), fb.L, fb.H, fb.step_min)
     t = pd.DatetimeIndex(ts.reshape(-1))
     return (t.hour + t.minute / 60.0).to_numpy().reshape(ts.shape)
