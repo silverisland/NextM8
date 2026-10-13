@@ -80,6 +80,17 @@ def test_full_report_native(trained, tmp_path):
           "--station", "S1001", "--out", str(tmp_path / "pc2")])
     pc2 = pd.read_csv(tmp_path / "pc2" / "station_diag.csv").iloc[0]
     assert abs(pc2["other_nanwang_d1_common"] - 100.0) < 1e-6 and abs(pc2["nanwang_d1_common"] - dg["nanwang_d1"]) < 1e-6
+    # --night-zero：elev_deg 路线与站表几何路线给出同一夜间掩码；夜间置 0、白天不动；CLI 能跑通且分数 >= 不抹零
+    from forecast_backbones.m8.diagnose_test import load_result, night_zero_frame
+    r0 = load_result(rp)
+    r1 = night_zero_frame(r0)
+    r2 = night_zero_frame(r0.drop(columns=["elev_deg"]), meta_csv)
+    for v0, v1, v2, e in zip(r0["observe_power_predict"], r1["observe_power_predict"], r2["observe_power_predict"], r0["elev_deg"]):
+        n = np.asarray(e, float) <= 0
+        assert n.any() and (v1[n] == 0).all() and np.allclose(v1[~n], np.asarray(v0, float)[~n]) and np.allclose(v1, v2)
+    diag(["--result", rp, "--other", rp, "--night-zero", "--station-meta", meta_csv, "--station", "S1001", "--out", str(tmp_path / "nz")])
+    nz = pd.read_csv(tmp_path / "nz" / "station_diag.csv").iloc[0]
+    assert nz["nanwang_d1"] >= dg["nanwang_d1"] - 1e-9 and abs(nz["nanwang_d1"] - nz["other_nanwang_d1_common"]) < 1e-6
     # --full 落盘的 result_test.parquet 同样可诊断：D+1（10:00 行）与逐站表一致
     diag(["--result", str(tmp_path / "f" / "result_test.parquet"), "--station", "S1001", "--out", str(tmp_path / "d2")])
     dg2 = pd.read_csv(tmp_path / "d2" / "station_diag.csv").iloc[0]

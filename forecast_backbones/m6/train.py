@@ -250,10 +250,10 @@ class _M6Trainer(Trainer):
         super().__init__(*a, **kw)
         self._sampling, self._station_col, self._ts_col = sampling, station_col, ts_col
 
-    def _get_train_sampler(self):
+    def _get_train_sampler(self, *a, **kw):          # transformers>=4.46 多传一个 dataset 位置参数，4.40 不传：两种签名都接
         if self._sampling == "station_day":
             return StationDaySampler(self.train_dataset, self._station_col, self._ts_col, seed=self.args.seed)
-        return super()._get_train_sampler()
+        return super()._get_train_sampler(*a, **kw)
 
 
 def train_m6(config_path, parquet_path=None, shift_days: int = 0, out_dir=None, max_steps=None,

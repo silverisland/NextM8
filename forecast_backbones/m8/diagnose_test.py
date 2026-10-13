@@ -14,6 +14,9 @@
                        例如 --pred-col timesfm3 = TimesFM 零样本基线，不用跑任何模型；容量取 --station-meta 站表
 --other-pred-col <列>  同上，作用于 --other（如 --result <M8 结果> --other "datasets/test/*.parquet" --other-pred-col timesfm3，
                        按公共起报日逐站比 M8 与 TimesFM）
+--night-zero           两边的提交曲线都先做夜间抹零再打分（太阳高度角<=0 的步置 0，缺坐标站按 06:15–20:00 钟表窗），
+                       模拟上线后对所有模型统一的夜间后处理：这样比出来的差距只来自白天。
+                       结果里有 elev_deg 列（M8 的 result_test.parquet）直接用；没有就按 --station-meta 的坐标算
 
 逐站表的列：
   nanwang_d1          该模型提交曲线的南网 D+1（起报日均值，日分数负值 cap 到 0，与月度表同口径）
@@ -91,6 +94,39 @@ def result_from_data(paths: list[str], pred_col: str, meta_path=None) -> pd.Data
     if not frames:
         raise FileNotFoundError(f"没有 parquet：{paths}")
     return pd.concat(frames, ignore_index=True)
+
+
+def night_zero_frame(df: pd.DataFrame, meta_path=None, tz: str = "Asia/Shanghai") -> pd.DataFrame:
+    """把 192 步提交曲线（observe_power_predict，以及 median / p_star 若有）在夜间置 0：模拟上线后统一的夜间抹零后处理。
+    夜间 = 目标时刻太阳高度角 <= 0（第 k 步 = timestamp_win + (k+1)·15min），与 M8 的 is_night 同口径；
+    优先用结果里的 elev_deg 列，没有就按 station_meta 坐标算（缺坐标站用钟表窗 06:15–20:00）。"""
+    df = df.copy()
+    cols = [c for c in ("observe_power_predict", "median", "p_star") if c in df.columns]
+    if "elev_deg" in df.columns:
+        night = [np.asarray(e, float) <= 0 for e in df["elev_deg"].to_numpy()]
+    else:
+        try:
+            from .station_report import frame_with_station_id
+            from .transformer_models import load_station_meta
+            from .features import SolarCache
+        except ImportError:
+            from forecast_backbones.m8.station_report import frame_with_station_id
+            from forecast_backbones.m8.transformer_models import load_station_meta
+            from forecast_backbones.m8.features import SolarCache
+        meta = load_station_meta(meta_path or DEFAULT_META)
+        df = frame_with_station_id(df, {"dataset": {"station_id_col": "station_id"}}, meta)
+        sc = SolarCache(meta, tz, STEP_MIN)
+        t0 = pd.to_datetime(df["timestamp_win"]).to_numpy().astype("datetime64[s]").astype(np.int64)
+        offs = (np.arange(1, 193) * STEP_MIN * 60).astype(np.int64)
+        night = [None] * len(df)
+        for sid, idx in df.groupby("station_id").indices.items():
+            ts = (t0[idx][:, None] + offs[None, :]).astype("datetime64[s]")
+            e, _, _ = sc.geometry(int(sid), ts)
+            for j, i in enumerate(idx):
+                night[i] = e[j] <= 0
+    for c in cols:
+        df[c] = [np.where(n[:len(v)], 0.0, np.asarray(v, float)) for v, n in zip(df[c].to_numpy(), night)]
+    return df
 
 
 def load_result(path, pred_col: str | None = None, meta_path=None) -> pd.DataFrame:
@@ -288,10 +324,16 @@ def main(argv=None):
     ap.add_argument("--cap-json", default=None, help='{"站名": 容量} 的 json 文件')
     ap.add_argument("--pred-col", default=None, help="把 --result 当测试 parquet，用这个 192 步列当提交曲线（如 timesfm3）")
     ap.add_argument("--other-pred-col", default=None, help="把 --other 当测试 parquet，用这个列当对方的提交曲线")
-    ap.add_argument("--station-meta", default=None, help=f"--pred-col / --other-pred-col 取容量用的站表（默认 {DEFAULT_META}）")
+    ap.add_argument("--station-meta", default=None, help=f"--pred-col / --other-pred-col / --night-zero 用的站表（默认 {DEFAULT_META}）")
+    ap.add_argument("--night-zero", action="store_true", help="两边提交曲线先夜间抹零再打分（模拟上线后统一的夜间后处理）")
+    ap.add_argument("--tz", default="Asia/Shanghai")
     a = ap.parse_args(argv)
     res = load_result(a.result, a.pred_col, a.station_meta)
     other = load_result(a.other, a.other_pred_col, a.station_meta) if a.other else None
+    if a.night_zero:
+        res = night_zero_frame(res, a.station_meta, a.tz)
+        other = night_zero_frame(other, a.station_meta, a.tz) if other is not None else None
+        print("[diag] 夜间抹零：两边提交曲线在太阳高度角<=0 的步置 0 后再打分（缺坐标站按钟表窗）")
     if "cap" in res.columns:
         caps = res.groupby("station")["cap"].first().astype(float).to_dict()
     elif a.cap_json:
