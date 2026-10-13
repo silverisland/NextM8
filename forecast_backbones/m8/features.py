@@ -105,6 +105,7 @@ class RowCtx:
     var_signal: np.ndarray      # [B] 未来白天 k_nwp 均值
     degraded: np.ndarray        # [B] bool
     cs_ratio: np.ndarray = None # [B] 按站自适应晴空出力比（features.derived.clear_sky_ratio 关时恒 1）
+    envelope_used: np.ndarray = None   # [B] bool：该行的几何（p_clear 通道 / elev / 夜间）来自历史日形包络（features.derived.history_envelope）
 
 
 def cpm_token_mask(rng: np.random.Generator, B: int, n_tok: int, p_row: float, min_frac: float, max_frac: float,
@@ -123,6 +124,27 @@ def cpm_token_mask(rng: np.random.Generator, B: int, n_tok: int, p_row: float, m
             start = int(rng.integers(0, n_tok - ln + 1))
             mask[b, start:start + ln] = True
     return mask
+
+
+def history_envelope(y: np.ndarray, slot0: np.ndarray, n_day: int, quantile: float, smooth: int) -> tuple[np.ndarray, np.ndarray]:
+    """窗内历史的按时刻槽日包络。y [B, L] 原始单位、不可见处 NaN；slot0 [B] 历史第一步的时刻槽号；L 须是 n_day 的整数倍。
+    → (env [B, n_day] 每槽 quantile 分位（全缺的槽 = 0）并做宽 smooth 的环形滑动平均, days_with_data [B] 有可见点的天数)。"""
+    B, L = y.shape
+    if L % n_day != 0:
+        raise ValueError(f"history_envelope 要求 context_len 是一天步数的整数倍：L={L}, n_day={n_day}")
+    D = L // n_day
+    idx = (np.arange(L)[None, :] - np.asarray(slot0, np.int64)[:, None]) % L          # rolled[b, p] = y[b, (p - slot0) % L] → 槽号 p % n_day
+    rolled = np.take_along_axis(np.asarray(y, float), idx, axis=1).reshape(B, D, n_day)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        env = np.nanquantile(rolled, float(quantile), axis=1) if np.isfinite(rolled).any() else np.full((B, n_day), np.nan)
+    env = np.where(np.isfinite(env), env, 0.0)
+    k = int(smooth)
+    if k > 1:
+        w = np.ones(k) / k
+        env = np.stack([np.convolve(np.concatenate([e[-(k // 2):], e, e[: k // 2]]), w, mode="valid") for e in env], 0)
+    days = np.isfinite(rolled).any(axis=2).sum(axis=1)
+    return np.clip(env, 0.0, None), days
 
 
 class FeatureBuilder:
@@ -154,6 +176,9 @@ class FeatureBuilder:
         self.derived = fe["derived"]
         self.static_cfg = fe["static"]
         self.csi_col = fe.get("clear_sky_index_col")
+        self.envelope_cfg = dict(self.derived.get("history_envelope") or {})
+        if bool(self.envelope_cfg.get("enabled", False)) and self.L % (1440 // self.step_min) != 0:
+            raise ValueError(f"features.derived.history_envelope 要求 context_len({self.L}) 是一天步数({1440 // self.step_min})的整数倍")
         self.meta = station_meta
         self.solar = SolarCache(station_meta, ds["tz"], self.step_min)
         names = list(self.BASE)
@@ -226,6 +251,7 @@ class FeatureBuilder:
 
         # 目标：历史保留 NaN；幅度调制同乘历史与标签
         y_hist = _col(batch_dict, self.pv_col, keep_nan=True)[:, -L:]
+        y_hist_raw = y_hist.copy()                                                  # 幅度调制前的原值（历史日形包络用）
         amp = np.ones(B)
         am = self.cfg["train"]["amp_mod"]
         if training and float(am.get("p", 0)) > 0:
@@ -251,10 +277,44 @@ class FeatureBuilder:
         if degraded.any():
             new = [int(s) for s in np.unique(sid[degraded]) if int(s) not in _DEGRADED_WARNED]
             if new:
-                warnings.warn(f"station_meta 缺坐标，退化为钟表几何（p_clear = 装机容量, elev = ±10）：station_id={new}")
+                how = ("用窗内历史日形包络代替钟表几何（features.derived.history_envelope 开）" if bool(self.envelope_cfg.get("enabled", False))
+                       else "退化为钟表几何（p_clear = 装机容量, elev = ±10；可开 features.derived.history_envelope 用历史日形）")
+                warnings.warn(f"station_meta 缺坐标，{how}：station_id={new}")
                 _DEGRADED_WARNED.update(new)
         p_clear = np.where(degraded[:, None], np.where(ghi > 0, cap[:, None], 0.0), ghi / 1000.0 * cap[:, None])
         night = elev <= 0.0
+        p_clear_in = p_clear                                                        # 进通道的晴空功率；决策层用 p_clear
+
+        # CPM：历史 token 整块不可见（先于协变量算，历史日形包络与晴空出力比都只看可见段）
+        y_mask_hist = ~observed
+        if training and self.cfg["train"]["cpm"]["enabled"]:
+            cp = self.cfg["train"]["cpm"]
+            tok = cpm_token_mask(rng, B, self.n_hist_tok, float(cp["p_row"]), float(cp["min_frac"]), float(cp["max_frac"]), int(cp["max_runs"]))
+            y_mask_hist = y_mask_hist | np.repeat(tok, P, axis=1)
+        visible = ~y_mask_hist
+        y_vis = np.where(visible, np.nan_to_num(y_norm), 0.0)
+
+        # 缺坐标站的历史日形包络：替代钟表几何的 p_clear 通道 / elev / 夜间；决策层 p_clear 仍是白天 = 容量
+        envelope_used = np.zeros(B, bool)
+        he = self.envelope_cfg
+        if bool(he.get("enabled", False)) and degraded.any():
+            n_day = 1440 // self.step_min
+            tt = pd.DatetimeIndex(ts.reshape(-1))
+            slot_all = ((tt.hour * 60 + tt.minute) // self.step_min).to_numpy().reshape(B, T).astype(np.int64)
+            env_slot, days = history_envelope(np.where(visible, y_hist_raw, np.nan), slot_all[:, 0], n_day,
+                                              float(he.get("quantile", 0.9)), int(he.get("smooth", 3)))
+            peak = env_slot.max(axis=1)
+            envelope_used = degraded & (peak >= float(he.get("peak_frac", 0.1)) * cap) & (days >= int(he.get("min_days", 3)))
+            if envelope_used.any():
+                r = np.flatnonzero(envelope_used)
+                env_t = np.take_along_axis(env_slot[r], slot_all[r], axis=1)         # [n, T]
+                day = env_t > float(he.get("night_frac", 0.02)) * cap[r, None]
+                p_clear_in = p_clear.copy(); p_clear = p_clear.copy()
+                p_clear_in[r] = env_t
+                p_clear[r] = np.where(day, cap[r, None], 0.0)
+                elev[r] = np.where(day, 90.0 * env_t / peak[r, None], -10.0)
+                ghi[r] = np.where(day, 800.0, 0.0)
+                night[r] = ~day
 
         # 协变量
         C = len(self.channel_names)
@@ -283,15 +343,6 @@ class FeatureBuilder:
             ghi_pred_full = np.zeros((B, T))
         k_nwp = np.clip(np.where(ghi > 50.0, ghi_pred_full / np.maximum(ghi, 1e-6), 0.0), 0.0, 1.5)
 
-        # CPM：历史 token 整块不可见
-        y_mask_hist = ~observed
-        if training and self.cfg["train"]["cpm"]["enabled"]:
-            cp = self.cfg["train"]["cpm"]
-            tok = cpm_token_mask(rng, B, self.n_hist_tok, float(cp["p_row"]), float(cp["min_frac"]), float(cp["max_frac"]), int(cp["max_runs"]))
-            y_mask_hist = y_mask_hist | np.repeat(tok, P, axis=1)
-        visible = ~y_mask_hist
-        y_vis = np.where(visible, np.nan_to_num(y_norm), 0.0)
-
         # 按站自适应晴空出力比：历史可见段里近正午（p_clear > near_noon_frac·窗内最大）点的 y / p_clear 高分位，
         # 夹到 [lo, hi]；缩放 p_clear 本身（通道 + ctx，决策层的晴空上限随之抬高）。k_nwp 是辐照比，不动
         cs = self.derived.get("clear_sky_ratio") or {}
@@ -306,6 +357,7 @@ class FeatureBuilder:
                 r = np.nanquantile(ratio, float(cs.get("quantile", 0.98)), axis=1) if ok.any() else np.full(B, np.nan)
             cs_ratio = np.clip(np.where(np.isfinite(r), r, 1.0), float(cs.get("lo", 1.0)), float(cs.get("hi", 2.5)))
             p_clear = p_clear * cs_ratio[:, None]
+            p_clear_in = p_clear_in * cs_ratio[:, None]
 
         x[:, :L, self.idx["y"]] = y_vis
         x[:, :L, self.idx["y_mask"]] = y_mask_hist
@@ -313,7 +365,7 @@ class FeatureBuilder:
         x[:, L:, self.idx["is_future"]] = 1.0
         x[:, :, self.idx["k_nwp"]] = k_nwp
         x[:, :, self.idx["elev"]] = elev / 90.0
-        x[:, :, self.idx["p_clear"]] = p_clear / cap[:, None]
+        x[:, :, self.idx["p_clear"]] = p_clear_in / cap[:, None]
         x[:, :, self.idx["is_night"]] = night
         if "tod_sin" in self.idx:
             t = pd.DatetimeIndex(ts.reshape(-1))
@@ -402,6 +454,6 @@ class FeatureBuilder:
         fut_day = ~night[:, L:]
         var_signal = np.where(fut_day, k_nwp[:, L:], 0.0).sum(1) / np.maximum(fut_day.sum(1), 1)
         ctx = RowCtx(station_id=sid, cap=cap, elev_deg=elev, ghi_clear=ghi, p_clear=p_clear, night=night,
-                     k_steps=k_nwp[:, L:], var_signal=var_signal, degraded=degraded, cs_ratio=cs_ratio)
+                     k_steps=k_nwp[:, L:], var_signal=var_signal, degraded=degraded, cs_ratio=cs_ratio, envelope_used=envelope_used)
         return {"x": x, "static": static, "slot": slot, "target": target, "amp": amp.astype(np.float32),
                 "scale": scale.astype(np.float32), "base": base, "ctx": ctx}

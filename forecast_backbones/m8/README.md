@@ -153,8 +153,21 @@ y / p_clear 的 quantile 分位，夹到 [lo, hi]，乘到 p_clear 上（通道 
 | h2_cs_ratio_skip | g4_recent_skip + 晴空出力比 |
 | d3_timesfm_hint / d4_timesfm_resid | e1_final + TimesFM-3 零样本预测列 `timesfm3` 作提示 / 作残差基准（列名已按数据改） |
 | h3_stack | g4 + 晴空出力比 + TimesFM 残差 |
+| h4_envelope | h1 + 缺坐标站的历史日形包络（下一节） |
 
-## 夜间口径（2026-10-12 起：不做夜间归零）
+## 缺坐标站的历史日形包络（h4，2026-10-13）
+
+站表没有经纬度的站（国能和煦 1026）原本退化为钟表几何：06:15–20:00 内 p_clear = cap 平顶、elev = ±10。白天过宽、没有日形，
+网络只能靠 NWP 猜日出日落，测试集 D+1 比不用几何的 TimesFM 零样本低 12 分。调研（`docs/survey_m8_architecture_review.md` §7.4）
+的结论是：几何缺失时用历史推日形，比错的几何好。
+
+`features.derived.history_envelope`（默认关）：对退化站，把窗内 672 步可见历史（CPM 掩掉的不算）按时刻槽排成 7 天 × 96 槽，
+每槽取 quantile（0.9）分位、环形平滑 smooth（3）槽得到日包络 env[槽]。p_clear 通道 = env/cap（软先验），elev 通道 = 90·env/峰值
+（夜间 −10），夜间 = env < night_frac·cap；k_nwp 的白天窗口随之收窄。**决策层的 p_clear 仍是"白天 = 容量"**，包络不做硬上限
+（整周阴天后的晴天不会被裁）。整周无出力（峰值 < peak_frac·cap）或有数据的天数 < min_days 的行回退钟表几何。有坐标的站逐位不变。
+评估结果表 ctx 里多一个 envelope_used 标志。
+
+跑 h4_envelope 看国能和煦单站；舰队其它站与 h1 应完全一致。
 
 M1–M7 都不做夜间后处理，而四个指标都是全点含夜间、分母下限 0.2·容量：夜间报容量 2% 的噪声就扣约 1 分，5% 扣约 5–6 分。
 M8 以前在决策层把夜间强制归零，等于比别的模型多了一道后处理，分数不可比。现在：

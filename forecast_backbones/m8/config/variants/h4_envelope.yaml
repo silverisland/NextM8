@@ -1,0 +1,10 @@
+# H4：h1（e1_final + 按站晴空出力比）+ 缺坐标站的历史日形包络（features.derived.history_envelope）。
+#    针对国能和煦（站表无经纬度 → 钟表几何 06:15–20:00 平顶，白天过宽、无日形，D+1 比 TimesFM 零样本低 12 分）：
+#    p_clear 通道 / elev / 夜间改由窗内 7 天可见历史按时刻槽的 0.9 分位包络推出；决策层 p_clear 仍是"白天 = 容量"，包络不做硬上限。
+#    有坐标的站逐位不变，所以与 h1 的差只来自缺坐标站。跑法同 e1_final（--seeds 0,1,2）。
+run: {tag: h4_envelope, out_dir: runs/m8/h4_envelope}
+features: {derived: {clear_sky_ratio: {enabled: true}, history_envelope: {enabled: true}}}
+train:
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
+  early_stop: {patience: 8}
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

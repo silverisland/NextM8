@@ -205,3 +205,119 @@ def test_static_identity_switches(small_cfg, batch):
     assert np.abs(inp2["static"][:, :4]).sum() == 0 and (inp2["slot"] == 0).all() and fb2.n_slots == 0
     assert np.allclose(inp2["static"][:, 4:], inp["static"][:, 4:])
     assert np.allclose(inp2["x"], inp["x"])                                      # 逐步通道（含太阳几何）不受影响
+
+
+def _all_rows_batch(dataset, collate):
+    import torch
+    loader = torch.utils.data.DataLoader(dataset, batch_size=len(dataset), collate_fn=collate, shuffle=False)
+    return next(iter(loader))
+
+
+def _tod_hours(fb, bd):
+    """[B, T] 每步的本地小时数（含小数），与 FeatureBuilder 里的 window_timestamps 同口径。"""
+    import pandas as pd
+    from forecast_backbones.m6.features import window_timestamps
+    ts = window_timestamps(np.asarray(bd["timestamp_win"]).astype(np.int64).reshape(-1), fb.L, fb.H, fb.step_min)
+    t = pd.DatetimeIndex(ts.reshape(-1))
+    return (t.hour + t.minute / 60.0).to_numpy().reshape(ts.shape)
+
+
+def test_history_envelope_replaces_clock_geometry_for_missing_coords(tmp_path, dataset, collate):
+    """features.derived.history_envelope（默认关）：缺坐标站的 p_clear / elev / 夜间掩码改由窗内 7 天历史按时刻槽的高分位包络推出，
+    不再是 06:15–20:00 平顶；有坐标的站逐位不变；决策层的 p_clear 仍是"白天 = 容量"（包络只做软先验，不做硬上限）。"""
+    from .conftest import write_station_meta
+    meta = write_station_meta(tmp_path, drop_coords_for=(1002,))
+    base_cfg = {"dataset": {"station_meta": str(meta)},
+                "model": {"d_model": 32, "d_ff": 64, "head_hidden": 32, "n_heads": 2, "blocks": ["conv"], "pos_in_patch_dim": 8}}
+    bd = _all_rows_batch(dataset, collate)["batch_dict"]
+    cfg0 = load_config(base_cfg)
+    fb0 = FeatureBuilder(cfg0, StationMeta.from_csv(cfg0["dataset"]["station_meta"]))
+    off = fb0.build(bd, training=False)
+    cfg1 = load_config({**base_cfg, "features": {"derived": {"history_envelope": {"enabled": True}}}})
+    assert cfg1["features"]["derived"]["history_envelope"]["quantile"] == 0.9            # 其余键取默认
+    fb1 = FeatureBuilder(cfg1, StationMeta.from_csv(cfg1["dataset"]["station_meta"]))
+    on = fb1.build(bd, training=False)
+    i = fb1.idx
+    sid = np.asarray(bd["station_id"]).reshape(-1)
+    deg, ok = sid == 1002, sid == 1001
+    assert deg.any() and ok.any()
+    assert off["ctx"].degraded[deg].all() and not off["ctx"].envelope_used.any()
+    assert on["ctx"].envelope_used[deg].all() and not on["ctx"].envelope_used[ok].any()
+    # 有坐标的站逐位不变
+    assert np.array_equal(on["x"][ok], off["x"][ok]) and np.array_equal(on["static"][ok], off["static"][ok])
+    assert np.array_equal(on["ctx"].p_clear[ok], off["ctx"].p_clear[ok]) and np.array_equal(on["ctx"].night[ok], off["ctx"].night[ok])
+    # 关着：缺坐标站 = 钟表几何（06:15–20:00 内 p_clear 通道恒 1）
+    hrs = _tod_hours(fb0, bd)
+    clock_day = (hrs >= 6.25) & (hrs <= 20.0)
+    assert np.allclose(off["x"][deg][:, :, i["p_clear"]][clock_day[deg]], 1.0)
+    # 开着：日形包络。合成数据白天 7–19 点、峰值 ≈ 0.85·k_day·cap；包络在 [0.3, 1]，正午 > 0，凌晨 2 点 = 0，06:30 已是夜间（钟表几何却算白天）
+    pc = on["x"][deg][:, :, i["p_clear"]]
+    assert pc.max() <= 1.0 + 1e-6 and (pc.max(axis=1) > 0.3).all()
+    noon = np.isclose(hrs[deg], 12.0); dawn = np.isclose(hrs[deg], 6.5); deep = np.isclose(hrs[deg], 2.0)
+    assert (pc[noon] > 0.3).all() and np.allclose(pc[deep], 0.0) and np.allclose(pc[dawn], 0.0)
+    nt = on["ctx"].night[deg]
+    assert nt[dawn].all() and nt[deep].all() and not nt[noon].any()
+    assert np.array_equal(nt, on["x"][deg][:, :, i["is_night"]].astype(bool))
+    el = on["x"][deg][:, :, i["elev"]]
+    assert (el[nt] < 0).all() and (el[~nt] >= 0).all() and el.max() <= 1.0 + 1e-6
+    # 决策层的 p_clear：白天 = 容量，夜间 = 0（包络不进硬上限）
+    pcd = on["ctx"].p_clear[deg]
+    assert np.allclose(pcd[~nt], 300.0) and np.allclose(pcd[nt], 0.0)
+    assert on["static"][deg][:, 4].all()                                             # 仍标记为退化站
+    assert np.isfinite(on["x"]).all() and np.isfinite(on["static"]).all()
+
+
+def test_history_envelope_falls_back_when_history_is_dark(tmp_path, dataset, collate):
+    """整周历史无出力（全 0）或全缺测：包络峰值低于 peak_frac·cap → 该行回退到钟表几何，与关着时逐位相同。"""
+    from .conftest import write_station_meta
+    meta = write_station_meta(tmp_path, drop_coords_for=(1002,))
+    base_cfg = {"dataset": {"station_meta": str(meta)},
+                "model": {"d_model": 32, "d_ff": 64, "head_hidden": 32, "n_heads": 2, "blocks": ["conv"], "pos_in_patch_dim": 8}}
+    bd = dict(_all_rows_batch(dataset, collate)["batch_dict"])
+    sid = np.asarray(bd["station_id"]).reshape(-1)
+    deg = sid == 1002
+    import torch
+    obs = bd["observe_power"].clone()
+    half = np.flatnonzero(deg)[: deg.sum() // 2]
+    obs[half] = 0.0                                             # 前一半退化行：整周 0
+    rest = np.flatnonzero(deg)[deg.sum() // 2:]
+    obs[rest] = float("nan")                                    # 后一半：整周缺测
+    bd["observe_power"] = obs
+    cfg0 = load_config(base_cfg)
+    off = FeatureBuilder(cfg0, StationMeta.from_csv(cfg0["dataset"]["station_meta"])).build(bd, training=False)
+    cfg1 = load_config({**base_cfg, "features": {"derived": {"history_envelope": {"enabled": True}}}})
+    on = FeatureBuilder(cfg1, StationMeta.from_csv(cfg1["dataset"]["station_meta"])).build(bd, training=False)
+    assert not on["ctx"].envelope_used[deg].any()
+    assert np.array_equal(on["x"], off["x"]) and np.array_equal(on["ctx"].p_clear, off["ctx"].p_clear)
+
+
+def test_history_envelope_uses_only_visible_history_and_is_finite_under_cpm(tmp_path, dataset, collate, batch):
+    """训练态：CPM 掩掉的历史 token 不参与包络（否则被掩段的幅度会从 p_clear 通道漏回来）；输出全部有限。"""
+    from .conftest import write_station_meta
+    meta = write_station_meta(tmp_path, drop_coords_for=(1002,))
+    base_cfg = {"dataset": {"station_meta": str(meta)},
+                "model": {"d_model": 32, "d_ff": 64, "head_hidden": 32, "n_heads": 2, "blocks": ["conv"], "pos_in_patch_dim": 8},
+                "features": {"derived": {"history_envelope": {"enabled": True}}},
+                "train": {"cpm": {"enabled": True, "p_row": 1.0, "min_frac": 0.5, "max_frac": 0.5, "max_runs": 1}, "amp_mod": {"p": 0.0}}}
+    cfg = load_config(base_cfg)
+    fb = FeatureBuilder(cfg, StationMeta.from_csv(cfg["dataset"]["station_meta"]))
+    full = _all_rows_batch(dataset, collate)
+    bd, yf = full["batch_dict"], full["labels"]["observe_power_future"]
+    tr = fb.build(bd, training=True, y_future=yf, rng=np.random.default_rng(0))
+    assert np.isfinite(tr["x"]).all() and np.isfinite(tr["target"][:, :672][~np.isnan(tr["target"][:, :672])]).all()
+    # 把可见段的功率 ×3、被掩段不动：包络只随可见段变（被掩段改了不影响）
+    i = fb.idx
+    sid = np.asarray(bd["station_id"]).reshape(-1); deg = sid == 1002
+    rng_a, rng_b = np.random.default_rng(7), np.random.default_rng(7)
+    a = fb.build(bd, training=True, y_future=yf, rng=rng_a)
+    masked = a["x"][:, :672, i["y_mask"]].astype(bool)
+    import torch
+    obs = bd["observe_power"].clone()
+    obs[torch.as_tensor(masked)] = obs[torch.as_tensor(masked)] * 10.0 + 1000.0      # 只改被掩段
+    b = fb.build({**bd, "observe_power": obs}, training=True, y_future=yf, rng=rng_b)
+    assert a["ctx"].envelope_used[deg].all() and b["ctx"].envelope_used[deg].all()
+    assert np.array_equal(a["x"][deg][:, :, i["p_clear"]], b["x"][deg][:, :, i["p_clear"]])
+    # 改可见段（×0.5）包络必须跟着变
+    obs2 = bd["observe_power"].clone(); obs2[~torch.as_tensor(masked)] *= 0.5
+    c = fb.build({**bd, "observe_power": obs2}, training=True, y_future=yf, rng=np.random.default_rng(7))
+    assert not np.array_equal(a["x"][deg][:, :, i["p_clear"]], c["x"][deg][:, :, i["p_clear"]])

@@ -54,7 +54,13 @@ DEFAULT_CFG: dict = {
                     # 按站自适应晴空出力比（2026-10-12）：历史可见段近正午点 y / p_clear 的高分位，用它缩放 p_clear 通道与决策层晴空上限。
                     # p_clear 按水平面 GHI 算（1000 W/m² = 满容量），对倾斜 / 跟踪 / 双面阵列在冬季高纬会偏低 30–60%，
                     # 固定 1.05 倍上限会把峰值裁掉（华能北方润达 12 月：上限 0.51·cap，观测峰 0.78·cap）。缺坐标的退化站比值恒 1
-                    "clear_sky_ratio": {"enabled": False, "quantile": 0.98, "near_noon_frac": 0.6, "lo": 1.0, "hi": 2.5}},
+                    "clear_sky_ratio": {"enabled": False, "quantile": 0.98, "near_noon_frac": 0.6, "lo": 1.0, "hi": 2.5},
+                    # 缺坐标站的历史日形包络（2026-10-13）：站表没有经纬度时原本退化为钟表几何（06:15–20:00 平顶 p_clear=cap、elev=±10），
+                    # 白天过宽、无日形（国能和煦 D+1 比 TimesFM 零样本低 12 分）。开了之后用窗内 7 天可见历史按时刻槽取 quantile 分位、
+                    # 环形平滑 smooth 槽得到日包络：p_clear 通道 = 包络/cap（软先验），elev 通道 = 90·包络/峰值，夜间 = 包络 < night_frac·cap；
+                    # 决策层的 p_clear 仍是"白天 = 容量"，包络不做硬上限。整周无出力（峰值 < peak_frac·cap）或有数据的天数 < min_days 回退钟表几何。
+                    # 有坐标的站完全不受影响
+                    "history_envelope": {"enabled": False, "quantile": 0.9, "smooth": 3, "min_days": 3, "peak_frac": 0.1, "night_frac": 0.02}},
         # coords / log_cap：静态向量里的经纬高 / log 容量。它们能唯一标识训练站，关掉可查已见/未见站差距是否来自按站记忆
         "static": {"station_embedding": True, "n_station_slots": 4096, "context_stats": True, "coords": True, "log_cap": True},
     },

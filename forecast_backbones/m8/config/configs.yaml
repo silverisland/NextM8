@@ -31,6 +31,7 @@ features:
   clear_sky_index_col: general_ghi_predict
   target_scale: cap                    # cap | recent_peak
   derived: {solar: true, time_encoding: true, nwp_resid: true}
+  # derived.clear_sky_ratio（h 系列）/ derived.history_envelope（缺坐标站用历史日形代替钟表几何）默认都关，键与默认值见 config.py
   static: {station_embedding: true, n_station_slots: 4096, context_stats: true, coords: true, log_cap: true}   # coords/log_cap 能标识站点，可关
 model:
   layout: fused                        # fused | split
