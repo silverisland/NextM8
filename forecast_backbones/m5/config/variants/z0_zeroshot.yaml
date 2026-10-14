@@ -1,0 +1,4 @@
+# 零样本基线：不挂 LoRA、不训练，与 LoRA run 走同一条 torch 推理 + 决策 + 打分链；第 0 步打分即终评，不写权重
+finetune:
+  enabled: false
+  inference_path: torch

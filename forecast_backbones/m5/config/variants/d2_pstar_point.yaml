@@ -1,0 +1,3 @@
+# 决策层：提交曲线取南网短期最优点 p*（不重训，evaluate.py --decision-yaml 覆盖）
+decision:
+  point: {default: p_star}
