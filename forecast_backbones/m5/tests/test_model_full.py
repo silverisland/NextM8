@@ -133,3 +133,10 @@ def test_weights_round_trip_only_lora_and_head(tmp_path, tiny_ckpt_dir, batch):
     with torch.no_grad():
         q1, q2, q0 = m(bd).aux["quantiles"], m2(bd).aux["quantiles"], m0(bd).aux["quantiles"]
     assert torch.allclose(q1, q2, atol=1e-6) and not torch.allclose(q0, q2, atol=1e-6)
+
+
+def test_predict_raw_restores_per_module_training_flags(tmp_path, tiny_ckpt_dir, batch):
+    m = _model(tmp_path, tiny_ckpt_dir)
+    before = {n: mod.training for n, mod in m.named_modules()}
+    m.predict_raw(batch["batch_dict"])
+    assert {n: mod.training for n, mod in m.named_modules()} == before

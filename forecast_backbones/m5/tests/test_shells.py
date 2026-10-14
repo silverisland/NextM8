@@ -26,3 +26,9 @@ def test_train_m5_defaults_and_zero_shot_check():
 
 def test_readme_exists():
     assert (ROOT / "forecast_backbones" / "m5" / "README.md").exists()
+
+
+def test_variants_staging_is_per_invocation():
+    txt = SH[1].read_text(encoding="utf-8")
+    assert 'rm -rf "$OUT_BASE/.runs"' not in txt and "$OUT_BASE/.runs/" not in txt and '"$OUT_BASE/.runs"' not in txt
+    assert 'STAGE="$OUT_BASE/.runs_$$"' in txt and 'rm -rf "$STAGE"' in txt

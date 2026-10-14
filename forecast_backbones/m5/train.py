@@ -431,6 +431,9 @@ def train_m5(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
     if out_dir is not None:
         config_path = deep_merge(raw_override(config_path), {"run": {"out_dir": str(out_dir)}})
     cfg = load_config(config_path)
+    metric = str(cfg["train"]["early_stop"].get("metric", "nanwang_after_pstar"))
+    if metric not in EARLY_STOP_METRICS:      # 提前校验：零样本 run 不建 EvalCallback，否则要到打分后才 KeyError
+        raise ValueError(f"train.early_stop.metric={metric!r} 未知，可选 {sorted(EARLY_STOP_METRICS)}")
     finetune = bool(cfg["finetune"]["enabled"])
     if refit and not finetune:
         raise ValueError("零样本（finetune.enabled: false）没有可训练参数：不需要 --refit / --train-parquet，测试集直接用 evaluate.py")

@@ -22,7 +22,7 @@
 
 | # | 决定 | 理由 |
 |---|---|---|
-| D1 | 一个模型类 `TransformersAdaptedTimesFM3Model`（别名 `TransformersAdaptedM5Model`），零样本是默认路径 | 线上与 experiments 直接 import 该类；上线微调版只需换配置 + 权重 |
+| D1 | 一个模型类 `TransformersAdaptedM5Model`（别名 `TransformersAdaptedTimesFM3Model`），零样本是默认路径 | 线上与 experiments 直接 import 该类；上线微调版只需换配置 + 权重 |
 | D2 | 本轮不动 M6；M5 按 M8 方式复制成自包含 | 范围最小；M6 待基线跑通后再决定去留 |
 | D3 | 骨架 = M8 框架 + TimesFM-3/LoRA 模型类 | 验证指标、协议、变体机制与 M8 同一份代码，基线直接可比 |
 | D4 | 损失在容量归一单位里算（q/cap, y/cap）；`train.loss.normalize_by_cap: false` 退回 M6 真实单位 | 站容量相差 ~60 倍，真实单位下大站主导梯度；M8 也是归一单位 |
@@ -35,11 +35,11 @@
 
 ```
 forecast_backbones/m5/
-  transformer_models.py   TransformersAdaptedTimesFM3Model（第一个 nn.Module 子类）+ 别名 TransformersAdaptedM5Model
+  transformer_models.py   TransformersAdaptedM5Model（第一个 nn.Module 子类）+ 别名 TransformersAdaptedTimesFM3Model（实现取 M5 为主名：unified_inference / eval_pretrain 用 `type(m).__name__` 生成列名，必须与旧输出一致）
                           + save_weights / load_weights / load_station_meta
   backbone.py  lora.py  _torch_compat.py        ← 自 M6 复制（timesfm3 可微路径、LoRA、垫片）
   rowctx.py                                     ← 自 M6 features.py：RowContext / build_row_context / 变率信号
-  masks.py                                      ← 自 M6，只留 missing_mask / loss_mask
+  （masks.py 有意不建：_loss 内用 isfinite 屏蔽非有限标签、内联施加 night_weight，M5 其余处不需要 M6 的 masks.py）
   config.py  train.py  transformer_trainer.py  data.py  rows.py  solar.py  decision.py  losses.py
   evaluate.py  station_report.py  collect_runs.py  _dist.py  _arrays.py  station_meta.csv   ← 自 M8 复制并改名
   config/configs.yaml      不动（线上 / eval_pretrain 的零样本配置）
@@ -145,6 +145,8 @@ bash train_shell/train_m5_variants.sh --splits_dir <m8_v1 切分目录> --varian
 python -m forecast_backbones.m5.evaluate --runs runs/m5/m5_base/l1_lora_r8_s0 --test <m8_v1>/valid.parquet \
        --decision-yaml forecast_backbones/m5/config/variants/d2_pstar_point.yaml      # p* 数，不重训
 ```
+
+上面两条可并发运行并共用同一个 `--batch_tag`：`train_m5_variants.sh` 的暂存目录按调用隔离（`.runs_$$`），先结束的调用只清自己的暂存。
 
 测试集 `eval_m5.sh --full` 等基线确定后再做 refit。
 

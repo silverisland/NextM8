@@ -101,3 +101,11 @@ def test_seed_controls_lora_init_and_run_is_reproducible(tmp_path, tiny_ckpt_dir
     assert a.keys() == b.keys() and all(torch.equal(a[k], b[k]) for k in a)         # 同种子逐位相同
     lora_a = [k for k in a if "lora_A" in k]
     assert lora_a and any(not torch.equal(a[k], c[k]) for k in lora_a)               # 换种子 lora_A 不同
+
+
+def test_unknown_early_stop_metric_fails_fast_even_zero_shot(tmp_path, tiny_ckpt_dir):
+    from forecast_backbones.m5.train import train_m5
+    cfg = full_cfg(tmp_path, tiny_ckpt_dir, finetune={"enabled": False}, train={"early_stop": {"metric": "bogus"}})
+    with pytest.raises(ValueError, match="bogus"):
+        train_m5(cfg, splits_dir=tmp_path / "does_not_exist", out_dir=tmp_path / "zb")   # 在读数据 / 打分之前就报
+    assert not (tmp_path / "zb").exists()

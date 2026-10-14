@@ -468,13 +468,14 @@ class TransformersAdaptedM5Model(nn.Module):
         """推理态：→ (q [B,H,9] 真实单位 numpy, ctx)。不过决策层，供 evaluate.py 集成先平均分位再统一决策。"""
         if self.mode != "full":
             raise RuntimeError("predict_raw 只在 full 模式可用（配置里给 dataset.station_meta）")
-        was = self.training
+        was = {m: m.training for m in self.modules()}      # 逐模块快照：主干在 eval、整体 training=True 的新建模型也要原样还原
         self.eval()
         try:
             q, ctx = self._raw(batch_dict)
             return q.detach().float().cpu().numpy().astype(float), ctx
         finally:
-            self.train(was)
+            for m, t in was.items():
+                m.training = t
 
     def decide(self, q_raw: np.ndarray, night_fut: np.ndarray, p_clear_fut: np.ndarray, cap: np.ndarray, decision: dict | None = None):
         """决策层（numpy，没有可训参数，评估时可换规则不用重训）。decision 缺省用 cfg['decision']。
