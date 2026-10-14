@@ -68,24 +68,29 @@ def enforce_monotone(q) -> np.ndarray:
     return np.sort(np.asarray(q, float), axis=-1)
 
 
-def physics_clip(q, night, p_clear, cap, clear_sky_cap_ratio: float = 1.05, capacity_cap: bool = True,
+def physics_clip(q, night, p_clear, cap, clear_sky_cap_ratio: float | None = 1.05, capacity_cap: bool = True,
                  night_ceiling: bool = True, clip_negative: bool = True) -> np.ndarray:
     """白天 clip 到 min(clear_sky_cap_ratio·p_clear, cap)，night 掩码为 True 的步归零。
+    clear_sky_cap_ratio=None（M5 默认，D8）：没有晴空上限，上界只看容量（capacity_cap=False 时无上界），p_clear 不参与，
+      夜间也不会被隐式钳成 0。
     p_clear 非有限值（缺测/NaN）时该步退化为只用装机容量 cap 钳位（不受 capacity_cap 开关影响），
     不设晴空上界，避免 NaN 传播到预报。
     night_ceiling=True（默认，m6 口径）：p_clear<=0 的步 upper=0 → 预报被钳成 0。注意这等于隐式的夜间归零：
       夜间晴空 GHI 恒为 0，所以就算 night 掩码全 False、clear_sky_cap_ratio 再大，夜间也会被钳成 0。
-    night_ceiling=False（M5 night_zero=false 的口径）：p_clear<=0 的步与非有限值同样处理，只用 cap 钳位，
+    night_ceiling=False（night_zero=false 的口径）：p_clear<=0 的步与非有限值同样处理，只用 cap 钳位，
       夜间 / 退化站窗外的输出由模型自己给，决策层不做任何形式的夜间归零。
     clip_negative=False：负值也不截到 0（严格裸对比用；负功率物理上不可能，默认仍截）。"""
     q = np.asarray(q, float).copy()
     pc = np.asarray(p_clear, float)
     capv = np.broadcast_to(np.asarray(cap, float), pc.shape)
-    upper = clear_sky_cap_ratio * pc
-    if capacity_cap:
-        upper = np.minimum(upper, capv)
-    free = ~np.isfinite(pc) if night_ceiling else (~np.isfinite(pc) | (pc <= 0.0))
-    upper = np.where(free, capv, upper)
+    if clear_sky_cap_ratio is None:
+        upper = capv if capacity_cap else np.full(pc.shape, np.inf)
+    else:
+        upper = clear_sky_cap_ratio * pc
+        if capacity_cap:
+            upper = np.minimum(upper, capv)
+        free = ~np.isfinite(pc) if night_ceiling else (~np.isfinite(pc) | (pc <= 0.0))
+        upper = np.where(free, capv, upper)
     q = np.minimum(q, upper[..., None])
     if clip_negative:
         q = np.maximum(q, 0.0)
