@@ -86,3 +86,39 @@ def test_train_m8_refit(tmp_path):
     train_m8(cfg, splits_dir=empty, out_dir=tmp_path / "e2", tag="e2", refit=True)
     assert (tmp_path / "e2" / "model.safetensors").exists()
     assert yaml.safe_load((tmp_path / "e2" / "model_config.yaml").read_text(encoding="utf-8"))["dataset"]["known_stations"] == [1001]
+
+
+def test_train_m8_full_from_ready_parquets(tmp_path):
+    """全量训练（2026-10-14）：训练 parquet 已经切好、一站一个文件时，--train-parquet 直接吃文件夹 / 通配符 / 文件列表，
+    不走 time_splits、不切块、不剔除任何行、没有验证集，固定步数后存 checkpoint。站列是站名文本也能按站表映射。"""
+    import pyarrow.parquet as pq
+    from forecast_backbones.m8.train import train_m8
+    from .conftest import make_frame
+    meta = write_station_meta(tmp_path)
+    d = tmp_path / "trainset"; d.mkdir()
+    n_rows = 0
+    for s in (1001, 1002):
+        df = make_frame(n_days=2, stations=(s,), issue_every_min=120, seed=s)
+        df = df.drop(columns=["station_id"]).assign(station=f"S{s}")          # 真实数据：站列是站名文本
+        df.to_parquet(d / f"S{s}.parquet", index=False); n_rows += len(df)
+    cfg = {"dataset": {"station_meta": str(meta)},
+           "model": {"d_model": 32, "d_ff": 64, "head_hidden": 32, "n_heads": 2, "blocks": ["conv", "deltanet"], "pos_in_patch_dim": 8},
+           "train": {"schedule": {"batch_size": 8, "max_steps": 4, "warmup_steps": 1, "logging_steps": 1, "progress_bar": False}},
+           "eval": {"batch_size": 16}}
+    out = tmp_path / "run"
+    r = train_m8(cfg, train_parquet=[str(d)], out_dir=out, tag="full")           # 目录 → 其下全部 parquet
+    assert (out / "model.safetensors").exists() and (out / "model_config.yaml").exists()
+    man = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
+    assert man["refit"] is True and man["splits_dir"] is None and len(man["train_parquet"]) == 2
+    assert man["counts"] == {"train": n_rows, "val": 0}                           # 一行不少、没有验证行
+    s = pd.read_csv(out / "reports" / "summary.csv")
+    assert s.loc[0, "tag"] == "full" and np.isnan(s.loc[0, "nanwang_short_D+1"])     # 没有验证集，分数列 NaN
+    import yaml
+    assert yaml.safe_load((out / "model_config.yaml").read_text(encoding="utf-8"))["dataset"]["known_stations"] == [1001, 1002]
+    # 通配符 / 文件列表同样可以；splits_dir 与 train_parquet 二选一
+    r2 = train_m8(cfg, train_parquet=[str(d / "S1001.parquet"), str(d / "S1002.parquet")], out_dir=tmp_path / "run2", tag="full2")
+    assert (tmp_path / "run2" / "model.safetensors").exists()
+    with pytest.raises(ValueError, match="二选一"):
+        train_m8(cfg, out_dir=tmp_path / "run3")
+    with pytest.raises(ValueError, match="二选一"):
+        train_m8(cfg, splits_dir=str(d), train_parquet=[str(d)], out_dir=tmp_path / "run4")

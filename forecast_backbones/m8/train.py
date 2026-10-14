@@ -7,6 +7,8 @@
      或 nrmse：整点起报行 → 192 步容量归一 RMSE%），patience 按验证次数计，最优权重存 model.safetensors（完整 state_dict）
   4. 训后：加载最优权重 → 验证集推理 → result_val.parquet（默认只存整点起报行）→ reports/summary.csv、reports/station_table.csv
   5. --refit（配方选定后给最终模型）：train ∪ valid 全当训练行，不验证、不早停，固定 max_steps 步后存最终权重；summary 里没有验证分数
+  6. --train-parquet（2026-10-14）：训练 parquet 已经切好时直接吃文件夹 / 通配符 / 文件列表，不走 time_splits、不切块、不剔除任何行、
+     没有验证集（等于 refit）。与 --splits-dir 二选一
 多卡：accelerate launch / torchrun 起多进程，每进程各持一份模型吃不同的批；打分、存盘、报表只在主进程做。
 训练模型的构造必须从零起步：train.weights_path 改指向 out_dir 下从不写入的 .fresh/ 哨兵路径。"""
 from __future__ import annotations
@@ -306,6 +308,35 @@ def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir, reuse: bool 
     return ds_train, ds_val, man
 
 
+def expand_parquets(items) -> list[str]:
+    """目录 → 其下全部 *.parquet；通配符 → 展开；文件 → 原样。按路径排序，去重。"""
+    import glob
+    out: list[str] = []
+    for it in items or ():
+        p = Path(str(it))
+        if p.is_dir():
+            out += sorted(str(f) for f in p.glob("*.parquet"))
+        else:
+            hits = sorted(glob.glob(str(it)))
+            if not hits:
+                raise FileNotFoundError(f"--train-parquet {it!r} 没有匹配到文件")
+            out += hits
+    return sorted(dict.fromkeys(out))
+
+
+def load_full(train_parquet, cfg: dict, station_meta, scratch_dir, reuse: bool = False):
+    """全量训练：现成的训练 parquet（文件夹 / 通配符 / 文件列表，一站一个文件也行）全部当训练行，一行不删、没有验证集。
+    站列是站名文本时按 station_meta 映射成整数站号（_dataset_with_station_id）。返回 (ds_train, None, manifest)。"""
+    files = expand_parquets(train_parquet)
+    if not files:
+        raise FileNotFoundError(f"--train-parquet {train_parquet!r} 下没有 parquet 文件")
+    ds = _dataset_with_station_id(files, cfg, station_meta, scratch_dir=scratch_dir, reuse=reuse)
+    if len(ds) == 0:
+        raise ValueError(f"--train-parquet {files} 里没有行")
+    man = {"generated_by": "forecast_backbones.m8.train --train-parquet", "plan": None, "train_parquet": files}
+    return ds, None, man
+
+
 def _refit_rows(d: Path, scratch_dir, reuse: bool) -> Path:
     """train.parquet ∪ valid.parquet（去掉 split_block 列）→ scratch_dir/refit_rows.parquet；valid 为 0 行时直接用 train.parquet。
     reuse=True（多卡的非主进程）：主进程已写好就直接用。"""
@@ -339,7 +370,13 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
 
 
 # ------------------------------------------------------------------ 主流程
-def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | None = None, refit: bool = False) -> dict:
+def train_m8(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: str | None = None, refit: bool = False,
+             train_parquet=None) -> dict:
+    """splits_dir：time_splits 落好的切分目录（有验证集，可早停）；train_parquet：现成的训练 parquet，全量训练、无验证（等于 refit）。二选一。"""
+    if (splits_dir is None) == (train_parquet is None):
+        raise ValueError("--splits-dir 与 --train-parquet 二选一：切分目录（带验证集）或现成的训练 parquet（全量、无验证）")
+    if train_parquet is not None:
+        refit = True
     if out_dir is not None:
         config_path = deep_merge(raw_override(config_path), {"run": {"out_dir": str(out_dir)}})
     cfg = load_config(config_path)
@@ -352,7 +389,8 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     sampling = str(sch.get("sampling") or "random")
     if sampling not in ("random", "station_day"):
         raise ValueError(f"train.schedule.sampling={sampling!r} 不在 ('random', 'station_day')")
-    _check_presplit_dir(splits_dir, need_cal=False)
+    if splits_dir is not None:
+        _check_presplit_dir(splits_dir, need_cal=False)
     train_cfg = {**cfg, "train": {**cfg["train"], "weights_path": str(out / ".fresh" / WEIGHTS_FILE)}}
     args = build_training_args(train_cfg, out, max_steps)
     if refit and int(args.max_steps) <= 0:
@@ -367,11 +405,15 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     model.to(args.device)
     scratch = out / ".data"
     station_col, ts_col = str(cfg["dataset"]["station_id_col"]), str(cfg["dataset"]["ts_col"])
+    def _load(reuse: bool):
+        if train_parquet is not None:
+            return load_full(train_parquet, cfg, model.station_meta, scratch, reuse=reuse)
+        return load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=reuse, refit=refit)
     if main:
-        loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=False, refit=refit)
+        loaded = _load(reuse=False)
     _dist.barrier()
     if not main:
-        loaded = load_presplit(splits_dir, cfg, model.station_meta, scratch, reuse=True, refit=refit)
+        loaded = _load(reuse=True)
     ds_train, ds_val, man = loaded
     known = model.set_known_stations(row_stations(ds_train, station_col).tolist())     # 验证/测试里名单外的站走未知站槽
     train_cfg["dataset"]["known_stations"] = known
@@ -379,13 +421,17 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
     eval_every = sch.get("eval_every_steps")
     if main:
         dump_config(deep_merge(deep_merge(DEFAULT_CFG, raw_override(config_path)), {"dataset": {"known_stations": known}}), out / CONFIG_FILE)
-        if refit:
+        if train_parquet is not None:
+            print(f"[m8] 全量训练：{len(man['train_parquet'])} 个 parquet、{len(ds_train)} 行、站 {len(known)} 个，一行不删、无验证集，"
+                  f"固定 {args.max_steps} 步后存最终权重")
+        elif refit:
             print(f"[m8] 全量重训（refit）：训练集站 {len(known)} 个（train ∪ valid），不验证、不早停，固定 {args.max_steps} 步后存最终权重")
         else:
             n_unseen_val = len(set(row_stations(ds_val, station_col).tolist()) - set(known))
             print(f"[m8] 训练集站 {len(known)} 个；验证集里训练没见过的站 {n_unseen_val} 个（走未知站槽，报表里 seen=False）")
         (out / "split_manifest.json").write_text(json.dumps({"generated_by": "forecast_backbones.m8.train",
-            "splits_dir": str(Path(splits_dir).resolve()), "plan": man.get("plan"), "refit": bool(refit),
+            "splits_dir": None if splits_dir is None else str(Path(splits_dir).resolve()),
+            "train_parquet": man.get("train_parquet"), "plan": man.get("plan"), "refit": bool(refit),
             "counts": {"train": len(ds_train), "val": 0 if ds_val is None else len(ds_val)}}, indent=2, ensure_ascii=False), encoding="utf-8")
         world, bs = _dist.world_size(), int(args.per_device_train_batch_size)
         budget = f"{args.max_steps} 步" if args.max_steps > 0 else f"不限步数（{sch['epochs_max']} 个 epoch）"
@@ -453,11 +499,13 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="M8 PVRex 训练")
     ap.add_argument("--config", default="forecast_backbones/m8/config/configs.yaml")
-    ap.add_argument("--splits-dir", required=True, help="pipelines.time_splits 落好的目录（train/valid.parquet + split_manifest.json）")
+    ap.add_argument("--splits-dir", default=None, help="pipelines.time_splits 落好的目录（train/valid.parquet + split_manifest.json）")
+    ap.add_argument("--train-parquet", nargs="+", default=None,
+                    help="现成的训练 parquet：文件夹 / 通配符 / 文件列表，全量训练、不切块、不剔除行、无验证集（等于 --refit）。与 --splits-dir 二选一")
     ap.add_argument("--out", default=None)
     ap.add_argument("--max-steps", type=int, default=None, help="覆盖 train.schedule.max_steps；0 = 不限步数（按 epochs_max）")
     ap.add_argument("--tag", default=None, help="写进 reports/summary.csv 的变体名")
     ap.add_argument("--refit", action="store_true",
                     help="全量重训：train ∪ valid 全当训练行，不验证、不早停，固定 max_steps 步后存最终权重（配方选定后给最终模型）")
     a = ap.parse_args()
-    train_m8(a.config, a.splits_dir, out_dir=a.out, max_steps=a.max_steps, tag=a.tag, refit=a.refit)
+    train_m8(a.config, a.splits_dir, out_dir=a.out, max_steps=a.max_steps, tag=a.tag, refit=a.refit, train_parquet=a.train_parquet)

@@ -8,12 +8,15 @@
 #   bash train_m8.sh --splits_dir /data/xxx/splits                                   # 默认配置，全部可见 GPU
 #   bash train_m8.sh --config forecast_backbones/m8/config/variants/a2_slstm.yaml --gpus 0   # 某个变体，单卡
 #   bash train_m8.sh --gpus 0 --max_steps 20 --run_id smoke                          # 冒烟
+#   bash train_m8.sh --train_parquet "/data/train/*.parquet" --config forecast_backbones/m8/config/variants/j1_final2.yaml --max_steps 6000 --gpus 0
+#                                                                                    # 全量训练：现成的训练 parquet 直接吃，不切分、不剔行、无验证
 #   批量跑全部变体见 train_m8_variants.sh
 set -u
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "$_HERE/forecast_backbones" ]; then BASE_DIR="$_HERE"; else BASE_DIR="$(cd "$_HERE/.." && pwd)"; fi
 
 SPLITS_DIR="${BASE_DIR}/data/splits/m1_m4_v1"
+TRAIN_PARQUET=""                    # 给了就是全量训练：文件夹 / 通配符（加引号）/ 单个文件，不走切分目录，隐含 --refit
 CONFIG="${BASE_DIR}/forecast_backbones/m8/config/configs.yaml"
 RUNS_BASE="${BASE_DIR}/runs"
 RUN_ID=""                           # 留空 = 配置 run.tag（或 变体文件名）+ 时间戳
@@ -36,6 +39,8 @@ usage() {
   cat <<'USAGE'
 用法: bash train_m8.sh [选项]
   --splits_dir <dir>       pipelines.time_splits 落的切分目录（train/valid.parquet + split_manifest.json；不需要 cal.parquet）
+  --train_parquet <path>   全量训练：现成的训练 parquet（文件夹 / 加引号的通配符 / 文件），不切分、不剔除任何行、无验证集，
+                           固定 --max_steps 步后存 checkpoint（隐含 --refit）。与 --splits_dir 二选一
   --config <yaml>          M8 配置或变体（默认 forecast_backbones/m8/config/configs.yaml；变体在 config/variants/）
   --run_id <name>          产物目录名：<runs_base>/m8/<run_id>（默认 <tag>_<日期_时间>）
   --runs_base <dir>        产物根目录（默认 <仓库>/runs）
@@ -59,6 +64,7 @@ USAGE
 while [ $# -gt 0 ]; do
   case "$1" in
     --splits_dir)   SPLITS_DIR="$2";  shift 2 ;;
+    --train_parquet) TRAIN_PARQUET="$2"; shift 2 ;;
     --config)       CONFIG="$2";      shift 2 ;;
     --run_id)       RUN_ID="$2";      shift 2 ;;
     --runs_base)    RUNS_BASE="$2";   shift 2 ;;
@@ -82,9 +88,16 @@ done
 
 [ -f "$VENV_PY" ] || { echo "❌ python 解释器不存在: $VENV_PY" >&2; exit 1; }
 [ -f "$CONFIG" ]  || { echo "❌ 找不到配置: $CONFIG" >&2; exit 1; }
-for f in train.parquet valid.parquet split_manifest.json; do
-  [ -f "$SPLITS_DIR/$f" ] || { echo "❌ 切分目录缺 $f: $SPLITS_DIR" >&2; exit 1; }
-done
+if [ -n "$TRAIN_PARQUET" ]; then
+  REFIT=1
+  if [ -d "$TRAIN_PARQUET" ]; then n=$(ls "$TRAIN_PARQUET"/*.parquet 2>/dev/null | wc -l); else n=$(compgen -G "$TRAIN_PARQUET" | wc -l); fi
+  [ "$n" -gt 0 ] || { echo "❌ --train_parquet 没有匹配到 parquet: $TRAIN_PARQUET" >&2; exit 1; }
+  [ -n "$MAX_STEPS" ] || { echo "❌ 全量训练没有验证集、不能早停：请给 --max_steps（j1_final2 用 6000）" >&2; exit 1; }
+else
+  for f in train.parquet valid.parquet split_manifest.json; do
+    [ -f "$SPLITS_DIR/$f" ] || { echo "❌ 切分目录缺 $f: $SPLITS_DIR" >&2; exit 1; }
+  done
+fi
 case "$PRECISION" in fp32|bf16) ;; *) echo "❌ --precision 只能是 fp32 或 bf16" >&2; exit 1 ;; esac
 
 if [ "$GPUS" = "auto" ]; then
@@ -128,7 +141,7 @@ if eval_every: sch["eval_every_steps"] = int(eval_every)
 cfg.setdefault("run", {})["tag"] = tag
 if seed != "": cfg["run"]["seeds"] = [int(seed)]
 yaml.safe_dump(cfg, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
-meta = (cfg.get("dataset") or {}).get("station_meta", "forecast_backbones/m6/station_meta.csv")
+meta = (cfg.get("dataset") or {}).get("station_meta", "forecast_backbones/m8/station_meta.csv")
 print(f"STATION_META={meta}")
 sys.exit(0 if os.path.exists(meta) else 3)
 PYEOF
@@ -139,7 +152,7 @@ elif [ $RC -ne 0 ]; then echo "❌ 生成运行时配置失败" >&2; rm -f "$TMP
 echo "=============================================================="
 echo "M8 训练   tag=$TAG${SEED:+   seed=$SEED}$([ "$REFIT" -eq 1 ] && echo '   [全量重训 refit：不验证、不早停]')"
 echo "CONFIG     : $CONFIG  (运行时副本: $TMP_CFG)"
-echo "SPLITS_DIR : $SPLITS_DIR"
+if [ -n "$TRAIN_PARQUET" ]; then echo "TRAIN_PARQUET: $TRAIN_PARQUET  （全量：不切分、不剔行、无验证）"; else echo "SPLITS_DIR : $SPLITS_DIR"; fi
 echo "RUN_DIR    : $RUN_DIR"
 if [ -n "$GPUS" ]; then echo "设备       : $NP 张卡 (CUDA_VISIBLE_DEVICES=$GPUS)   精度: $PRECISION   每进程 CPU 线程: $CPU_THREADS"; else echo "设备       : CPU"; fi
 echo "日志       : $LOG_FILE"
@@ -149,7 +162,8 @@ cmd=("$VENV_PY" -m accelerate.commands.launch --num_processes="$NP" --num_machin
      --main_process_port="$PORT" --num_cpu_threads_per_process="$CPU_THREADS")
 [ "$NP" -gt 1 ] && cmd+=(--multi_gpu)
 [ -z "$GPUS" ] && cmd+=(--cpu)
-cmd+=(-m forecast_backbones.m8.train --config "$TMP_CFG" --splits-dir "$SPLITS_DIR" --out "$RUN_DIR" --tag "$TAG")
+cmd+=(-m forecast_backbones.m8.train --config "$TMP_CFG" --out "$RUN_DIR" --tag "$TAG")
+if [ -n "$TRAIN_PARQUET" ]; then cmd+=(--train-parquet "$TRAIN_PARQUET"); else cmd+=(--splits-dir "$SPLITS_DIR"); fi
 [ -n "$MAX_STEPS" ] && cmd+=(--max-steps "$MAX_STEPS")
 [ "$REFIT" -eq 1 ] && cmd+=(--refit)
 echo "CMD: ${cmd[*]}"

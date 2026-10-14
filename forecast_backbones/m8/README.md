@@ -227,6 +227,18 @@ bash train_m8_variants.sh --splits_dir <m8_v1> --variants j1_final2,k1_hint01,k2
      --seeds 0,1,2 --gpus 0,1,2,3,4,5,6,7 --batch_tag round7              # 21 个任务，8 张卡三波，约 3 小时
 ```
 
+**全量训练（训练 parquet 已经切好、不要任何切分）**：`--train_parquet` 直接吃文件夹 / 加引号的通配符 / 文件列表，
+不走 time_splits、不切块、一行不剔除、没有验证集，固定 `--max_steps` 步后存 checkpoint（隐含 `--refit`）。
+站列是站名文本也行，按 station_meta 映射成站号。每个变体一张卡、各一个 checkpoint：
+
+```bash
+bash train_m8_variants.sh --train_parquet "<训练文件夹>/*.parquet" \
+     --variants j1_final2,k1_hint01,k2_hint00,k3_resid,k4_lr2e4,k5_lr5e4,k6_regular \
+     --max_steps 6000 --gpus 0,1,2,3,4,5,6 --batch_tag full_r7
+# checkpoint：runs/m8/full_r7/<变体>/model.safetensors（同目录 model_config.yaml 是推理用的完整配置）
+# 之后每个 checkpoint 用 eval_m8.sh --full 出 result_test.parquet 统一测评
+```
+
 决策层的参数不用重训，拿现有 checkpoint 直接扫（`config/decision/`，几分钟一个）：
 
 ```bash
