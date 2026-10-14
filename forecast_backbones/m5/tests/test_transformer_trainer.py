@@ -77,3 +77,18 @@ def test_evaluate_model_without_labels_and_without_station():
     res = evaluate_model(_model(), ds, collate, {})
     assert "station_id" not in res.columns and len(res) == 4                           # 2 站 × 2 行
     assert np.isnan(res.iloc[0]["observe_power_future"]).all()
+
+
+def test_evaluate_model_full_mode_schema(tmp_path, tiny_ckpt_dir):
+    pytest.importorskip("timesfm3")
+    from .conftest import full_cfg, make_frame
+    df = make_frame(n_days=1, issue_every_min=360)
+    ds = UnifiedDataset(df, timestamp_cols=["timestamp_win"], entity_cols=[], label_cols=["observe_power_future"],
+                        for_hf_trainer=True)
+    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    m = TransformersAdaptedM5Model(full_cfg(tmp_path, tiny_ckpt_dir))
+    res = evaluate_model(m, ds, collate, m.cfg)
+    assert len(res) == len(df)
+    assert {"timestamp_win", "station", "station_id", "cap", "observe_power_predict", "observe_power_future", "p_star",
+            "median", "night", "elev_deg", "p_clear", "var_bin", "var_signal", "degraded", *QUANTILE_COLS} <= set(res.columns)
+    assert set(res["cap"]) == {500.0, 300.0} and set(res["station"]) == {"S1001", "S1002"}
