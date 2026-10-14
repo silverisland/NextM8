@@ -33,7 +33,10 @@ Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU 
 - `transformer_trainer.py`：`evaluate_model(model, ds, collate, cfg)`（result_df 与 m6 同 schema）、`M8_build_training_args`。
 - `train.py`：`train_m8(config, splits_dir, out_dir, max_steps, tag)`；`train_script.py --model_name m8` 走独立入口（同 m6）。
 - 配置真源 `config/configs.yaml`（= `config.py` 的 DEFAULT_CFG）；变体 `config/variants/*.yaml` 只写与默认不同的字段。
-- 站表：`dataset.station_meta`（默认 `forecast_backbones/m8/station_meta.csv`，训练前填真实坐标；缺坐标站退化为钟表几何或历史日形包络）。
+- 站表：`dataset.station_meta`（任意路径与文件名，默认 `forecast_backbones/m8/station_meta.csv`，训练前填真实坐标；缺坐标站退化为钟表几何或历史日形包络）。
+  表头随意：`dataset.station_meta_cols: {station_id: 场站编号, station: 场站名称, lat: 纬度, lon: 经度, alt_m: null, cap_mw: 装机容量}`
+  把你的列名映射到内部名，没写的按内部名找，lat / lon / alt_m 写 null 表示表里没有。显式给的路径不存在直接报错，不回退。
+  推理时 station_id 编号必须与训练一致（站嵌入槽位），station 列改成线上的站名即可。
 - **自包含（2026-10-13 起）**：m8 目录不再引用 `forecast_backbones/m6` 的任何代码或数据。原来从 m6 拿的东西都在本目录自带一份：
   `solar.py`（站表 StationMeta / 太阳几何 / 钟表几何 / 站名映射 / 固定容量）、`decision.py`（决策层 + quantile_cols）、`losses.py`（pinball）、
   `rows.py`（打分行 / 整点行 / 站日采样）、`data.py`（切分目录 → UnifiedDataset）、`_dist.py`、`_arrays.py`、`station_meta.csv`。

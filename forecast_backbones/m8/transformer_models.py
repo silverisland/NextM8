@@ -41,18 +41,17 @@ except ImportError:
     from forecast_backbones.m8.losses import pinball_loss
 
 
-def load_station_meta(path) -> StationMeta:
+def load_station_meta(path, cols: dict | None = None) -> StationMeta:
+    """dataset.station_meta（任意路径、任意文件名）+ dataset.station_meta_cols（列名映射，见 StationMeta.apply_cols）。
+    路径不存在直接报错；只有仓库内的默认相对路径（forecast_backbones/...）在别的工作目录下解析失败时才回退到 m8 自带那份。"""
     p = Path(path)
     if not p.exists():
-        if not p.is_absolute():
-            fallback = Path(__file__).parent / "station_meta.csv"
-            if fallback.exists():
-                warnings.warn(f"station_meta {p} 不存在（相对当前工作目录解析失败）：回退到 {fallback}")
-                return StationMeta.from_csv(fallback)
-        warnings.warn(f"station_meta {p} 不存在：全部站按缺坐标退化")
-        import pandas as pd
-        return StationMeta(pd.DataFrame(columns=list(StationMeta.COLS)))
-    return StationMeta.from_csv(p)
+        fallback = Path(__file__).parent / "station_meta.csv"
+        if not p.is_absolute() and p.parts[:1] == ("forecast_backbones",) and fallback.exists():
+            warnings.warn(f"station_meta {p} 不存在（相对当前工作目录解析失败）：回退到 {fallback}")
+            return StationMeta.from_csv(fallback, cols)
+        raise FileNotFoundError(f"station_meta {p} 不存在（dataset.station_meta；相对路径按当前工作目录解析）")
+    return StationMeta.from_csv(p, cols)
 
 
 def save_weights(model: nn.Module, path) -> None:
@@ -75,7 +74,7 @@ class TransformersAdaptedM8Model(nn.Module):
         ds = self.cfg["dataset"]
         self.target_col, self.label_col = ds["pv_col"], ds["label_col"]
         self.context_len, self.pred_len = int(ds["context_len"]), int(ds["pred_len"])
-        self.station_meta = load_station_meta(ds["station_meta"])
+        self.station_meta = load_station_meta(ds["station_meta"], ds.get("station_meta_cols"))
         self.fe = FeatureBuilder(self.cfg, self.station_meta)
         self.levels = tuple(float(q) for q in self.cfg["model"]["quantiles"])
         self.core = PVRexCore(len(self.fe.channel_names), self.fe.n_static, self.fe.n_slots, self.context_len, self.pred_len,

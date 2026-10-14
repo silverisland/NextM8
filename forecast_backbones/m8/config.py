@@ -54,6 +54,9 @@ DEFAULT_CFG: dict = {
         "ts_col": "timestamp_win",
         "station_id_col": "station_id",
         "station_meta": "forecast_backbones/m8/station_meta.csv",   # M8 自己的站表（station_id, station, lat, lon, alt_m, cap_mw）；与 m6 那份内容相同但各自维护
+        # 站表列名映射 {内部名: 你表里的列名}，表头随意；没写的按内部名找；lat/lon/alt_m 可写 null 表示表里没有。
+        # 例：{station_id: 场站编号, station: 场站名称, lat: 纬度, lon: 经度, alt_m: null, cap_mw: 装机容量}
+        "station_meta_cols": None,
         "tz": "Asia/Shanghai",
         "step_min": 15,
         # 训练入口自动写入：训练集里出现过的整数站号。推理时不在名单里的站走"未知站"槽位 0（见 train.slot_dropout）

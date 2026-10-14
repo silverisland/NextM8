@@ -69,8 +69,35 @@ class StationMeta:
     找不到且是纯数字时按 station_id 找。"""
 
     COLS = ("station_id", "station", "lat", "lon", "alt_m", "cap_mw")
+    OPTIONAL = ("lat", "lon", "alt_m")          # 映射里写 null = 表里没有这一列（当全缺：缺坐标站退化、海拔 0）
 
-    def __init__(self, df: pd.DataFrame):
+    @classmethod
+    def apply_cols(cls, df: pd.DataFrame, cols: dict | None) -> pd.DataFrame:
+        """dataset.station_meta_cols = {内部名: 你表里的列名}（2026-10-14）：表头随意，没写的内部名按原名找；
+        值为 null 的列视作没有，只允许 lat / lon / alt_m。缺的映射列报错时内部名和表里列名一起给。"""
+        if not cols:
+            return df
+        bad = [k for k in cols if k not in cls.COLS]
+        if bad:
+            raise ValueError(f"dataset.station_meta_cols 里有不认识的内部名 {bad}；只能是 {list(cls.COLS)}")
+        d = df.copy()
+        d.columns = [str(c).strip() for c in d.columns]
+        absent = [k for k, v in cols.items() if v is None]
+        not_opt = [k for k in absent if k not in cls.OPTIONAL]
+        if not_opt:
+            raise ValueError(f"dataset.station_meta_cols 里 {not_opt} 不能为 null：只有 {list(cls.OPTIONAL)} 可以没有")
+        rename = {str(v).strip(): k for k, v in cols.items() if v is not None}
+        missing = [f"{k}（映射到 {v}）" for v, k in rename.items() if v not in d.columns]
+        if missing:
+            raise KeyError(f"station_meta 缺列: {missing}")
+        clash = [k for src, k in rename.items() if k in d.columns and src != k] + [k for k in absent if k in d.columns]
+        d = d.drop(columns=clash).rename(columns=rename)
+        for k in absent:
+            d[k] = np.nan
+        return d
+
+    def __init__(self, df: pd.DataFrame, cols: dict | None = None):
+        df = self.apply_cols(df, cols)
         missing = [c for c in self.COLS if c not in df.columns]
         if missing:
             raise KeyError(f"station_meta 缺列: {missing}")
@@ -97,14 +124,15 @@ class StationMeta:
         self._by_name = {str(r["station"]): sid for sid, r in self._rows.items() if isinstance(r["station"], str)}
 
     @classmethod
-    def from_csv(cls, path: str | Path) -> "StationMeta":
-        """UTF-8（含 Excel 的带 BOM 版）或 GBK（中文 Windows 下 Excel 另存的 CSV）都能读。"""
+    def from_csv(cls, path: str | Path, cols: dict | None = None) -> "StationMeta":
+        """UTF-8（含 Excel 的带 BOM 版）或 GBK（中文 Windows 下 Excel 另存的 CSV）都能读。cols 见 apply_cols。"""
+        name_col = str((cols or {}).get("station") or "station").strip()
         try:
-            df = pd.read_csv(path, dtype={"station": str}, encoding="utf-8-sig")
+            df = pd.read_csv(path, dtype={name_col: str}, encoding="utf-8-sig")
         except UnicodeDecodeError:
-            df = pd.read_csv(path, dtype={"station": str}, encoding="gbk")
+            df = pd.read_csv(path, dtype={name_col: str}, encoding="gbk")
         df.columns = [str(c).strip() for c in df.columns]
-        return cls(df)
+        return cls(df, cols)
 
     def get(self, station_id) -> dict | None:
         return self._rows.get(int(station_id))
