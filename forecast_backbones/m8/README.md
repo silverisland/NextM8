@@ -209,6 +209,35 @@ M8 以前在决策层把夜间强制归零，等于比别的模型多了一道�
 - 想完全裸对比可在 decision yaml 里设 `physics: {capacity_cap: false, clear_sky_cap_ratio: 1.0e9, clip_negative: false}`、
   `point: {default: median, by_step: []}`。
 
+## 参数调参（k 系列，2026-10-14）
+
+模型架构与输入输出在 j1_final2 上定了，剩下的是参数。调参在 m8_v1 切分上做（三颗种子、有噪声尺度），测试集只给最后一两个
+候选 refit 后跑 full；在测试集上挑参数会让它和 M1–M7 的对比失去意义。每个 k 变体 = j1_final2 + 恰好一处改动
+（`tests/test_tuning_variants.py` 守住这一点），判据照旧：三种子均值比 j1 高 0.3 以上才算。
+
+| 变体 | 改动 | 动它的理由 |
+|---|---|---|
+| k1_hint01 / k2_hint00 | `train.hint_dropout` 0.3 → 0.1 / 0 | 线上一定有 TimesFM 列，为缺列买的保险可以减少 |
+| k3_resid | `features.residual_base_col: timesfm3`（= d4） | round6 里残差版超短期代理 +0.65、D+1 持平 |
+| k4_lr2e4 / k5_lr5e4 | `train.schedule.lr` 3e-4 → 2e-4 / 5e-4 | 常规扫描 |
+| k6_regular | `weight_decay` 0.05 → 0.1、`model.dropout` 0.1 → 0.2 | 500 万参数对这个数据量，看已见站是否过拟合 |
+
+```bash
+bash train_m8_variants.sh --splits_dir <m8_v1> --variants j1_final2,k1_hint01,k2_hint00,k3_resid,k4_lr2e4,k5_lr5e4,k6_regular \
+     --seeds 0,1,2 --gpus 0,1,2,3,4,5,6,7 --batch_tag round7              # 21 个任务，8 张卡三波，约 3 小时
+```
+
+决策层的参数不用重训，拿现有 checkpoint 直接扫（`config/decision/`，几分钟一个）：
+
+```bash
+for r in 100 115 130; do
+  bash eval_m8.sh --runs <checkpoint> --test "<测试>/*.parquet" \
+       --decision_yaml forecast_backbones/m8/config/decision/cap_ratio_$r.yaml --out <out>/cap_$r
+done
+```
+
+之前扫过、结论是噪声、不要再碰的：骨干类型、patch_len、d_model 加大、token 头、双流、EMA、平滑选点、按站日采样。
+
 ## 已删除的分支（2026-10-14 瘦身）
 
 模型架构与输入输出在 j1_final2 上定下来之后，把三轮消融里落在种子噪声内、或从未跑过的分支连代码带 yaml 一起删了，

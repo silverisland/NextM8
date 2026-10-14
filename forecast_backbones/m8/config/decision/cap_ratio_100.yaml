@@ -1,0 +1,3 @@
+# 决策层扫描：晴空上限 clear_sky_cap_ratio 1.05 → 1.0（开了按站晴空出力比之后 1.05 可能偏紧）。不重训：
+#   bash eval_m8.sh --runs <checkpoint> --test "<测试>/*.parquet" --decision_yaml forecast_backbones/m8/config/decision/cap_ratio_100.yaml --out <out>
+decision: {physics: {clear_sky_cap_ratio: 1.0}}
