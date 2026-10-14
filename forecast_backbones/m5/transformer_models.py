@@ -1,5 +1,17 @@
 # -*- coding: utf-8 -*-
-"""TimesFM-3 零样本封装（2026-09-07，流程已对官方 API 核对）。
+"""M5：TimesFM-3。两种模式，按 model_config 里有没有 dataset.station_meta 切换（2026-10-14）：
+
+  legacy（没有 dataset.station_meta：线上 nanwang_online、eval_pretrain、experiments/nwp_covariate 的零样本配置）
+      行为与重构前逐位相同，下面"零样本封装"的契约原样有效；tests/legacy_m5_forward.py 冻结了旧代码作对照。
+  full（给了 dataset.station_meta：forecast_backbones/m5/train.py / evaluate.py / station_report.py 用）
+      配置走 config.load_config（默认值见 config.py / config/finetune.yaml）；站表只取每站固定容量 cap_mw 与站号；
+      协变量 = features.past_future（默认与线上相同：ghi、温度）+ 可选几何通道（features.derived，默认关）；
+      底座：finetune.enabled → torch 可微路径挂 LoRA（并解冻 output_head）；否则零样本（finetune.inference_path：torch | evaluator）；
+      决策层与 M8 相同（单调化 → 钳位 → median / p*），默认无晴空上限；labels 给定时 .loss = 9 档 pinball（默认容量归一）；
+      aux 与 M8 同 schema。权重文件（train.weights_path）只存 LoRA + output_head。
+
+────────────────────────────── 以下为 legacy 模式的原文档 ──────────────────────────────
+TimesFM-3 零样本封装（2026-09-07，流程已对官方 API 核对）。
 
 契约（按 pipeline 约定）：
   - torch.nn.Module；forward(batch_dict, labels=None)，推理只传一个位置参数；
@@ -80,6 +92,7 @@
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -92,6 +105,50 @@ try:  # 若被作为子包导入（registry 方式：forecast_backbones.m5.trans
 except ImportError:  # 独立运行 __main__ / 顶层 sys.path 方式
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from interfaces.modeloutput import TransformersAdaptedModelOutput
+
+
+def _dep(name: str):
+    """full 模式的依赖按需导入：legacy 模式（线上）不 import pvlib / timesfm3.torch。"""
+    import importlib
+    if __package__:
+        try:
+            return importlib.import_module(f".{name}", __package__)
+        except ImportError:
+            pass
+    return importlib.import_module(f"forecast_backbones.m5.{name}")
+
+
+def _full_mode(model_config) -> bool:
+    """给了 dataset.station_meta → full 模式（训练 / 评估）；否则 legacy（线上零样本，行为与重构前相同）。"""
+    ds = model_config.get("dataset") if isinstance(model_config, dict) else None
+    return isinstance(ds, dict) and bool(ds.get("station_meta"))
+
+
+def load_station_meta(path, cols: dict | None = None):
+    """dataset.station_meta（任意路径）+ dataset.station_meta_cols（列名映射）。路径不存在直接报错；
+    只有仓库内默认相对路径（forecast_backbones/...）在别的工作目录下解析失败时才回退到 m5 自带那份。"""
+    StationMeta = _dep("solar").StationMeta
+    p = Path(path)
+    if not p.exists():
+        fallback = Path(__file__).parent / "station_meta.csv"
+        if not p.is_absolute() and p.parts[:1] == ("forecast_backbones",) and fallback.exists():
+            warnings.warn(f"station_meta {p} 不存在（相对当前工作目录解析失败）：回退到 {fallback}")
+            return StationMeta.from_csv(fallback, cols)
+        raise FileNotFoundError(f"station_meta {p} 不存在（dataset.station_meta；相对路径按当前工作目录解析）")
+    return StationMeta.from_csv(p, cols)
+
+
+def save_weights(model, path) -> None:
+    """只存 LoRA + output_head（键名相对 backbone.model，safetensors）；底座不存。"""
+    lora = _dep("lora")
+    if getattr(model, "backbone", None) is None:
+        raise RuntimeError("save_weights 需要 torch 路径（full 模式且 finetune.enabled 或 inference_path=torch）")
+    lora.save_lora_weights(Path(path), lora.lora_state_dict(model.backbone.model))
+
+
+def load_weights(model, path) -> None:
+    lora = _dep("lora")
+    lora.load_lora_state_dict(model.backbone.model, lora.load_lora_weights(Path(path)))
 
 
 DEFAULT_CFG = {
@@ -146,6 +203,13 @@ class TransformersAdaptedM5Model(nn.Module):
 
     def __init__(self, model_config: Optional[dict] = None, **kwargs):
         super().__init__()
+        if _full_mode(model_config):
+            self.mode = "full"
+            self._init_full(model_config)
+            return
+        self.mode = "legacy"
+        if ((model_config or {}).get("finetune") or {}).get("enabled"):
+            raise ValueError("finetune.enabled 需要 full 模式：请在配置里给 dataset.station_meta（站表提供每站容量 cap_mw 与站号）")
 
         # config 文件驱动：config 里的 dataset/timesfm3 段优先，缺省回落到 DEFAULT_CFG。
         # _merge 对 dict 逐键合并：config 只覆盖它出现的键，未出现的键沿用 DEFAULT_CFG。
@@ -188,6 +252,8 @@ class TransformersAdaptedM5Model(nn.Module):
         """懒加载 TimesFM3 evaluator；顶层只 import 本模块时不触发权重下载。"""
         if self._backbone is not None and self._backbone_device == want:
             return
+        if self.mode == "full":
+            _dep("_torch_compat").ensure_rmsnorm()            # torch < 2.4：须在 import timesfm3.torch 之前
         from timesfm3 import ModelConfig, TimesFM3Evaluator   # 懒 import
         self._backbone = TimesFM3Evaluator(ModelConfig(
             checkpoint_path=self.checkpoint,
@@ -195,6 +261,8 @@ class TransformersAdaptedM5Model(nn.Module):
             device=want,
         ))
         self._backbone_device = want
+        if self.mode == "full" and self.torch_path and self.backbone is None:
+            self._attach_torch_path()
 
     # ------------------------------------------------------------------ NaN
     @staticmethod
@@ -277,6 +345,73 @@ class TransformersAdaptedM5Model(nn.Module):
                 f"timesfm3.predict_quantile 超出 9 档范围: {predict_quantile!r} -> 索引 {idx}"
             )
         return idx
+
+    # ================================================================== full 模式：构造 / 框架契约 / 权重
+    def _init_full(self, model_config: dict) -> None:
+        self.cfg = _dep("config").load_config(model_config)
+        ds, t3, fe, ft = (self.cfg[k] for k in ("dataset", "timesfm3", "features", "finetune"))
+        self.target_col, self.label_col = ds["pv_col"], ds["label_col"]
+        self.context_len, self.pred_len = int(ds["context_len"]), int(ds["pred_len"])
+        # 与 legacy 同名的属性：_resolve_device / _ensure_backbone / _col 两种模式共用
+        self.checkpoint, self.device_pref = t3["checkpoint"], t3.get("device", "auto")
+        self.per_core_batch_size, self.nan_policy = int(t3["per_core_batch_size"]), t3["nan_policy"]
+        self.make_positive, self.use_znorm = bool(t3["make_positive"]), bool(t3["use_znorm"])
+        self.use_symmetric_averaging = bool(t3["use_symmetric_averaging"])
+        self.return_quantiles, self.predict_quantile = True, None
+        self.past_future_cols = [tuple(p) for p in fe["past_future"]]
+        self.past_only_cols = list(fe["past_only"])
+        self._warned_pairs = set()
+        self.station_meta = load_station_meta(ds["station_meta"], ds.get("station_meta_cols"))
+        self.ctx_builder = _dep("rowctx").RowContextBuilder(self.cfg, self.station_meta)
+        self.levels = tuple(float(q) for q in _dep("decision").MODEL_LEVELS)
+        self.torch_path = bool(ft["enabled"]) or str(ft["inference_path"]) == "torch"
+        self.backbone = None                      # torch 路径的 TorchBackbone 子模块（_attach_torch_path 赋值）
+        self._backbone, self._backbone_device = None, None
+        self.weights_loaded = False
+        self._progress_desc = None
+        if bool(t3.get("eager_init", True)):
+            self._ensure_backbone(self._resolve_device())
+
+    @property
+    def config(self) -> dict:
+        """full 模式：train.py 把合并后的 cfg 落成 model_config.yaml。legacy 模式没有这个属性（与重构前一致）。"""
+        if self.mode != "full":
+            raise AttributeError("config")
+        return self.cfg
+
+    def set_known_stations(self, station_ids) -> list[int]:
+        """训练入口调用：记下训练集里的站号（只用于报表 seen / unseen，TimesFM 本身不用），同步进 cfg 随 model_config.yaml 落盘。"""
+        ids = sorted({int(s) for s in station_ids})
+        self.cfg["dataset"]["known_stations"] = ids
+        return ids
+
+    def reseed(self, seed: int) -> None:
+        """train.py 契约；M5 没有随机增强，空操作。"""
+
+    def n_params(self) -> int:
+        """可训参数数（LoRA + output_head；零样本为 0）。"""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def n_total_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+    def _attach_torch_path(self) -> None:
+        """从已加载的 evaluator 取底层 nn.Module 建 TorchBackbone；finetune.enabled 时挂 LoRA、冻结底座、加载 train.weights_path。"""
+        lora = _dep("lora")
+        self.backbone = _dep("backbone").TorchBackbone.from_evaluator(self._backbone)
+        ft = self.cfg["finetune"]
+        if ft["enabled"]:
+            lo = ft["lora"]
+            lora.inject_lora(self.backbone.model, list(lo["target_modules"]), int(lo["rank"]), float(lo["alpha"]),
+                             float(lo["dropout"]))
+            lora.freeze_all_but_lora(self.backbone.model, bool(ft["unfreeze_output_head"]))
+            wp = Path(str(self.cfg["train"]["weights_path"]))
+            if wp.exists():
+                load_weights(self, wp)
+                self.weights_loaded = True
+        else:
+            self.backbone.requires_grad_(False)
+        self.backbone.eval()               # LoRA 的 dropout 默认 train 态：落回推理态，训练脚本显式 .train()
 
     # ------------------------------------------------------------------ forward
     def forward(self, batch_dict: dict, labels=None) -> TransformersAdaptedModelOutput:
