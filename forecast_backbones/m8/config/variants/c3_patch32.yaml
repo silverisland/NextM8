@@ -1,3 +1,0 @@
-# C3 token 粒度：patch 32 步（8 h；21 + 6 个 token）
-run: {tag: c3_patch32, out_dir: runs/m8/c3_patch32}
-model: {patch_len: 32}

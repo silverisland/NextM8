@@ -1,8 +1,0 @@
-# g7：g1 + g2 + g4 + g6 叠加（超短期加权 + 相对 L1 + 最近观测直连 + 组合早停）。单项有效再看叠加是否可加。
-run: {tag: g7_ultra_stack, out_dir: runs/m8/g7_ultra_stack}
-model: {recent_skip: {enabled: true, k: 16}}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {metric: nanwang_combo, combo_weights: {short: 0.5, ultra: 0.5}, patience: 8}
-  loss: {horizon_weights: {ultra_steps: 16, ultra_weight: 3.0}, metric_aux: {ultra_l1: 0.5}}
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

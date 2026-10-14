@@ -1,3 +1,0 @@
-# B1 协变量通路：目标流 / 协变量流双流 + 跨流混合（Chronos-2 group attention 的两流简化版）
-run: {tag: b1_split_stream, out_dir: runs/m8/b1_split_stream}
-model: {layout: split}

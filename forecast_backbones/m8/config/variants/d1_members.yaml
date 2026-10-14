@@ -1,3 +1,0 @@
-# D1 集合成员：加 SSRD_pos_1..9 的均值与离差通道（数据里须有这些列及 _predict）
-run: {tag: d1_members, out_dir: runs/m8/d1_members}
-features: {nwp_members: {enabled: true}}

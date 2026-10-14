@@ -1,4 +1,0 @@
-# B5 对照：关掉站点嵌入（只靠静态量 + 上下文统计区分站），看站点嵌入对已见站有多少收益、对未见站是否有害
-run: {tag: b5_no_station_emb, out_dir: runs/m8/b5_no_station_emb}
-features: {static: {station_embedding: false}}
-train: {slot_dropout: 0.0}

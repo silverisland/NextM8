@@ -1,4 +1,0 @@
-# B4 对照：只用历史功率 + 太阳几何 + 时间编码，不喂任何 NWP（量化协变量的价值）
-run: {tag: b4_no_nwp, out_dir: runs/m8/b4_no_nwp}
-features: {past_future: [], derived: {solar: true, time_encoding: true, nwp_resid: false}}
-train: {cov_dropout: 0.0}

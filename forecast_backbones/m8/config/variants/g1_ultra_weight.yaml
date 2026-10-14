@@ -1,7 +1,0 @@
-# g1：e1_final + 前 16 步（超短期）的 pinball 权重 ×3。最便宜的杠杆：只改损失权重，结构不动。
-run: {tag: g1_ultra_weight, out_dir: runs/m8/g1_ultra_weight}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {patience: 8}
-  loss: {horizon_weights: {ultra_steps: 16, ultra_weight: 3.0}}
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

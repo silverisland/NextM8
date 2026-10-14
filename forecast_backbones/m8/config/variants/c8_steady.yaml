@@ -1,6 +1,0 @@
-# C8 训练稳定性：第一轮 4 个变体都在 1500–2000 步见顶、之后验证分 ±1.5 到 3 点来回晃，而 cosine 是按 20000 步排的，
-#    早停时学习率几乎没降。这里把学习率降到 3e-4、cosine 总长缩到 6000 步让它真正退火、验证间隔 250 步、patience 8
-run: {tag: c8_steady, out_dir: runs/m8/c8_steady}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {patience: 8}

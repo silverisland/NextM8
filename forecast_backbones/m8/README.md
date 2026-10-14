@@ -11,7 +11,7 @@
 ```
 每 15 min 一步，T = 672（历史）+ 192（未来）= 864 步 → patch 16 步 → 42 + 12 = 54 个 token
 逐步通道 x[B,864,C]：y/cap、y_mask、is_future、各 NWP 协变量（归一）、k_nwp（NWP 晴空指数）、elev/90、p_clear/cap、
-                      is_night、时间编码、nwp_resid（历史白天 y − ghi_pred/1000）、cov_missing、[集合成员均值/离差]、
+                      is_night、时间编码、nwp_resid（历史白天 y − ghi_pred/1000）、cov_missing、
                       [fo:<col> 只有未来段的提示通道（如 TimesFM 预测，历史段恒 0）+ hint_missing]
 静态 static[B,S]：log cap、经纬高、degraded、上下文统计（历史峰值、白天均值、白天 k_nwp 均值）；站点嵌入（station_id）
 token = ResidualMLP(patch 展平) + static_proj + station_emb + pos_emb
@@ -22,9 +22,8 @@ Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU 
 ```
 
 混合器（`layers.py`，全部因果）：`conv` 门控长卷积（Reverso；线性零填充卷积而非循环 FFT）、`deltanet` Gated DeltaNet
-（delta 规则 = 在上下文里对「NWP 特征 → 实测功率」做在线回归，未来 token 用自己的 NWP 做 query）、`slstm`（按 xLSTM / TiRex
-论文公式自写，未拷贝 NXAI 代码）、`attention`（因果多头注意力，对照）。`model.layout: split` 把目标与协变量分成两条 token 流、
-每层后做跨流混合（Chronos-2 group attention 的两流简化版）；`model.head_mode: token` 退回 TiRex 式 token 头（消融输出侧注入）。
+（delta 规则 = 在上下文里对「NWP 特征 → 实测功率」做在线回归，未来 token 用自己的 NWP 做 query）、`attention`（因果多头注意力，
+只作对照）。sLSTM、双向混合器、split 双流布局、token 头已于 2026-10-14 瘦身删除（见文末「已删除的分支」）。
 
 ## 框架契约（与 m6 相同）
 
@@ -49,10 +48,10 @@ Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU 
 ```bash
 # 单个配置（默认全部可见 GPU；模型小，单卡足够）
 bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --gpus 0
-bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --config forecast_backbones/m8/config/variants/a2_slstm.yaml --gpus 1
+bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --config forecast_backbones/m8/config/variants/a3_attention.yaml --gpus 1
 # 全部变体批量跑：每张卡一条队列，跑完汇总 variants_summary.csv
 bash train_m8_variants.sh --splits_dir data/splits/m1_m4_v1 --gpus 0,1,2,3,4,5,6,7
-bash train_m8_variants.sh --splits_dir ... --variants a1_hybrid,a2_slstm,a3_attention,b4_no_nwp --gpus 0,1
+bash train_m8_variants.sh --splits_dir ... --variants e1_final,h4_envelope,d3_timesfm_hint,j1_final2 --gpus 0,1
 bash train_m8_variants.sh --splits_dir ... --max_steps 50 --gpus 0 --batch_tag smoke       # 先冒烟
 # 直接用 python
 python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/configs.yaml --splits-dir data/splits/m1_m4_v1 --out runs/m8/x
@@ -68,20 +67,18 @@ python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/conf
 
 ## 变体矩阵（`config/variants/`，批量测试用）
 
-| 组 | 变体 | 回答的问题 |
+| 组 | 变体 | 用途 |
 |---|---|---|
-| A 骨干 | a1_hybrid（基线）/ a2_slstm / a3_attention / a4_deltanet_only / a5_conv_only / a6_no_mixer | 混合器选型；a6 是「没有序列建模」的下界 |
-| B 协变量通路 | b1_split_stream / b2_bidirectional / b3_token_head / b4_no_nwp / b5_no_station_emb | 双流 vs 单流；预报时刻之后的 NWP 是否有用；输出侧注入值多少；NWP 总共值多少；站点嵌入对已见 / 未见站的影响 |
-| C 配方 | c1_no_cpm / c2_recent_peak / c3_patch32 / c4_patch8 / c5_large / c6_nrmse_stop / c7_station_day | CPM+dropout 的价值；归一化；token 粒度；规模；早停口径；采样 |
-| D 数据/决策 | d1_members（需 SSRD_pos_* 列）/ d2_pstar_point / d3_timesfm_hint / d4_timesfm_resid（需 timesfm_predict 列） | 集合成员；p* vs 中位数；TimesFM 单变量预测作为未来提示通道；在其上做残差学习 |
-| E 组合 | e1_final | a1 + c8 调度 + d2 决策（第二轮结论的组合） |
-| F 站点身份 | f1_row_local / f2_no_coords / f3_row_local_final | 去掉能标识站点的输入（坐标、log 容量、站点嵌入）后已见 / 未见站差距是否收窄；f3 = f1 + c8 + d2 |
-| H 物理先验 | h1_cs_ratio / h2_cs_ratio_skip / h3_stack / h4_envelope | 按站晴空出力比；缺坐标站的历史日形包络（见下文两节） |
-| I 训练协议 | i1_protocol / i2_ema_only | 小模型 + 低学习率 + 权重 EMA + 平滑选点；只开 EMA + 平滑选点（见「训练协议」一节） |
-| J 最终组合候选 | j1_final2（需 timesfm3 列） | e1_final + h4（晴空出力比 + 历史包络）+ d3（TimesFM 提示）：round5 里两者各自高于 e1_final，叠加看是否相加 |
+| 对照 | a1_hybrid（原始基线）/ a3_attention / a6_no_mixer | 默认骨干；换成注意力；没有序列混合器的下界 |
+| 决策 | d2_pstar_point | 只改决策层（p* 分段选点），给 `--decision_yaml` 用，不用重训 |
+| 外部提示 | d3_timesfm_hint / d4_timesfm_resid（需 timesfm3 列） | TimesFM-3 预测作未来提示通道；在其上做残差学习（超短期代理 +0.65） |
+| 配方 | e1_final / e1_night_old | 第二轮定的配方（a1 + 退火调度 + p* 决策）；同配方的旧夜间口径（A/B 用） |
+| 物理先验 | h1_cs_ratio / h4_envelope | 按站晴空出力比；h1 + 缺坐标站历史日形包络 |
+| 最终 | j1_final2（需 timesfm3 列） | e1_final + h4 + d3。round6：D+1 75.75（e1 75.01），可加性成立 |
+| 调参 | k1–k6（见「参数调参」一节） | 在 j1 上每个只动一处 |
 
-读法：先看 a1 vs b4（协变量价值）与 a1 vs c1（配方价值）——调研表明这两项通常远大于骨干差异（2–5%）；骨干之间差异小于
-种子噪声时不要下结论，换 `run.seeds` 多跑几颗。强烈建议补一个 LightGBM 逐步特征基线（竞赛与 15 min PVDAQ 上仍是最强单模型）。
+2026-10-14 瘦身前这里有 42 个变体（骨干 / 融合 / 规模 / 站点身份 / 超短期模块 / 训练协议），结论都在种子噪声内或从未跑过，
+yaml 与对应代码一起删了；历史结论保留在各节文字里，要复现去 git 历史（commit 203c735 之前）。
 
 ## 测试集评估与集成（`evaluate.py` / `eval_m8.sh`）
 
@@ -158,9 +155,7 @@ y / p_clear 的 quantile 分位，夹到 [lo, hi]，乘到 p_clear 上（通道 
 | 变体 | 改动 |
 |---|---|
 | h1_cs_ratio | e1_final + 晴空出力比 |
-| h2_cs_ratio_skip | g4_recent_skip + 晴空出力比 |
 | d3_timesfm_hint / d4_timesfm_resid | e1_final + TimesFM-3 零样本预测列 `timesfm3` 作提示 / 作残差基准（列名已按数据改） |
-| h3_stack | g4 + 晴空出力比 + TimesFM 残差 |
 | h4_envelope | h1 + 缺坐标站的历史日形包络（下一节） |
 
 ## 缺坐标站的历史日形包络（h4，2026-10-13）
@@ -177,7 +172,7 @@ y / p_clear 的 quantile 分位，夹到 [lo, hi]，乘到 p_clear 上（通道 
 
 跑 h4_envelope 看国能和煦单站；舰队其它站与 h1 应完全一致。
 
-## 训练协议（i 系列，2026-10-13）
+## 训练协议开关（EMA / 平滑选点，2026-10-13）
 
 三轮消融里所有骨干 / 融合 / 规模变体都落在 a1 ±0.6 的种子噪声内，而验证分在 1,500–2,500 步见顶后来回晃 1.5–3 分：
 按单次验证挑 checkpoint 挑的是噪声。调研（`docs/survey_m8_architecture_review.md` §6）对这个数据量级（≈ ETTh1）的处方一致：
@@ -189,12 +184,9 @@ y / p_clear 的 quantile 分位，夹到 [lo, hi]，乘到 p_clear 上（通道 
 - `train.early_stop.smooth_k`（默认 1）：best 与早停按最近 k 次验证分的均值判；history 里原始分（`nanwang_after_pstar`）与
   平滑分（`nanwang_after_pstar_smooth`）都记，best_step 指平滑分最高的那次。
 
-| 变体 | 改动 |
-|---|---|
-| i1_protocol | e1_final + d_model 128 / d_ff 512 / head_hidden 128 + lr 1e-4、cosine 8000 步 + EMA 0.999 + smooth_k 3 |
-| i2_ema_only | e1_final + EMA 0.999 + smooth_k 3（模型与学习率不动，拆开两部分贡献） |
+round5 结论：i1（小模型 + lr 1e-4 + EMA + 平滑选点）垫底，i2（只开 EMA + 平滑选点）与 e1_final 持平——两个开关保留，变体 yaml 已删。
 
-跑法 `--seeds 0,1,2,3,4`，看三样：与 e1_final 同种子的 nanwang_short_D+1、train_log.json 里验证分的波动幅度、5 成员集成分。
+refit 的三颗种子若在测试集上分数差得很开，可给 refit 配置加 `train.ema_decay: 0.999` 再比一次。
 
 ## 夜间口径（2026-10-12 起：不做夜间归零）
 
@@ -217,39 +209,19 @@ M8 以前在决策层把夜间强制归零，等于比别的模型多了一道�
 - 想完全裸对比可在 decision yaml 里设 `physics: {capacity_cap: false, clear_sky_cap_ratio: 1.0e9, clip_negative: false}`、
   `point: {default: median, by_step: []}`。
 
-## 超短期模块（g 系列，2026-10-10）
+## 已删除的分支（2026-10-14 瘦身）
 
-动机：南网超短期 / ods_ultra_short 偏低。超短期（前 16 步、4 小时）主要靠最近观测与晴空指数的持久化，不靠长上下文；
-文献上（AutoPV 基准、SolarBench、LTSF-Linear/NLinear、Persistence-Initialization Transformer、TiDE）短 lead 上简单直连 /
-MLP 直出常不输甚至优于 Transformer 类，iTransformer 只在长任务上有优势，TabM 本身是表格模型、没有时序直出的证据。
-所以不换骨干，只加五个**默认全关**的可开关模块，每个变体在 e1_final 之上只改一处，单项有效再叠加（g7）：
+模型架构与输入输出在 j1_final2 上定下来之后，把三轮消融里落在种子噪声内、或从未跑过的分支连代码带 yaml 一起删了，
+m8 的 .py 从 3,413 行减到 3,172 行。旧 yaml 再写这些键会在 `load_config` 直接报错（`config.REMOVED_KEYS`），不会被静默忽略。
+`tests/test_reference.py` 守住：j1_final2 小尺寸模型加载瘦身前存下的权重，分位 / 提交曲线 / 损失逐位不变。
 
-| 变体 | 改动 | 针对的问题 |
+| 删掉的 | 原变体 | 当时的结论 |
 |---|---|---|
-| g1_ultra_weight | `train.loss.horizon_weights.ultra_weight: 3`：前 16 步 pinball 权重 ×3 | 最便宜的杠杆 |
-| g2_ultra_l1 | `train.loss.metric_aux.ultra_l1: 0.5`：前 16 步中位数的南网式相对 L1 `|y−p| / max(y, 0.2·cap)` | 损失直接对齐超短期指标（MAE 型） |
-| g3_mean_head | `model.mean_head: true` + `metric_aux.short_l2: 0.5` + 决策 D+1 段 `method: mean_head` | D+1 是 RMSE 型，最优点是相对权重下的均值；直接学一路均值替代 p* 近似 |
-| g4_recent_skip | `model.recent_skip: {enabled: true, k: 16}`：输出头每步再拼最近 16 步观测、掩码、末次晴空指数 k_last、k_last·p_clear_t | 最近观测与 scaled persistence 直连输出头（NLinear 式） |
-| g5_ultra_head | `model.ultra_head: {enabled: true, n_steps: 16}`：前 16 步直出 MLP（最近窗口 + 这 16 步原始协变量 + 第一个未来 token），与主头按步门控融合（门初值 0.5 可学） | 检验"超短期直接点预测更好"，不丢主头 |
-| g6_combo_stop | `train.early_stop.metric: nanwang_combo`（D+1 与超短期代理分各半） | 选 checkpoint 不再只看 D+1 |
-| g7_ultra_stack | g1 + g2 + g4 + g6 | 可加性 |
-
-关于损失的结论：pinball 在 τ=0.5 就是 MAE，直接换 MAE 等于只留中位数、丢掉分位信息与 p* 决策；换 MSE 则目标变成均值，
-对超短期（MAE 型指标）反而错。两个指标各自的最优点不同（超短期 → 相对加权中位数 = p_star_l1；D+1 → 相对加权均值 = p* / mean_head），
-现有"分位 + 分段决策"已经是对齐的，所以这里做的是**在 pinball 之外加指标形状的辅助项**，而不是替换。
-
-验证 / 早停新增两个指标（都在整点起报行一次推理里算，不多花推理）：`nanwang_ultra_proxy`（每个目标时刻取整点行能拿到的
-1h/2h/3h/4h 四个 lead，100·(1 − mean |y−p| / max(y, 0.2·cap))，是正式超短期分的代理，正式分要 15 分钟起报行走 `--full`）
-与 `nanwang_combo`（`early_stop.combo_weights` 加权的 D+1 与代理分）。summary.csv / variants_summary.csv / 舰队评估 summary 多一列
-`nanwang_ultra_proxy`，train_log.json 的 history 在 combo / proxy 早停下同时记 D+1、代理分、nrmse。
-
-```bash
-bash train_m8_variants.sh --splits_dir data/splits/m8_v1 --variants e1_final,g1_ultra_weight,g2_ultra_l1,g3_mean_head,g4_recent_skip,g5_ultra_head,g6_combo_stop,g7_ultra_stack \
-     --seeds 0,1 --batch_tag round4_ultra
-```
-看 variants_summary.csv 的 `nanwang_ultra_proxy` 与 `nanwang_short_D+1` 两列：要的是前者涨、后者不跌（±0.6 以内算噪声）。
-g3 的 mean_head 决策规则在评估时也可以用 `--decision-yaml` 对 g3 的产物切换 p* / mean_head 对比，不用重训；
-多成员集成会把各成员的 mean_head 一起平均。
+| `slstm` 混合器、`model.bidirectional` | a2 / b2 | 与 a1 在 ±0.6 噪声内 |
+| `model.layout: split` 双流、`model.head_mode: token` | b1 / b3 | 同上 |
+| `features.nwp_members` 集合成员通道 | d1 | 数据没有 SSRD_pos_* 列，没跑过 |
+| `model.mean_head` / `recent_skip` / `ultra_head`、`train.loss.horizon_weights` / `metric_aux`、早停 `nanwang_combo` | g1–g7 | 第四轮没跑过；超短期改用 d4 残差连接（+0.65） |
+| 配方 / 站点身份 / 训练协议变体 yaml | c1–c8、f1–f3、i1–i2、h2–h3 | 结论见上文各节；开关本身（CPM、EMA、smooth_k、cs_ratio）都还在 |
 
 ## 全量重训（refit，最终模型）
 

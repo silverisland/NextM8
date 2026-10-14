@@ -1,3 +1,0 @@
-# A5 骨干：门控长卷积 ×4（无递推）
-run: {tag: a5_conv_only, out_dir: runs/m8/a5_conv_only}
-model: {blocks: [conv, conv, conv, conv]}

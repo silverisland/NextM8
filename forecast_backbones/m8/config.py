@@ -75,7 +75,6 @@ DEFAULT_CFG: dict = {
         "future_only": [],                                 # 例：[{"col": "timesfm_predict", "scale": "target"}]
         # 残差学习：模型输出 = 该 future_only 列（归一后）+ 网络输出；须是 future_only 里 scale=target 的列
         "residual_base_col": None,
-        "nwp_members": {"enabled": False, "cols": [f"SSRD_pos_{i}" for i in range(1, 10)], "future_suffix": "_predict"},
         # 列名（小写）含某个键时按 [shift, scale] 归一：(x - shift) / scale；都不含用 default
         "scales": {"ghi": [0.0, 1000.0], "ssrd": [0.0, 1000.0], "temp": [15.0, 15.0], "t2m": [15.0, 15.0], "default": [0.0, 1.0]},
         "clear_sky_index_col": "general_ghi_predict",       # 驱动 k_nwp / nwp_resid 的 GHI 类未来列（其历史列按 past_future 配对找）
@@ -94,24 +93,17 @@ DEFAULT_CFG: dict = {
         "static": {"station_embedding": True, "n_station_slots": 4096, "context_stats": True, "coords": True, "log_cap": True},
     },
     "model": {
-        "layout": "fused",               # fused | split（目标流 / 协变量流双流 + 跨流混合）
-        "head_mode": "step_cov",         # step_cov（逐步拼协变量的输出头）| token（TiRex 式 token 头）
         "patch_len": 16,                 # 须整除 context_len 与 pred_len：8/16/24/32/48
         "d_model": 256,
         "n_heads": 4,
         "d_ff": 1024,
-        "blocks": ["conv", "deltanet", "conv", "deltanet"],   # conv | deltanet | slstm | attention
+        "blocks": ["conv", "deltanet", "conv", "deltanet"],   # conv | deltanet | attention（attention 只作对照）
         "dropout": 0.1,
-        "bidirectional": False,
         "short_conv_kernel": 4,
         "deltanet_gated": True,
         "head_hidden": 256,
         "pos_in_patch_dim": 32,
         "quantiles": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        # ---- 超短期 / 指标对齐模块（默认全关 = 原模型）----
-        "mean_head": False,                                   # 额外一路点预测，按南网相对 L2 训练（给 D+1 段用：decision by_step method=mean_head）
-        "recent_skip": {"enabled": False, "k": 16},           # 输出头直连最近 k 步观测 + 晴空指数持久化锚（NLinear / scaled-persistence 式）
-        "ultra_head": {"enabled": False, "n_steps": 16, "hidden": 256},   # 前 n 步的直出 MLP 头（TabM/TiDE 式），与主头按步门控融合
     },
     "train": {
         "cpm": {"enabled": True, "p_row": 0.5, "min_frac": 0.05, "max_frac": 0.25, "max_runs": 3},
@@ -123,21 +115,13 @@ DEFAULT_CFG: dict = {
         "schedule": {"lr": 5.0e-4, "weight_decay": 0.05, "batch_size": 64, "max_steps": 20000, "epochs_max": 20,
                      "warmup_steps": 500, "grad_clip": 1.0, "precision": "fp32", "logging_steps": 50,
                      "eval_every_steps": 500, "sampling": "random", "progress_bar": True, "num_workers": 0},
-        # 损失：pinball（9 档分位）+ 可选的超短期加权 / 指标对齐项
-        #   horizon_weights.ultra_weight：前 ultra_steps 步的 pinball 权重（1 = 不加权）
-        #   metric_aux.ultra_l1：前 ultra_steps 步 中位数 的南网式相对 L1（|y-p| / max(y, 0.2·cap)）
-        #   metric_aux.short_l2：short_steps 段 点预测（有 mean_head 用它，否则中位数）的南网式相对 L2
-        #   metric_aux.mean_head_weight：mean_head 开着时，它在全部监督步上的相对 L2 权重
-        #   night_weight：夜间步在损失里的权重。1 = 与白天同权（默认，模型自己学夜间为 0，与 M1–M7 不做夜间后处理的口径一致）；
-        #                 0 = 夜间不监督（2026-10-12 之前的旧行为，须配合 decision.physics.night_zero: true 用）
-        "loss": {"horizon_weights": {"ultra_steps": 16, "ultra_weight": 1.0}, "night_weight": 1.0,
-                 "metric_aux": {"ultra_l1": 0.0, "short_l2": 0.0, "short_steps": [55, 151], "floor_ratio": 0.2, "mean_head_weight": 1.0}},
+        # 损失：pinball（9 档分位）。night_weight：夜间步在损失里的权重。1 = 与白天同权（默认，模型自己学夜间为 0，
+        #   与 M1–M7 不做夜间后处理的口径一致）；0 = 夜间不监督（2026-10-12 之前的旧行为，须配合 decision.physics.night_zero: true 用）
+        "loss": {"night_weight": 1.0},
         # early_stop.metric：nanwang_after_pstar（D+1）| nrmse | nanwang_ultra_proxy（整点行上的超短期代理分）
-        #                    | nanwang_combo（combo_weights 加权的 D+1 与超短期代理分）
         # early_stop.smooth_k（2026-10-13）：最优权重 / 早停按"最近 k 次验证分的均值"判，1 = 按单次分（旧行为）。
         #   验证分在见顶后来回晃 1.5–3 分而种子差只有 0.4，按单次挑 checkpoint 挑的是噪声；history 里原始分与平滑分都记
-        "early_stop": {"metric": "nanwang_after_pstar", "patience": 5, "nrmse_issue_every_min": 60,
-                       "combo_weights": {"short": 0.5, "ultra": 0.5}, "smooth_k": 1},
+        "early_stop": {"metric": "nanwang_after_pstar", "patience": 5, "nrmse_issue_every_min": 60, "smooth_k": 1},
         # 权重 EMA（2026-10-13）：null = 关；0.999 等 = 每个优化步后 shadow ← d·shadow + (1−d)·θ（前几步 d = min(decay, (1+n)/(10+n)) 快速跟上），
         #   验证、存最优（refit 的最终权重）都用 shadow。针对验证分评估间震荡；对应文献 TSPP / Morales-Brotons 2024
         "ema_decay": None,
@@ -185,8 +169,33 @@ def normalize_future_only(entries) -> list[dict]:
     return out
 
 
+# 2026-10-14 瘦身删掉的开关：旧 yaml 再写这些键直接报错，而不是被 deep_merge 静默收下、什么都不做
+REMOVED_KEYS = (("features", "nwp_members"), ("model", "layout"), ("model", "head_mode"), ("model", "bidirectional"),
+                ("model", "mean_head"), ("model", "recent_skip"), ("model", "ultra_head"),
+                ("train", "loss", "horizon_weights"), ("train", "loss", "metric_aux"), ("train", "early_stop", "combo_weights"))
+
+
+def _check_removed(override: dict) -> None:
+    hit = []
+    for path in REMOVED_KEYS:
+        d = override
+        for k in path:
+            if not isinstance(d, dict) or k not in d:
+                break
+            d = d[k]
+        else:
+            hit.append(".".join(path))
+    pt = ((override.get("decision") or {}).get("point") or {})
+    if pt.get("default") == "mean_head" or any(r.get("method") == "mean_head" for r in (pt.get("by_step") or ())):
+        hit.append("decision.point method=mean_head")
+    if hit:
+        raise ValueError(f"配置里用了 2026-10-14 瘦身已删除的开关：{hit}（实现见 commit 203c735 之前的历史）")
+
+
 def load_config(src) -> dict:
-    cfg = interpolate(deep_merge(DEFAULT_CFG, raw_override(src)))
+    override = raw_override(src)
+    _check_removed(override)
+    cfg = interpolate(deep_merge(DEFAULT_CFG, override))
     ds, m = cfg["dataset"], cfg["model"]
     fe = cfg["features"]
     fe["future_only"] = normalize_future_only(fe.get("future_only"))
@@ -198,9 +207,9 @@ def load_config(src) -> dict:
         raise ValueError(f"model.patch_len={P} 须整除 dataset.context_len={ds['context_len']} 与 pred_len={ds['pred_len']}")
     if int(m["d_model"]) % int(m["n_heads"]):
         raise ValueError(f"model.d_model={m['d_model']} 须被 n_heads={m['n_heads']} 整除")
-    bad = [b for b in m["blocks"] if b not in ("conv", "deltanet", "slstm", "attention")]
+    bad = [b for b in m["blocks"] if b not in ("conv", "deltanet", "attention")]
     if bad:
-        raise ValueError(f"model.blocks 含未知块类型 {bad}；可选 conv/deltanet/slstm/attention")
+        raise ValueError(f"model.blocks 含未知块类型 {bad}；可选 conv/deltanet/attention（slstm 已于 2026-10-14 删除）")
     lv = [float(q) for q in m["quantiles"]]
     if lv != sorted(lv) or not all(0.0 < q < 1.0 for q in lv):
         raise ValueError(f"model.quantiles 须是 (0,1) 内递增的列表，得到 {lv}")

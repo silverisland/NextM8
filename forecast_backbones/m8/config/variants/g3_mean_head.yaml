@@ -1,9 +1,0 @@
-# g3：e1_final + mean_head（多一路点预测，按南网相对 L2 训练；D+1 段 0.5 权重额外对齐），决策层 D+1 段直接用它替代 p*。
-#     南网 D+1 是 RMSE 型，最优点是（相对权重下的）均值而不是中位数；p* 是从分位反推的近似，mean_head 是直接学的。
-run: {tag: g3_mean_head, out_dir: runs/m8/g3_mean_head}
-model: {mean_head: true}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {patience: 8}
-  loss: {metric_aux: {short_l2: 0.5}}
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: mean_head}]}}

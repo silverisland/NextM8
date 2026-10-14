@@ -1,3 +1,0 @@
-# F2 只去坐标：静态向量不喂经纬高（逐步太阳几何照旧），站点嵌入与 log 容量保留。和 f1、b5 对照拆分三种身份输入各自的影响
-run: {tag: f2_no_coords, out_dir: runs/m8/f2_no_coords}
-features: {static: {coords: false}}

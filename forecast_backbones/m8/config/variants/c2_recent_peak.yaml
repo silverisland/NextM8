@@ -1,3 +1,0 @@
-# C2 归一化：目标按近 7 天实测峰值归一（Reverso min-max 的 PV 版），而不是装机容量
-run: {tag: c2_recent_peak, out_dir: runs/m8/c2_recent_peak}
-features: {target_scale: recent_peak}

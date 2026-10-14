@@ -1,7 +1,0 @@
-# I2：e1_final + 只开权重 EMA 0.999 与 smooth_k 3（模型与学习率不动），把 i1 里"协议"和"缩小模型 + 降学习率"两部分的贡献拆开
-run: {tag: i2_ema_only, out_dir: runs/m8/i2_ema_only}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {patience: 8, smooth_k: 3}
-  ema_decay: 0.999
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

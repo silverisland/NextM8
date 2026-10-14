@@ -49,8 +49,7 @@ except ImportError:
     from pipelines.nanwang_metric import NanwangMetric
 
 WEIGHTS_FILE, CONFIG_FILE = "model.safetensors", "model_config.yaml"
-EARLY_STOP_METRICS = {"nanwang_after_pstar": True, "nrmse": False,          # 指标 → 是否越高越好
-                      "nanwang_ultra_proxy": True, "nanwang_combo": True}
+EARLY_STOP_METRICS = {"nanwang_after_pstar": True, "nrmse": False, "nanwang_ultra_proxy": True}   # 指标 → 是否越高越好
 
 
 def ultra_proxy_pct(res: pd.DataFrame) -> float:
@@ -208,8 +207,6 @@ class EvalCallback(TrainerCallback):
         self.best_step, self.bad_evals, self.history, self.raw_scores = None, 0, [], []
         self.last_unseen = None
         self.last_extra: dict = {}
-        cw = es.get("combo_weights") or {}
-        self.combo_w = (float(cw.get("short", 0.5)), float(cw.get("ultra", 0.5)))
 
     def _score(self) -> float:
         self.model._progress_desc = "[m8] 验证"
@@ -217,18 +214,12 @@ class EvalCallback(TrainerCallback):
         try:
             if self.metric == "nrmse":
                 return score_nrmse(self.model, self.ds_val, self.collate, self.cfg, self.issue_every_min)[0]
-            if self.metric in ("nanwang_ultra_proxy", "nanwang_combo"):
-                # 整点行一次推理：超短期代理分 + nrmse；整点行里含 10:00 行，D+1 也从同一份结果算
+            if self.metric == "nanwang_ultra_proxy":
+                # 整点行一次推理：超短期代理分，nrmse 顺带记进 history
                 nr, res_h = score_nrmse(self.model, self.ds_val, self.collate, self.cfg, self.issue_every_min)
                 up = ultra_proxy_pct(res_h)
                 self.last_extra = {"nanwang_ultra_proxy": up, "nrmse": nr}
-                if self.metric == "nanwang_ultra_proxy":
-                    return up
-                score, table, _ = score_nanwang(self.model, None, None, self.cfg, res=res_h)
-                _, unseen, n_unseen = seen_unseen_scores(table)
-                self.last_unseen = float(unseen) if n_unseen else None
-                self.last_extra["nanwang_short_D+1"] = score
-                return self.combo_w[0] * score + self.combo_w[1] * up
+                return up
             score, table, _ = score_nanwang(self.model, self.ds_val, self.collate, self.cfg)
             _, unseen, n_unseen = seen_unseen_scores(table)
             self.last_unseen = float(unseen) if n_unseen else None
@@ -338,7 +329,6 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
             "nanwang_seen": seen, "nanwang_unseen": unseen, "n_unseen_stations": n_unseen,
             "best_step": best_step, "n_evals": n_evals, "train_minutes": minutes,
             "params": model.n_params(), "blocks": "+".join(cfg["model"]["blocks"]) or "none",
-            "layout": cfg["model"].get("layout", "fused"), "head_mode": cfg["model"].get("head_mode", "step_cov"),
             "patch_len": cfg["model"]["patch_len"], "d_model": cfg["model"]["d_model"],
             "target_scale": cfg["features"].get("target_scale", "cap"), "cpm": cfg["train"]["cpm"]["enabled"],
             "cov_dropout": cfg["train"].get("cov_dropout", 0.0),
@@ -400,7 +390,7 @@ def train_m8(config_path, splits_dir, out_dir=None, max_steps=None, tag: str | N
         world, bs = _dist.world_size(), int(args.per_device_train_batch_size)
         budget = f"{args.max_steps} 步" if args.max_steps > 0 else f"不限步数（{sch['epochs_max']} 个 epoch）"
         print(f"[m8] tag={tag or cfg['run'].get('tag')} params={model.n_params():,} channels={len(model.fe.channel_names)} "
-              f"blocks={cfg['model']['blocks']} layout={cfg['model'].get('layout', 'fused')} head={cfg['model'].get('head_mode', 'step_cov')}")
+              f"blocks={cfg['model']['blocks']}")
         how = ("无验证、不早停（refit）" if refit else
                f"验证{f'每 {eval_every} 步' if eval_every else '每个 epoch 末'}，早停指标 {cfg['train']['early_stop']['metric']}，"
                f"patience={cfg['train']['early_stop']['patience']}")

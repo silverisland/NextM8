@@ -1,3 +1,0 @@
-# A4 骨干：Gated DeltaNet ×4（无长卷积）
-run: {tag: a4_deltanet_only, out_dir: runs/m8/a4_deltanet_only}
-model: {blocks: [deltanet, deltanet, deltanet, deltanet]}

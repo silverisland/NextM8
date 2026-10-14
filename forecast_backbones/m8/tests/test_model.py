@@ -18,11 +18,7 @@ def test_registry_discovers_m8(small_cfg):
     assert m.compute_metrics(None) == {}
 
 
-VARIANTS = [
-    dict(), dict(blocks=["slstm"]), dict(blocks=["attention"]), dict(blocks=[]),
-    dict(layout="split"), dict(layout="split", bidirectional=True, blocks=["conv", "slstm"]),
-    dict(head_mode="token"), dict(patch_len=32), dict(patch_len=8, blocks=["deltanet"]),
-]
+VARIANTS = [dict(), dict(blocks=["attention"]), dict(blocks=[]), dict(patch_len=32), dict(patch_len=8, blocks=["deltanet"])]
 
 
 @pytest.mark.parametrize("over", VARIANTS)
@@ -38,80 +34,18 @@ def test_forward_backward_variants(small_cfg, batch, over):
     assert out.aux["quantiles"].requires_grad
 
 
-ULTRA_VARIANTS = [
-    dict(mean_head=True),
-    dict(recent_skip={"enabled": True, "k": 8}),
-    dict(ultra_head={"enabled": True, "n_steps": 16, "hidden": 32}),
-    dict(mean_head=True, recent_skip={"enabled": True, "k": 16}, ultra_head={"enabled": True, "n_steps": 32, "hidden": 32}),
-    dict(mean_head=True, head_mode="token"),
-]
-
-
-@pytest.mark.parametrize("over", ULTRA_VARIANTS)
-def test_ultra_modules_forward_backward(small_cfg, batch, over):
-    torch.manual_seed(0)
-    m = _model(small_cfg, **over); m.train()
-    out = m(batch["batch_dict"], labels=batch["labels"])
-    assert out.loss is not None and torch.isfinite(out.loss)
-    out.loss.backward()
-    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in m.parameters())
-    B = batch["labels"]["observe_power_future"].shape[0]
-    assert out.logits.shape == (B, 192) and out.aux["quantiles"].shape == (B, 192, 9)
-    if over.get("mean_head"):
-        assert out.aux["mean_head"].shape == (B, 192) and out.aux["mean_head"].requires_grad
-        assert any(p.grad is not None and p.grad.abs().sum() > 0 for n, p in m.named_parameters() if "head" in n)
-    else:
-        assert out.aux["mean_head"] is None
-    if over.get("ultra_head"):
-        assert m.core.uh_gate.grad is not None                      # 门控参与训练
-
-
-def test_recent_skip_requires_step_cov_and_channels(small_cfg):
-    with pytest.raises(ValueError, match="step_cov"):
-        _model(small_cfg, head_mode="token", recent_skip={"enabled": True, "k": 8})
-    with pytest.raises(ValueError, match="context_len"):
-        _model(small_cfg, recent_skip={"enabled": True, "k": 10_000})
-
-
-def test_loss_options_change_loss_and_keep_compute_loss_path(small_cfg, batch):
-    import copy
-    m = _model(small_cfg, mean_head=True); m.eval()
-    bd, labels = batch["batch_dict"], batch["labels"]
-    with torch.no_grad():
-        base = m(bd, labels=labels).loss
-    for over in ({"horizon_weights": {"ultra_steps": 16, "ultra_weight": 3.0}},
-                 {"metric_aux": {"ultra_l1": 0.5}}, {"metric_aux": {"short_l2": 0.5}}, {"metric_aux": {"mean_head_weight": 0.0}}):
-        m.cfg["train"]["loss"] = copy.deepcopy(load_config(small_cfg)["train"]["loss"])
-        for k, v in over.items():
-            m.cfg["train"]["loss"][k].update(v)
-        with torch.no_grad():
-            l1 = m(bd, labels=labels).loss
-            out = m(bd); l2 = m.compute_loss(out, labels)
-        assert torch.isfinite(l1) and not torch.allclose(l1, base), over
-        assert torch.allclose(l1, l2, atol=1e-6), over                   # 两条损失路径一致
-
-
-def test_mean_head_decision_rule(small_cfg, batch):
-    import copy
-    from forecast_backbones.m8.decision import physics_clip
-    m = _model(small_cfg, mean_head=True); m.eval()
-    dec = copy.deepcopy(m.cfg["decision"])
-    dec["point"]["by_step"] = [{"steps": [55, 151], "method": "mean_head"}]
-    m.cfg["decision"] = dec
-    with torch.no_grad():
-        out = m(batch["batch_dict"])
-    mh = out.aux["mean_head"].numpy()
-    exp = physics_clip(mh[..., None], out.aux["night"], out.aux["p_clear"], out.aux["cap"][:, None], 1.05, True,
-                       night_ceiling=m.cfg["decision"]["physics"]["night_zero"])[..., 0]
-    assert np.allclose(out.logits.numpy()[:, 55:151], exp[:, 55:151], atol=1e-5)
-    assert not np.allclose(out.logits.numpy()[:, :55], exp[:, :55])          # 其它步仍走分位规则
-    m2 = _model(small_cfg); m2.cfg["decision"] = dec
-    with pytest.raises(ValueError, match="mean_head"):
-        m2(batch["batch_dict"])
-    dec2 = copy.deepcopy(dec); dec2["point"]["default"] = "mean_head"; dec2["point"]["by_step"] = []
-    m.cfg["decision"] = dec2
-    with pytest.raises(ValueError, match="mean_head"):
-        m(batch["batch_dict"])
+def test_removed_switches_are_rejected_not_ignored(small_cfg):
+    """瘦身（2026-10-14）删掉的开关：旧 yaml 再写它们必须报错，不能被 deep_merge 静默收下。"""
+    for over in ({"model": {"mean_head": True}}, {"model": {"layout": "split"}}, {"model": {"head_mode": "token"}},
+                 {"model": {"bidirectional": True}}, {"model": {"recent_skip": {"enabled": True}}}, {"model": {"ultra_head": {"enabled": True}}},
+                 {"features": {"nwp_members": {"enabled": True}}}, {"train": {"loss": {"horizon_weights": {"ultra_weight": 3}}}},
+                 {"train": {"loss": {"metric_aux": {"ultra_l1": 0.5}}}}, {"train": {"early_stop": {"combo_weights": {"short": 1}}}},
+                 {"decision": {"point": {"by_step": [{"steps": [55, 151], "method": "mean_head"}]}}},
+                 {"model": {"blocks": ["slstm"]}}):
+        with pytest.raises(ValueError):
+            load_config({**small_cfg, **over, "model": {**small_cfg["model"], **over.get("model", {})}})
+    from forecast_backbones.m8.train import EARLY_STOP_METRICS
+    assert "nanwang_combo" not in EARLY_STOP_METRICS
 
 
 def test_compute_loss_path_matches_forward_loss(small_cfg, batch):
@@ -254,7 +188,7 @@ def test_all_variant_configs_load(small_cfg):
     import glob
     from forecast_backbones.m8.tests.conftest import ROOT
     files = sorted(glob.glob(str(ROOT / "forecast_backbones/m8/config/variants/*.yaml")))
-    assert len(files) >= 21
+    assert len(files) >= 10
     tags = [load_config(f)["run"]["tag"] for f in files]
     assert len(set(tags)) == len(tags)
 

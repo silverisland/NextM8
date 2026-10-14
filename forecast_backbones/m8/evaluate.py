@@ -114,16 +114,14 @@ def run_inference(members, ds, idx, collate, decision: dict, batch_size: int, sh
             bd, labels = (batch["batch_dict"], batch.get("labels")) if isinstance(batch, dict) and "batch_dict" in batch else (batch, None)
             bd = {k: v for k, v in bd.items() if k != label_col}                  # 绝不喂未来真值
             truth = _np(labels[label_col]) if labels is not None and label_col in labels else None
-            qs, ms, ctx = [], [], None
+            qs, ctx = [], None
             for m in members:
-                q, mh, c = m.predict_raw_full(bd); qs.append(q); ms.append(mh)
+                q, c = m.predict_raw(bd); qs.append(q)
                 ctx = ctx if ctx is not None else c
             q_mean = np.mean(qs, axis=0)
-            extra = {"mean_head": np.mean(ms, axis=0)} if all(v is not None for v in ms) else None
             night_fut, p_clear_fut = ctx.night[:, L:], ctx.p_clear[:, L:]
-            point, q_cal, median, pstar, night_physics = m0.decide(q_mean, night_fut, p_clear_fut, ctx.cap, decision, extra=extra)
-            member_points = ([m0.decide(q, night_fut, p_clear_fut, ctx.cap, decision, extra=None if mh is None else {"mean_head": mh})[0]
-                              for q, mh in zip(qs, ms)] if len(members) > 1 else [])
+            point, q_cal, median, pstar, night_physics = m0.decide(q_mean, night_fut, p_clear_fut, ctx.cap, decision)
+            member_points = [m0.decide(q, night_fut, p_clear_fut, ctx.cap, decision)[0] for q in qs] if len(members) > 1 else []
             ts = _np(bd[ts_col]).astype(np.int64).reshape(-1)
             for i in range(point.shape[0]):
                 sid = int(ctx.station_id[i])

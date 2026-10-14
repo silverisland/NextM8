@@ -169,7 +169,6 @@ class FeatureBuilder:
         self.resid_col = fe.get("residual_base_col")
         if self.resid_col is not None and (self.resid_col, "target") not in self.future_only:
             raise ValueError(f"features.residual_base_col={self.resid_col!r} 须是 future_only 里 scale=target 的列")
-        self.members = fe["nwp_members"]
         self.scales = fe["scales"]
         self.derived = fe["derived"]
         self.static_cfg = fe["static"]
@@ -191,15 +190,9 @@ class FeatureBuilder:
         if self.derived.get("nwp_resid", True):
             names.append("nwp_resid")
         names.append("cov_missing")
-        if self.members["enabled"]:
-            names += ["mem_mean", "mem_std"]
         self.channel_names = names
         self.idx = {n: i for i, n in enumerate(names)}
-        self.nwp_channels = [i for n, i in self.idx.items() if n.startswith("pf:") or n in ("k_nwp", "nwp_resid", "mem_mean", "mem_std")]
-        # split 布局：目标流 = 功率及其掩码 / 偏差；协变量流 = 其余（两流都带 is_future 与 cov_missing 标志）
-        tgt = {"y", "y_mask", "is_future", "nwp_resid", "cov_missing"}
-        self.target_channels = [i for n, i in self.idx.items() if n in tgt]
-        self.cov_channels = [i for n, i in self.idx.items() if n not in tgt or n in ("is_future", "cov_missing")]
+        self.nwp_channels = [i for n, i in self.idx.items() if n.startswith("pf:") or n in ("k_nwp", "nwp_resid")]
         self.target_scale = str(fe.get("target_scale", "cap"))          # cap | recent_peak
         if self.target_scale not in ("cap", "recent_peak"):
             raise ValueError(f"features.target_scale 须是 cap 或 recent_peak，得到 {self.target_scale!r}")
@@ -331,12 +324,6 @@ class FeatureBuilder:
             if c in batch_dict:
                 sh, sc = self._scale(c)
                 x[:, :L, self.idx[f"po:{c}"]] = (_col(batch_dict, c, keep_nan=False)[:, -L:] - sh) / sc
-        if self.members["enabled"]:
-            suf = self.members["future_suffix"]
-            mem = np.stack([np.concatenate([_col(batch_dict, c, False)[:, -L:], _col(batch_dict, c + suf, False)[:, :H]], 1)
-                            for c in self.members["cols"]], 0)                      # [M, B, T]
-            x[:, :, self.idx["mem_mean"]] = mem.mean(0) / 1000.0
-            x[:, :, self.idx["mem_std"]] = mem.std(0) / 1000.0
         if ghi_pred_full is None:
             ghi_pred_full = np.zeros((B, T))
         k_nwp = np.clip(np.where(ghi > 50.0, ghi_pred_full / np.maximum(ghi, 1e-6), 0.0), 0.0, 1.5)

@@ -1,8 +1,0 @@
-# g5：e1_final + 前 16 步的直出 MLP 头（TabM / TiDE 式：最近窗口 + 这 16 步的原始协变量 + 第一个未来 token → 16×9），
-#     与主头按步门控融合（门初值 0.5，可学）。检验"超短期直接点预测更好"的假设，又不丢主头的长程信息。
-run: {tag: g5_ultra_head, out_dir: runs/m8/g5_ultra_head}
-model: {ultra_head: {enabled: true, n_steps: 16, hidden: 256}}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {patience: 8}
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

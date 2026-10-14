@@ -1,8 +1,0 @@
-# H2：g4_recent_skip + 晴空出力比（上一轮 g4 最好，看两者是否可加）。
-run: {tag: h2_cs_ratio_skip, out_dir: runs/m8/h2_cs_ratio_skip}
-features: {derived: {clear_sky_ratio: {enabled: true}}}
-model: {recent_skip: {enabled: true, k: 16}}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {patience: 8}
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

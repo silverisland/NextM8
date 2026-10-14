@@ -1,9 +1,0 @@
-# H3：g4 + 晴空出力比 + TimesFM 残差学习（d4）。三条独立的线叠加。
-run: {tag: h3_stack, out_dir: runs/m8/h3_stack}
-features: {derived: {clear_sky_ratio: {enabled: true}}, future_only: [{col: timesfm3, scale: target}], residual_base_col: timesfm3}
-model: {recent_skip: {enabled: true, k: 16}}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {patience: 8}
-  hint_dropout: 0.3
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

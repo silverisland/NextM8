@@ -1,3 +1,0 @@
-# C4 token 粒度：patch 8 步（2 h；84 + 24 个 token）
-run: {tag: c4_patch8, out_dir: runs/m8/c4_patch8}
-model: {patch_len: 8}

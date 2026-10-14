@@ -1,6 +1,0 @@
-# g6：e1_final，只改选 checkpoint 的指标：D+1 与超短期代理分各半（整点行一次推理）。结构、损失都不动。
-run: {tag: g6_combo_stop, out_dir: runs/m8/g6_combo_stop}
-train:
-  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
-  early_stop: {metric: nanwang_combo, combo_weights: {short: 0.5, ultra: 0.5}, patience: 8}
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}
