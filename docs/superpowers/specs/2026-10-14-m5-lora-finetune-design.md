@@ -1,12 +1,13 @@
 # M5 重构：TimesFM-3 + LoRA 微调（自包含，M8 训练框架）—— 设计文档
 
-日期：2026-10-14　状态：设计已在对话中逐节确认，待用户审阅本文档
+日期：2026-10-14　状态：用户已审阅（2026-10-14 补 D8：站点几何默认关）
 
 ## 0. 一句话
 
 把 M6 里的 LoRA 微调搬进 M5，删掉 M5 原来的 conformal；新 M5 复用 M8 的训练 / 评估框架（EMA、smooth_k、refit、变体目录、
 集成评估、`--full` 四指标报表），模型类换成 TimesFM-3 可微路径 + LoRA。线上正在用的零样本类保持同名、同导入路径、同行为。
 目的：先在 `m8_v1` 切分上拿到"零样本 vs LoRA"的基线，与 M8 round 6 同口径可比；之后在这个模块上批量测试 PEFT 变体。
+基线只差权重：输入与线上 M5 相同（只有 ghi / 温度），决策层不用站点几何，`gain` 就是纯微调收益。
 
 ## 1. 目标与成功标准
 
@@ -28,6 +29,7 @@
 | D5 | `config/configs.yaml` 保持零样本原样；训练真源 `config/finetune.yaml` | eval_pretrain 按 configs.yaml 建 M5 做逐站零样本评测，不能悄悄变 |
 | D6 | 决策层默认 median；p* 用 `evaluate.py --decision-yaml` 覆盖，不重训 | 与 M8 一致；决策层无可训参数 |
 | D7 | 第 0 步（LoRA B=0 = 零样本）打分写进 `train_log.json` 与 summary 的 `nanwang_zeroshot` | 每个 run 自带零样本对照，`gain = best − zeroshot` |
+| D8 | 站点几何默认全关：`features.derived` 两项 false、`decision.physics.clear_sky_cap_ratio: null`（只做容量钳位 + 负值截零）、night_zero false、night_weight 1 | 线上 M5 从不用几何；几何协变量与晴空上限是 M8 / M6 给从零训练的小模型的先验，且在 M8 里踩过水平面 GHI 裁峰（1027）、缺坐标钟表几何（1026）、晴空上限隐式夜间归零（86a9c8c 前）的坑。站表只用来取 `cap_mw` 与站号；几何留作变体 g1 / g2 |
 
 ## 3. 目录
 
@@ -57,12 +59,15 @@ forecast_backbones/m5/
 
 - **legacy**（`station_meta` 缺省或为空，线上配置）：forward 逐字沿用当前 M5 代码——`predict_batch` → logits = 点预测或
   `timesfm3.predict_quantile` 档位，`aux = {"quantiles": [B,H,9]}`（无分位时 `aux=None`），不算 loss，无决策层。
-  legacy 下 `finetune.enabled: true` 直接 `ValueError`（微调需要站表算夜间 / 容量）。
+  legacy 下 `finetune.enabled: true` 直接 `ValueError`（微调需要站表取容量 / 站号）。
 - **full**（给了站表）：
-  1. `build_row_context` → elev / p_clear / night / cap（站表 `cap_mw`）/ station_id / degraded；
-  2. 协变量 = `features.past_future` 配对 + `features.derived`（`solar_elevation`、`clear_sky_power`，M6 已有）+ `past_only`；
+  1. `build_row_context` → cap（站表 `cap_mw`）/ station_id，以及 elev / p_clear / night / degraded（默认配置下只进 aux 供报表，
+     不影响预测；站表 lat / lon 可为 null）；
+  2. 协变量 = `features.past_future` 配对 + `past_only`；`features.derived`（`solar_elevation`、`clear_sky_power`）默认关，
+     开了才追加为 past_future 通道（变体 g1）；
   3. 底座：`finetune.enabled` → torch 路径挂 LoRA + 解冻 output_head；否则按 `finetune.inference_path`（evaluator | torch）零样本；
-  4. 决策层 = M8 `decide()`：单调化 → 晴空 / 容量钳位（night_zero 默认 false，night_ceiling 跟随）→ median 或 p*；
+  4. 决策层 = M8 `decide()`：单调化 → 钳位 → median 或 p*。`clear_sky_cap_ratio: null`（默认）时上界只用 cap，不看 p_clear，
+     夜间也不被隐式归零；给数值（变体 g2）时与 M8 相同：min(ratio·p_clear, cap)，night_ceiling 跟随 night_zero；
   5. aux 与 M8 同 schema（quantiles / quantiles_cal / levels_cal / p_star / median / night / night_loss / elev_deg / p_clear /
      var_bin / var_signal / station_id / cap / degraded），`evaluate_model` / `score_nanwang` / `station_report` 原样可用。
 - `predict_raw(batch_dict)`：full 模式下返回原始分位（真实单位）+ ctx，供 `evaluate.py` 集成先平均再决策。
@@ -92,7 +97,7 @@ timesfm3: {checkpoint: /data/tangqingang/timesfm-3.0-pytorch, device: auto, per_
            make_positive: true, use_znorm: false, use_symmetric_averaging: true, eager_init: true,
            return_quantiles: true, predict_quantile: null}        # 后两项只在 legacy 模式生效
 features: {past_future: [[general_ghi, general_ghi_predict], [general_temp, general_temp_predict]],
-           past_only: [], derived: {solar_elevation: true, clear_sky_power: true}}
+           past_only: [], derived: {solar_elevation: false, clear_sky_power: false}}   # D8：几何默认关
 finetune: {enabled: true, inference_path: torch, method: lora,
            lora: {rank: 8, alpha: 16, dropout: 0.05, target_modules: [query_proj, key_proj, value_proj, out_proj]},
            unfreeze_output_head: true}
@@ -102,7 +107,7 @@ train:    {schedule: {lr: 1.0e-4, weight_decay: 0.01, batch_size: 16, max_steps:
            loss: {night_weight: 1.0, normalize_by_cap: true},
            early_stop: {metric: nanwang_after_pstar, patience: 5, nrmse_issue_every_min: 60, smooth_k: 1},
            ema_decay: null, weights_path: ${run.out_dir}/model.safetensors}
-decision: {physics: {night_zero: false, clear_sky_cap_ratio: 1.05, capacity_cap: true, clip_negative: true},
+decision: {physics: {night_zero: false, clear_sky_cap_ratio: null, capacity_cap: true, clip_negative: true},   # null = 无晴空上限
            point: {default: median, by_step: [], floor_ratio: 0.2, tau_grid_step: 0.005, tail: flat, shrink_factor: null}}
 eval:     {batch_size: 64, report_dir: ${run.out_dir}/reports}
 ```
@@ -114,7 +119,9 @@ eval:     {batch_size: 64, report_dir: ${run.out_dir}/reports}
   `finetune.schedule`、`finetune.split`、`finetune.early_stop`、`features.nwp_members`、`features.target_transform`
   → 出现即报错，并提示新位置（如 `finetune.schedule → train.schedule`）。
 - 变体：`z0_zeroshot.yaml`（`finetune.enabled: false`、`inference_path: torch`，与 LoRA 同一评估链）、
-  `l1_lora_r8.yaml`（空覆盖 = 默认，基线）、`d2_pstar_point.yaml`（`decision.point.default: p_star`，评估时覆盖用）。
+  `l1_lora_r8.yaml`（空覆盖 = 默认，基线）、`d2_pstar_point.yaml`（`decision.point.default: p_star`，评估时覆盖用）、
+  `g1_solar_cov.yaml`（`features.derived` 两项 true，需重训）、`g2_cs_ceiling.yaml`（`decision.physics.clear_sky_cap_ratio: 1.05`，
+  只动决策层，可用 `--decision-yaml` 覆盖已训好的 run；与 M8 同口径比较时用）。g1 / g2 不进本轮基线。
 
 ## 6. 训练 / 评估（自 M8 搬，改动如下）
 
@@ -149,7 +156,9 @@ python -m forecast_backbones.m5.evaluate --runs runs/m5/m5_base/l1_lora_r8_s0 --
 - 新增 `test_legacy_contract.py`：把当前 M5 forward 冻结为 `tests/legacy_m5_forward.py`，用 `_FakeBackbone` 对比新类 legacy 模式
   logits / aux 逐位相同；线上式配置（无 station_meta）必须走 legacy；registry `import_model_class("m5")` / `build_evaluator("m5")` 仍可用；
   legacy + `finetune.enabled: true` 报错。
-- 新增：第 0 步打分进 history；零样本 run 不写权重；`normalize_by_cap` 两种取值的 loss 关系；`REMOVED_KEYS` 报错信息。
+- 新增：第 0 步打分进 history；零样本 run 不写权重；`normalize_by_cap` 两种取值的 loss 关系；`REMOVED_KEYS` 报错信息；
+  默认配置下协变量恰为两对 past_future（无几何通道）、`clear_sky_cap_ratio: null` 时 p_clear=0 的夜间步不被钳成 0、
+  上界只等于 cap；g1 / g2 打开后分别多出两个通道 / 恢复 M8 钳位结果。
 - 删除 test_conformal。现有 test_transformer_trainer 保留（legacy 路径的 evaluate_model 结果表）。
 
 ## 9. 不做的事
