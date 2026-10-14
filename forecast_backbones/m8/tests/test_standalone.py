@@ -39,3 +39,24 @@ def test_default_station_meta_lives_in_m8():
     sh = ROOT / "train_shell" / "train_m8.sh"
     if sh.exists():
         assert "forecast_backbones/m8/station_meta.csv" in sh.read_text(encoding="utf-8")
+
+
+_TS_REF = re.compile(r"(from\s+\.\.\.pipelines\.time_splits|from\s+pipelines\.time_splits|import\s+pipelines\.time_splits)")
+
+
+def test_no_time_splits_import_in_m8_sources():
+    """全量训练（2026-10-14）：给一个训练 parquet 文件夹直接训练，m8 不再 import pipelines.time_splits（拼表 / 站号归一自带）。"""
+    hits = []
+    for p in sorted(M8.glob("*.py")):
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            if _TS_REF.search(line):
+                hits.append(f"{p.relative_to(ROOT)}:{n}: {line.strip()[:100]}")
+    assert not hits, "m8 还在 import pipelines.time_splits：\n" + "\n".join(hits)
+
+
+def test_training_modules_load_without_time_splits():
+    code = ("import sys; sys.path.insert(0, %r); sys.modules['pipelines.time_splits'] = None; "
+            "import forecast_backbones.m8.train, forecast_backbones.m8.data, forecast_backbones.m8.station_report, forecast_backbones.m8.evaluate; "
+            "print('OK')" % str(ROOT))
+    r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True)
+    assert r.returncode == 0 and "OK" in r.stdout, r.stderr[-2000:]

@@ -232,7 +232,9 @@ bash train_m8_variants.sh --splits_dir <m8_v1> --variants j1_final2,k1_hint01,k2
 
 **全量训练（训练 parquet 已经切好、不要任何切分）**：`--train_parquet` 直接吃文件夹 / 加引号的通配符 / 文件列表，
 不走 time_splits、不切块、一行不剔除、没有验证集，固定 `--max_steps` 步后存 checkpoint（隐含 `--refit`）。
-站列是站名文本也行，按 station_meta 映射成站号。每个变体一张卡、各一个 checkpoint：
+站列是站名文本也行，按 station_meta 映射成站号。拼表与站号归一是 m8 自带的（`_parquet.py`），不依赖 `pipelines/time_splits.py`；
+训练只需要 m8 目录加 `pipelines/transformer_dataset.py`、`pipelines/nanwang_metric.py`、`interfaces/modeloutput.py` 三个外部文件。
+每个变体一张卡、各一个 checkpoint：
 
 ```bash
 bash train_m8_variants.sh --train_parquet "<训练文件夹>/*.parquet" \

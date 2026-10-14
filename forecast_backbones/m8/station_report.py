@@ -44,15 +44,17 @@ except ImportError:
     from forecast_backbones.m8.data import _dataset_with_station_id
     from forecast_backbones.m8.solar import attach_station_id, norm_station_name
 try:
+    from ._parquet import station_keys
+except ImportError:
+    from forecast_backbones.m8._parquet import station_keys
+try:
     from ...pipelines.transformer_dataset import UnifiedDataset
     from ...pipelines.metric import SolarMetricCalculator, MIN_DAYS
     from ...pipelines.nanwang_metric import NanwangMetric
-    from ...pipelines.time_splits import station_keys
 except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
     from pipelines.metric import SolarMetricCalculator, MIN_DAYS
     from pipelines.nanwang_metric import NanwangMetric
-    from pipelines.time_splits import station_keys
 
 RESULT_COLS = ["timestamp_win", "station", "observe_power_predict", "observe_power_future"]
 

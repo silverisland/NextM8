@@ -1,5 +1,6 @@
 # forecast_backbones/m8/data.py（2026-10-13 起自带一份，不再引用 m6）
-"""读 pipelines.time_splits 落好的切分目录，按 M8 口径建 UnifiedDataset（arrow 后端）。"""
+"""训练 parquet（文件夹里的若干文件，或切分目录里的 train/valid.parquet）→ 按 M8 口径建 UnifiedDataset（arrow 后端）。
+拼表与站号归一自带（_parquet.py），不依赖 pipelines.time_splits。"""
 from __future__ import annotations
 
 import sys
@@ -10,15 +11,15 @@ import pandas as pd
 
 try:
     from .solar import attach_station_id
+    from ._parquet import station_keys, concat_parquets, _arrow_kind
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.solar import attach_station_id
+    from forecast_backbones.m8._parquet import station_keys, concat_parquets, _arrow_kind
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
-    from ...pipelines.time_splits import station_keys, concat_parquets, _arrow_kind
 except ImportError:
     from pipelines.transformer_dataset import UnifiedDataset
-    from pipelines.time_splits import station_keys, concat_parquets, _arrow_kind
 
 
 def _dataset_with_station_id(paths, cfg: dict, station_meta, scratch_dir, reuse: bool = False) -> UnifiedDataset:
