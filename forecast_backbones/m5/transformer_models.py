@@ -413,9 +413,141 @@ class TransformersAdaptedM5Model(nn.Module):
             self.backbone.requires_grad_(False)
         self.backbone.eval()               # LoRA 的 dropout 默认 train 态：落回推理态，训练脚本显式 .train()
 
+    # ================================================================== full 模式：推理 / 决策 / 损失
+    def _covariates(self, batch_dict: dict, ctx):
+        """→ (past_future [B,C,L+H] | None, past_only [B,C,L] | None)。缺列的协变量对只提示一次并跳过（与 legacy 同）。"""
+        L, H = self.context_len, self.pred_len
+        pf = []
+        for hist_c, fut_c in self.past_future_cols:
+            if hist_c not in batch_dict or fut_c not in batch_dict:
+                if (hist_c, fut_c) not in self._warned_pairs:
+                    print(f"[timesfm3] 协变量对 {(hist_c, fut_c)} 在 batch 里缺列，本次推理跳过（只提示一次）")
+                    self._warned_pairs.add((hist_c, fut_c))
+                continue
+            pf.append(np.concatenate([self._col(batch_dict, hist_c)[:, -L:], self._col(batch_dict, fut_c)[:, :H]], axis=1))
+        d = self.cfg["features"]["derived"]
+        if d.get("solar_elevation"):
+            pf.append(ctx.elev_deg.astype(np.float32))
+        if d.get("clear_sky_power"):
+            pf.append(ctx.p_clear.astype(np.float32))
+        po = [self._col(batch_dict, c)[:, -L:] for c in self.past_only_cols]
+        return (np.stack(pf, axis=1).astype(np.float32) if pf else None,
+                np.stack(po, axis=1).astype(np.float32) if po else None)
+
+    def _quantiles(self, tgt: np.ndarray, pf, po) -> torch.Tensor:
+        """→ [B,H,9] float32 真实单位。torch 路径可微（训练时带梯度）；evaluator 路径走 predict_batch（无梯度）。"""
+        if self.torch_path:
+            q = self.backbone.predict_quantiles(tgt, pf, po, horizon=self.pred_len, use_znorm=self.use_znorm,
+                                                use_symmetric_averaging=self.use_symmetric_averaging,
+                                                make_positive=self.make_positive)
+            return q if q.dtype == torch.float32 else q.float()
+        kwargs = dict(horizon=self.pred_len, return_quantiles=True, make_positive=self.make_positive,
+                      use_znorm=self.use_znorm, use_symmetric_averaging=self.use_symmetric_averaging)
+        if pf is not None:
+            kwargs["past_future_covariates"] = list(pf)
+        if po is not None:
+            kwargs["past_only_covariates"] = list(po)
+        qs = []
+        for o in self._backbone.predict_batch([t[None, :] for t in tgt], **kwargs):
+            if getattr(o, "quantiles", None) is None:
+                raise ValueError("TimesFM-3 evaluator 没有返回分位数")
+            q = np.asarray(o.quantiles)
+            qs.append(q[0] if q.ndim == 3 else q)
+        return torch.as_tensor(np.stack(qs), dtype=torch.float32, device=torch.device(self._backbone_device or "cpu"))
+
+    def _raw(self, batch_dict: dict):
+        if self._backbone is None:
+            raise RuntimeError("backbone 未加载：timesfm3.eager_init=False 时需先 _ensure_backbone(device)")
+        tgt = self._col(batch_dict, self.target_col)[:, -self.context_len:]
+        ctx = self.ctx_builder.build(batch_dict)
+        pf, po = self._covariates(batch_dict, ctx)
+        return self._quantiles(tgt, pf, po), ctx
+
+    @torch.no_grad()
+    def predict_raw(self, batch_dict: dict):
+        """推理态：→ (q [B,H,9] 真实单位 numpy, ctx)。不过决策层，供 evaluate.py 集成先平均分位再统一决策。"""
+        if self.mode != "full":
+            raise RuntimeError("predict_raw 只在 full 模式可用（配置里给 dataset.station_meta）")
+        was = self.training
+        self.eval()
+        try:
+            q, ctx = self._raw(batch_dict)
+            return q.detach().float().cpu().numpy().astype(float), ctx
+        finally:
+            self.train(was)
+
+    def decide(self, q_raw: np.ndarray, night_fut: np.ndarray, p_clear_fut: np.ndarray, cap: np.ndarray, decision: dict | None = None):
+        """决策层（numpy，没有可训参数，评估时可换规则不用重训）。decision 缺省用 cfg['decision']。
+        → (point [B,H], q_cal, median, pstar, night_physics)。clear_sky_cap_ratio=None（默认）时无晴空上限。"""
+        dm = _dep("decision")
+        dec = decision if decision is not None else self.cfg["decision"]
+        ph, pt = dec["physics"], dec["point"]
+        if pt.get("tail", "flat") != "flat":
+            raise ValueError(f"decision.point.tail: only 'flat' is implemented (got {pt.get('tail')!r})")
+        nz, cn = bool(ph["night_zero"]), bool(ph.get("clip_negative", True))
+        night_physics = night_fut if nz else np.zeros_like(night_fut)
+        ratio = ph.get("clear_sky_cap_ratio")
+        q_cal = dm.physics_clip(dm.enforce_monotone(q_raw), night_physics, p_clear_fut, cap[:, None],
+                                None if ratio is None else float(ratio), bool(ph["capacity_cap"]),
+                                night_ceiling=nz, clip_negative=cn)
+        shrink = float(pt.get("shrink_factor") or 1.0)
+        point = dm.select_point(q_cal, self.levels, cap, pt["default"], list(pt.get("by_step") or ()), shrink,
+                                float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
+        median = dm.level_value(q_cal, self.levels, 0.5)
+        pstar = dm.p_star(q_cal, self.levels, cap[:, None], float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
+        return point, q_cal, median, pstar, night_physics
+
+    def _forward_full(self, batch_dict: dict, labels=None) -> TransformersAdaptedModelOutput:
+        L = self.context_len
+        q_t, ctx = self._raw(batch_dict)                                          # [B,H,9]；torch 路径训练时带梯度
+        dev = q_t.device
+        night_fut, p_clear_fut = ctx.night[:, L:], ctx.p_clear[:, L:]
+        point, q_cal, median, pstar, night_physics = self.decide(
+            q_t.detach().float().cpu().numpy().astype(float), night_fut, p_clear_fut, ctx.cap)
+        logits = torch.as_tensor(point, dtype=torch.float32, device=dev)
+        aux = {
+            "quantiles": q_t,
+            "quantiles_cal": torch.as_tensor(q_cal, dtype=torch.float32, device=dev),
+            "levels_cal": list(self.levels),
+            "p_star": torch.as_tensor(pstar, dtype=torch.float32, device=dev),
+            "median": torch.as_tensor(median, dtype=torch.float32, device=dev),
+            "night": night_physics, "night_loss": night_fut,
+            "elev_deg": ctx.elev_deg[:, L:], "p_clear": p_clear_fut,
+            "var_bin": np.zeros(len(ctx.cap), int), "var_signal": ctx.var_signal, "station_id": ctx.station_id,
+            "cap": ctx.cap, "degraded": ctx.degraded,
+        }
+        loss = None if labels is None else self._loss(q_t, labels, night_fut, ctx.cap)
+        return TransformersAdaptedModelOutput(loss=loss, logits=logits, predictions=logits, aux=aux)
+
+    def _loss(self, q_t: torch.Tensor, labels, night_fut: np.ndarray, cap: np.ndarray) -> torch.Tensor:
+        """9 档 pinball，监督未来 pred_len 步；标签非有限的步掩掉；夜间步按 train.loss.night_weight 加权；
+        normalize_by_cap（默认）时 q、y 都除以该行 cap。"""
+        y = labels[self.label_col] if isinstance(labels, dict) else labels
+        y = torch.as_tensor(np.asarray(y.detach().cpu().numpy() if isinstance(y, torch.Tensor) else y, np.float32),
+                            device=q_t.device)[:, : self.pred_len]
+        lc = self.cfg["train"]["loss"]
+        mask = torch.isfinite(y).to(q_t.dtype)
+        nw = float(lc.get("night_weight", 1.0))
+        if nw != 1.0:
+            night = torch.as_tensor(np.asarray(night_fut, bool), device=q_t.device)
+            mask = mask * torch.where(night, torch.full_like(mask, nw), torch.ones_like(mask))
+        y = torch.nan_to_num(y)
+        if bool(lc.get("normalize_by_cap", True)):
+            c = torch.as_tensor(np.asarray(cap, np.float32), device=q_t.device)
+            q_t, y = q_t / c[:, None, None], y / c[:, None]
+        return _dep("losses").pinball_loss(q_t, y, self.levels, mask)
+
+    def compute_loss(self, outputs, labels, num_items_in_batch=None) -> torch.Tensor:
+        if outputs.loss is not None:
+            return outputs.loss
+        aux = outputs.aux
+        return self._loss(aux["quantiles"], labels, aux["night_loss"], aux["cap"])
+
     # ------------------------------------------------------------------ forward
     def forward(self, batch_dict: dict, labels=None) -> TransformersAdaptedModelOutput:
-        # labels 仅为接口兼容，忽略。
+        if self.mode == "full":
+            return self._forward_full(batch_dict, labels)
+        # labels 仅为接口兼容，忽略。（以下为 legacy 模式，逐字沿用重构前代码）
         if self._backbone is None:
             raise RuntimeError(
                 "backbone未加载"
