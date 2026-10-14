@@ -86,3 +86,18 @@ def test_collect_runs_lists_zero_shot_and_lora(tmp_path, tiny_ckpt_dir):
     train_m5(full_cfg(tmp_path, tiny_ckpt_dir), splits_dir=splits, out_dir=tmp_path / "b" / "l1", tag="l1")
     df = collect([tmp_path / "b"])
     assert set(df["tag"]) == {"z0", "l1"} and {"nanwang_zeroshot", "gain", "method"} <= set(df.columns)
+
+
+def test_seed_controls_lora_init_and_run_is_reproducible(tmp_path, tiny_ckpt_dir):
+    from safetensors.torch import load_file
+    from forecast_backbones.m5.train import train_m5
+    splits = write_splits(tmp_path, n_train_days=2, n_val_days=2)
+    def run(name, seed):
+        out = tmp_path / name
+        train_m5(full_cfg(tmp_path, tiny_ckpt_dir, run={"seeds": [seed]}, train={"schedule": {"max_steps": 2, "eval_every_steps": 2}}),
+                 splits_dir=splits, out_dir=out, tag=name)
+        return load_file(str(out / "model.safetensors"))
+    a, b, c = run("s0a", 0), run("s0b", 0), run("s1", 1)
+    assert a.keys() == b.keys() and all(torch.equal(a[k], b[k]) for k in a)         # 同种子逐位相同
+    lora_a = [k for k in a if "lora_A" in k]
+    assert lora_a and any(not torch.equal(a[k], c[k]) for k in lora_a)               # 换种子 lora_A 不同

@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from transformers import Trainer, TrainerCallback
+from transformers import Trainer, TrainerCallback, set_seed
 
 try:
     from .config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override
@@ -453,7 +453,9 @@ def train_m5(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
     if args.n_gpu > 1:
         raise ValueError(f"单进程看到 {args.n_gpu} 张卡：HF 会退到 DataParallel，dict batch 不支持。多卡请用 accelerate launch / torchrun")
     main = _dist.is_main()
+    set_seed(int(args.seed))               # LoRA 的 lora_A 在构造里随机初始化，须先于构造定种子（否则 run.seeds 管不到）
     model = TransformersAdaptedM5Model(train_cfg)
+    model.reseed(int(args.seed) * 1000 + _dist.rank())
     model.to(args.device)
     scratch = out / ".data"
     station_col, ts_col = str(cfg["dataset"]["station_id_col"]), str(cfg["dataset"]["ts_col"])
