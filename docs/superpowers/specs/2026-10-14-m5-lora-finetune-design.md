@@ -97,7 +97,7 @@ finetune: {enabled: true, inference_path: torch, method: lora,
            lora: {rank: 8, alpha: 16, dropout: 0.05, target_modules: [query_proj, key_proj, value_proj, out_proj]},
            unfreeze_output_head: true}
 train:    {schedule: {lr: 1.0e-4, weight_decay: 0.01, batch_size: 16, max_steps: 4000, epochs_max: 10, warmup_steps: 0,
-                      grad_clip: 1.0, precision: bf16, logging_steps: 20, eval_every_steps: 250, sampling: random,
+                      grad_clip: 1.0, precision: fp32, logging_steps: 20, eval_every_steps: 250, sampling: random,
                       progress_bar: true, num_workers: 0},
            loss: {night_weight: 1.0, normalize_by_cap: true},
            early_stop: {metric: nanwang_after_pstar, patience: 5, nrmse_issue_every_min: 60, smooth_k: 1},
@@ -127,7 +127,8 @@ eval:     {batch_size: 64, report_dir: ${run.out_dir}/reports}
 4. `evaluate.load_member`：run 目录缺 `model.safetensors` 且 `model_config.yaml` 里 `finetune.enabled: false` → 按零样本成员加载；
    `finetune.enabled: true` 却缺权重 → 报错。
 5. `--refit`、seed、smooth_k、集成分位平均、`station_report --full` 原样。
-6. `build_training_args`：precision bf16 只在 cuda 生效，cpu 退 fp32（沿用 M6 逻辑）；`_get_train_sampler` 双签名兼容（沿用）。
+6. `build_training_args`：precision 默认 fp32（服务器 V100 不支持 bf16，HF Trainer 开 bf16 会直接报错）；`fp16` / `bf16` 可选，
+   cpu 一律 fp32；`_get_train_sampler` 双签名兼容（沿用）。
 
 ## 7. 基线运行方案（服务器）
 
@@ -160,7 +161,6 @@ python -m forecast_backbones.m5.evaluate --runs runs/m5/m5_base/l1_lora_r8_s0 --
 ## 10. 风险
 
 - **legacy 逐位一致**：靠冻结旧 forward 的对照测试守住；新类 legacy 分支直接复用旧代码而非重写。
-- **显存**：TimesFM-3 ~200M 参数，bs 16、bf16、对称平均（2B）在 V100 上需实测；V100 不支持 bf16 → 自动退 fp32（与 M6 相同），
-  若 OOM 用 `train.schedule.batch_size` 降到 8。
+- **显存**：TimesFM-3 ~200M 参数，bs 16、fp32、对称平均（实际 2B 行）在 V100 32G 上需实测；OOM 时把 `train.schedule.batch_size` 降到 8。
 - **训练速度**：每步过一遍 200M 底座；4000 步 × eval 250 步的耗时以服务器实测为准。
 - **框架复制**：M5 / M8 各一份框架，改了不自动同步（与 M8 / M6 现状一致）。
