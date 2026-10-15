@@ -67,7 +67,31 @@ def test_validation_errors():
     ("d2_pstar_point", lambda c: c["decision"]["point"]["default"] == "p_star"),
     ("g1_solar_cov", lambda c: c["features"]["derived"] == {"solar_elevation": True, "clear_sky_power": True}),
     ("g2_cs_ceiling", lambda c: c["decision"]["physics"]["clear_sky_cap_ratio"] == 1.05),
+    # 第 2 阶段：训练协议 + 收益定位（与 l1 同协议，只差一处）
+    ("s2_lr3e5_ema", lambda c: c["train"]["schedule"]["lr"] == 3e-5 and c["train"]["ema_decay"] == 0.998
+                               and c["train"]["early_stop"]["smooth_k"] == 3),
+    ("s2_lr1e4_ema", lambda c: c["train"]["schedule"]["lr"] == 1e-4 and c["train"]["ema_decay"] == 0.998
+                               and c["train"]["early_stop"]["smooth_k"] == 3),
+    ("s2_head_only", lambda c: c["finetune"]["lora"]["target_modules"] == [] and c["finetune"]["unfreeze_output_head"]),
+    ("s2_frozen_head", lambda c: c["finetune"]["unfreeze_output_head"] is False
+                                 and c["finetune"]["lora"]["target_modules"] == ["query_proj", "key_proj", "value_proj", "out_proj"]),
+    ("s2_lora_resblock", lambda c: c["finetune"]["lora"]["target_modules"][4:] == ["hidden_layer", "output_layer", "residual_layer"]),
+    ("s2_probe_resblock", lambda c: c["finetune"]["lora"]["target_modules"] == []
+                                    and c["finetune"]["unfreeze_modules"] == ["pre_transformer_resblock"]),
+    ("s2_lora_var_resblock", lambda c: c["finetune"]["lora"]["target_modules"][0].startswith("re:")
+                                       and "var_attn" in c["finetune"]["lora"]["target_modules"][0]),
+    ("s2_lora_var_only", lambda c: c["finetune"]["lora"]["target_modules"] == [r"re:.*\.var_attn\.(query|key|value|out)_proj"]),
+    ("s2_lora_seq_only", lambda c: c["finetune"]["lora"]["target_modules"] == [r"re:.*\.seq_attn\.(query|key|value|out)_proj"]),
+    ("s2_lr1e5_ema", lambda c: c["train"]["schedule"]["lr"] == 1e-5 and c["train"]["ema_decay"] == 0.998),
+    ("s6_all_linear", lambda c: {"ff0", "ff1", "hidden_layer"} <= set(c["finetune"]["lora"]["target_modules"])),
+    ("s6_lora_vo_only", lambda c: c["finetune"]["lora"]["target_modules"] == ["value_proj", "out_proj"]),
+    ("s6_full_ft_lr1e6", lambda c: c["finetune"]["lora"]["target_modules"] == [] and c["train"]["schedule"]["lr"] == 1e-6
+                                   and c["finetune"]["unfreeze_modules"] == ["pre_transformer_resblock", "transformer_stack"]),
+    ("s6_full_ft_lr1e5", lambda c: c["train"]["schedule"]["lr"] == 1e-5 and "transformer_stack" in c["finetune"]["unfreeze_modules"]),
+    ("s6_partial_ends", lambda c: "transformer_stack.layers.19" in c["finetune"]["unfreeze_modules"]
+                                  and "transformer_stack" not in c["finetune"]["unfreeze_modules"]),
 ])
+
 def test_variants_load(name, check):
     from forecast_backbones.m5.config import load_config
     assert check(load_config(str(M5 / "config" / "variants" / f"{name}.yaml")))
@@ -76,3 +100,12 @@ def test_variants_load(name, check):
 def test_configs_yaml_stays_zero_shot():
     raw = yaml.safe_load((M5 / "config" / "configs.yaml").read_text(encoding="utf-8"))
     assert "station_meta" not in (raw.get("dataset") or {}) and "finetune" not in raw
+
+
+def test_every_variant_yaml_is_covered_by_a_test():
+    names = {p.stem for p in (M5 / "config" / "variants").glob("*.yaml")}
+    covered = {"z0_zeroshot", "l1_lora_r8", "d2_pstar_point", "g1_solar_cov", "g2_cs_ceiling", "s2_lr3e5_ema", "s2_lr1e4_ema",
+               "s2_lr1e5_ema", "s2_head_only", "s2_frozen_head", "s2_lora_resblock", "s2_probe_resblock", "s2_lora_var_resblock",
+               "s2_lora_var_only", "s2_lora_seq_only", "s6_all_linear", "s6_lora_vo_only",
+               "s6_full_ft_lr1e6", "s6_full_ft_lr1e5", "s6_partial_ends"}
+    assert names == covered, names ^ covered

@@ -97,6 +97,8 @@ DEFAULT_CFG: dict = {
         "method": "lora",                   # 目前只有 lora；后续 PEFT 变体的开关位
         "lora": {"rank": 8, "alpha": 16, "dropout": 0.05, "target_modules": list(LORA_TARGETS)},
         "unfreeze_output_head": True,
+        # 整块解冻（全参数可训，与 LoRA 并存）：如 ["pre_transformer_resblock"]（读 NWP 前瞻的输入残差块）
+        "unfreeze_modules": [],
     },
     "train": {
         # batch_size：全局 batch（所有卡合计），每卡 = batch_size / 卡数，须整除；单卡时与旧口径相同

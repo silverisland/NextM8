@@ -1,0 +1,5 @@
+# 第 2 阶段·新主候选（W4 L-va）：LoRA 只挂跨变量注意力 var_attn（NWP → 功率的通路）+ 输入残差块 + head；
+# 时间注意力 seq_attn 保持预训练（护住零样本的日形能力，未见站 / 缺坐标站靠它）
+finetune:
+  lora:
+    target_modules: ['re:.*\.var_attn\.(query|key|value|out)_proj', hidden_layer, output_layer, residual_layer]

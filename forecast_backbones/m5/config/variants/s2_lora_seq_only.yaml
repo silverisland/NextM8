@@ -1,0 +1,4 @@
+# 第 2 阶段·诊断（W4 L-s）：LoRA 只挂时间注意力 seq_attn 的四个投影（+ head）；≈ l1 说明 LoRA 主要在重学日形
+finetune:
+  lora:
+    target_modules: ['re:.*\.seq_attn\.(query|key|value|out)_proj']

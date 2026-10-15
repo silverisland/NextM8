@@ -10,6 +10,7 @@
 #   卡按 k 张一组分成若干槽，任务轮流进槽，同一槽内顺序执行。1 个任务 → 全部卡；任务比卡多 → 每任务 1 张卡排队。
 #   全局 batch（--batch_size，默认配置里的 16）不随卡数变：每卡 = 全局 / k，所以不同卡数跑出的结果可比。
 # 零样本变体（finetune.enabled: false）与种子无关：给了 --seeds 也只跑一次，目录名不带 _s<seed>。
+# 只动决策层的变体（yaml 里只有 decision: 段，如 d2 / g2）自动跳过：它们不用训，评估时用 eval_m5.sh --decision_yaml。
 # 一次调用默认占满所有卡；同时开两个调用会抢卡，要并发请用 --gpus 把卡分开。
 # d2_pstar_point / g2_cs_ceiling 只动决策层，不用训：对已训好的 run 用 eval_m5.sh --decision_yaml
 # 产物：runs/m5/<batch_tag>/<变体>[_s<seed>]/…，汇总 runs/m5/<batch_tag>/variants_summary.csv
@@ -64,10 +65,14 @@ fi
 JOBS=(); JOB_SEEDS=()
 if [ -n "$SEEDS" ]; then IFS=',' read -r -a SEED_LIST <<< "$SEEDS"; else SEED_LIST=(""); fi
 for f in "${FILES[@]}"; do
+  if ! grep -E '^[A-Za-z_][A-Za-z0-9_]*:' "$f" | grep -vq '^decision:'; then
+    echo "跳过 $(basename "$f")：只动决策层，不用训（对已训好的 run 用 eval_m5.sh --decision_yaml）"; continue
+  fi
   if grep -Eq '^[[:space:]]+enabled:[[:space:]]*false' "$f"; then JOBS+=("$f"); JOB_SEEDS+=(""); continue; fi
   for sd in "${SEED_LIST[@]}"; do JOBS+=("$f"); JOB_SEEDS+=("$sd"); done
 done
 J=${#JOBS[@]}
+[ "$J" -gt 0 ] || { echo "❌ 没有要训练的任务（给的变体都只动决策层？）" >&2; exit 1; }
 # 每个任务几张卡：auto = floor(G / J)，至少 1，再往下取到能整除全局 batch
 GB="${BATCH_SIZE:-16}"
 if [ "$GPUS_PER_JOB" = "auto" ]; then

@@ -148,7 +148,8 @@ def save_weights(model, path) -> None:
 
 def load_weights(model, path) -> None:
     lora = _dep("lora")
-    lora.load_lora_state_dict(model.backbone.model, lora.load_lora_weights(Path(path)))
+    blocks = list((model.cfg.get("finetune") or {}).get("unfreeze_modules") or [])
+    lora.load_lora_state_dict(model.backbone.model, lora.load_lora_weights(Path(path)), ["output_head", *blocks])
 
 
 DEFAULT_CFG = {
@@ -401,12 +402,20 @@ class TransformersAdaptedM5Model(nn.Module):
         self.backbone = _dep("backbone").TorchBackbone.from_evaluator(self._backbone)
         ft = self.cfg["finetune"]
         if ft["enabled"]:
-            lo = ft["lora"]
-            lora.inject_lora(self.backbone.model, list(lo["target_modules"]), int(lo["rank"]), float(lo["alpha"]),
-                             float(lo["dropout"]))
-            lora.freeze_all_but_lora(self.backbone.model, bool(ft["unfreeze_output_head"]))
-            # 预训练 output_head 留一份（0.74M 参数），WiSE-FT 插值要用；必须在加载微调权重之前取
-            self._head_pre = {k: v.detach().clone() for k, v in self.backbone.model.output_head.state_dict().items()}
+            lo, root = ft["lora"], self.backbone.model
+            blocks = list(ft.get("unfreeze_modules") or [])
+            known = {n for n, _ in root.named_modules()}
+            bad = [b for b in blocks if b not in known]
+            if bad:
+                raise ValueError(f"finetune.unfreeze_modules 里的模块不存在：{bad}（顶层可选：{sorted(n for n in known if n and '.' not in n)}）")
+            lora.inject_lora(root, list(lo["target_modules"]), int(lo["rank"]), float(lo["alpha"]), float(lo["dropout"]))
+            lora.freeze_all_but_lora(root, bool(ft["unfreeze_output_head"]), unfreeze_modules=blocks)
+            if not any(p.requires_grad for p in root.parameters()):
+                raise ValueError("finetune.enabled=true 但没有任何可训参数：lora.target_modules 为空、unfreeze_output_head=false、"
+                                 "unfreeze_modules 为空——至少开一项（只想零样本请设 finetune.enabled=false）")
+            # 可训整块参数（output_head、unfreeze_modules）的预训练值留一份，WiSE-FT 插值要用；必须在加载微调权重之前取
+            self._dense_pre = {n: p.detach().clone() for n, p in root.named_parameters()
+                               if p.requires_grad and not lora._is_lora_name(n)}
             wp = Path(str(self.cfg["train"]["weights_path"]))
             if wp.exists():
                 load_weights(self, wp)
@@ -416,23 +425,24 @@ class TransformersAdaptedM5Model(nn.Module):
         self.backbone.eval()               # LoRA 的 dropout 默认 train 态：落回推理态，训练脚本显式 .train()
 
     def wise(self, alpha: float) -> None:
-        """W2 WiSE-FT（评估用，可反复调）：LoRA 增量 × alpha，output_head = alpha·微调 + (1−alpha)·预训练。
-        alpha=1 = 原微调结果，alpha=0 = 零样本。第一次调用时把当前（微调后）的 head 存为插值端点。"""
+        """W2 WiSE-FT（评估用，可反复调）：LoRA 增量 × alpha，可训整块参数（output_head、unfreeze_modules）=
+        alpha·微调 + (1−alpha)·预训练。alpha=1 = 原微调结果，alpha=0 = 零样本。第一次调用时把当前（微调后）的值存为插值端点。"""
         alpha = float(alpha)
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"WiSE alpha 必须在 [0, 1]（得到 {alpha}）")
         lora = _dep("lora")
-        if getattr(self, "backbone", None) is None or not hasattr(self, "_head_pre"):
-            raise ValueError("WiSE 只适用于挂了 LoRA 的模型（finetune.enabled=true）；零样本 run 没有可插值的增量")
-        head = self.backbone.model.output_head
-        if not hasattr(self, "_head_ft"):
-            self._head_ft = {k: v.detach().clone() for k, v in head.state_dict().items()}
+        if getattr(self, "backbone", None) is None or not hasattr(self, "_dense_pre"):
+            raise ValueError("WiSE 只适用于微调过的模型（finetune.enabled=true：LoRA / head / 解冻块）；零样本 run 没有可插值的增量")
+        params = dict(self.backbone.model.named_parameters())
+        if not hasattr(self, "_dense_ft"):
+            self._dense_ft = {n: params[n].detach().clone() for n in self._dense_pre}
         for m in self.backbone.modules():
             if isinstance(m, lora.LoRALinear):
                 m._scaling_ft = getattr(m, "_scaling_ft", m.scaling)
                 m.scaling = alpha * m._scaling_ft
-        head.load_state_dict({k: alpha * self._head_ft[k] + (1.0 - alpha) * self._head_pre[k].to(self._head_ft[k].device)
-                              for k in self._head_ft})
+        with torch.no_grad():
+            for n, ft_val in self._dense_ft.items():
+                params[n].copy_(alpha * ft_val + (1.0 - alpha) * self._dense_pre[n].to(ft_val.device))
         self.wise_alpha = alpha
 
     # ================================================================== full 模式：推理 / 决策 / 损失

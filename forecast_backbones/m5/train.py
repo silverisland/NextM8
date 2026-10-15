@@ -385,6 +385,7 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
             "alpha": float(lo["alpha"]) if on else float("nan"),
             "target_modules": "+".join(lo["target_modules"]) if on else "",
             "unfreeze_head": bool(ft["unfreeze_output_head"]) and on,
+            "unfreeze_modules": "+".join(ft.get("unfreeze_modules") or []) if on else "",
             "n_trainable": model.n_params(), "lr": float(cfg["train"]["schedule"]["lr"]),
             "derived": "+".join(k for k, v in cfg["features"]["derived"].items() if v),
             "cs_ceiling": float("nan") if ratio is None else float(ratio),

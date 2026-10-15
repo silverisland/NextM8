@@ -1,0 +1,8 @@
+# 第 6 阶段·全量微调（W5）：同 s6_full_ft_lr1e6，lr 1e-5
+finetune:
+  lora: {target_modules: []}
+  unfreeze_modules: [pre_transformer_resblock, transformer_stack]
+train:
+  schedule: {lr: 1.0e-5}
+  ema_decay: 0.998
+  early_stop: {smooth_k: 3}

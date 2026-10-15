@@ -78,3 +78,14 @@ def test_variants_explicit_gpus_per_job(tmp_path):
     r = subprocess.run(["bash", str(SH[1]), "--dry_run", "--runs_base", str(tmp_path), "--variants", "l1_lora_r8",
                         "--gpus_per_job", "3", *EIGHT], capture_output=True, text=True, cwd=ROOT)
     assert r.returncode != 0 and "整除" in r.stderr                        # 3 卡除不尽全局 batch 16
+
+
+def test_variants_skip_decision_only_yamls(tmp_path):
+    head, slots = _plan(tmp_path, "--variants", "d2_pstar_point,g2_cs_ceiling,l1_lora_r8", *EIGHT)
+    assert head == "PLAN gpus_per_job=8 slots=1 jobs=1" and slots["0"][1] == ["l1_lora_r8"]
+    head, slots = _plan(tmp_path, *EIGHT)                                    # 不给 --variants：目录下全部，只动决策层的照样跳过
+    names = [n for _, js in slots.values() for n in js]
+    assert "d2_pstar_point" not in names and "g2_cs_ceiling" not in names and "s2_lora_var_resblock" in names
+    r = subprocess.run(["bash", str(SH[1]), "--dry_run", "--runs_base", str(tmp_path), "--variants", "d2_pstar_point", *EIGHT],
+                       capture_output=True, text=True, cwd=ROOT)
+    assert r.returncode != 0 and "没有要训练的任务" in r.stderr

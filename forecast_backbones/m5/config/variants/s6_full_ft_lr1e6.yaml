@@ -1,0 +1,9 @@
+# 第 6 阶段·全量微调（W5）：不挂 LoRA，整块解冻 20 层 transformer + 输入残差块 + head（≈330M 全可训），
+# lr 1e-6（文献里全量微调只有在极小 lr 下才赢 LoRA）+ EMA 0.998 + smooth_k 3；权重文件约 1.3GB
+finetune:
+  lora: {target_modules: []}
+  unfreeze_modules: [pre_transformer_resblock, transformer_stack]
+train:
+  schedule: {lr: 1.0e-6}
+  ema_decay: 0.998
+  early_stop: {smooth_k: 3}

@@ -1,0 +1,10 @@
+# 第 6 阶段·部分微调（W5）：只解冻首尾各两层（0、1、18、19）+ 输入残差块 + head（≈68M）；
+# 剪枝研究发现 TSFM 里最重要的是首尾层。lr 1e-5 + EMA 0.998 + smooth_k 3
+finetune:
+  lora: {target_modules: []}
+  unfreeze_modules: [pre_transformer_resblock, transformer_stack.layers.0, transformer_stack.layers.1,
+                     transformer_stack.layers.18, transformer_stack.layers.19]
+train:
+  schedule: {lr: 1.0e-5}
+  ema_decay: 0.998
+  early_stop: {smooth_k: 3}

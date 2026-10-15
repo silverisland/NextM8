@@ -40,7 +40,10 @@ finetune:
     alpha: 16
     dropout: 0.05
     target_modules: [query_proj, key_proj, value_proj, out_proj]
+    # 普通名字按模块名尾段匹配；'re:' 开头按完整路径 fullmatch（如 're:.*\.var_attn\.(query|key|value|out)_proj'）；
+    # 空列表 = 不挂 LoRA（只训 head / unfreeze_modules）
   unfreeze_output_head: true
+  unfreeze_modules: []           # 整块解冻（全参数可训），如 [pre_transformer_resblock]
 train:
   schedule:
     lr: 1.0e-4

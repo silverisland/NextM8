@@ -24,6 +24,24 @@ GPU 自动检测、按任务数平分：上面 4 个任务（z0 与种子无关�
 每卡 = 全局 / 卡数，所以卡数不同的 run 配方相同、分数可比；summary 里 `batch_global` / `n_gpus` 两列记着。
 一次调用默认占满所有卡，不要同时开两个（要并发就用 `--gpus` 把卡分开）。
 
+## 实验变体（`config/variants/`，每个只和 l1 差一处，3 种子起跑）
+
+| 变体 | 改什么 | 回答的问题 |
+|---|---|---|
+| `s2_lr3e5_ema` / `s2_lr1e5_ema` / `s2_lr1e4_ema` | lr 3e-5 / 1e-5 / 1e-4 + EMA 0.998 + smooth_k 3 | 训练协议：学习率与 EMA 值多少 |
+| `s2_head_only` | 不挂 LoRA，只训 output_head | 收益是不是只是输出再校准 |
+| `s2_frozen_head` | LoRA 同 l1，head 冻结 | head 要不要训 |
+| `s2_lora_resblock` | l1 + 输入残差块三个层 | NWP 前瞻入口要不要适配 |
+| `s2_probe_resblock` | 不挂 LoRA，整块解冻输入残差块 + head | TimesFM 论文的「LP」够不够 |
+| `s2_lora_var_resblock` | LoRA 只挂 var_attn + 输入残差块 + head | 新主候选：只改 NWP→功率通路、护住日形 |
+| `s2_lora_var_only` / `s2_lora_seq_only` | 只挂跨变量 / 只挂时间注意力 | 收益在哪条通路 |
+| `s6_all_linear` / `s6_lora_vo_only` | LoRA 挂全部线性层 / 只挂 v、o | 容量 |
+| `s6_full_ft_lr1e6` / `s6_full_ft_lr1e5` | 全量微调（整块解冻 transformer_stack + 残差块 + head） | 全量微调在极小 lr 下能否赢 LoRA |
+| `s6_partial_ends` | 只解冻首尾各两层 + 残差块 + head，lr 1e-5 | 部分微调 |
+
+LoRA 靶点：普通名字按模块名尾段匹配，`re:` 开头按完整路径匹配（如 `re:.*\.var_attn\.(query|key|value|out)_proj`），空列表 = 不挂 LoRA。
+`finetune.unfreeze_modules` 整块解冻（全参数可训，权重文件一起存）。只含 `decision:` 段的变体（d2 / g2）调度脚本自动跳过，评估时用。
+
 ## 免训练旋钮（不重训，同一批 checkpoint 上比较）
 
     bash eval_shell/eval_m5.sh --runs <run> --test <parquet> --point p_star \

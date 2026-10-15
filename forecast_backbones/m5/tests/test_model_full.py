@@ -188,3 +188,55 @@ def test_decide_applies_spread_and_linear_tail_from_config(tmp_path, tiny_ckpt_d
     dec = copy.deepcopy(base); dec["point"]["tail"] = "linear"
     _, _, _, ps2, _ = m.decide(q, night, pc, cap, dec)
     assert (ps2 < ps0).all()
+
+
+def _lora_paths(m):
+    return sorted(n for n, x in m.backbone.model.named_modules() if isinstance(x, LoRALinear))
+
+
+def test_var_attn_regex_targets_only_cross_variate_attention(tmp_path, tiny_ckpt_dir):
+    """W4：re: 靶点只挂 var_attn 的 q/k/v/o（加输入残差块的三个层），seq_attn / FFN 不挂。"""
+    m = _model(tmp_path, tiny_ckpt_dir, finetune={"lora": {"target_modules": [
+        r"re:.*\.var_attn\.(query|key|value|out)_proj", "hidden_layer", "output_layer", "residual_layer"]}})
+    paths = _lora_paths(m)
+    assert paths and all(".var_attn." in p or p.startswith("pre_transformer_resblock.") for p in paths)
+    assert sum(p.startswith("pre_transformer_resblock.") for p in paths) == 3
+    assert not any(".seq_attn." in p for p in paths)
+
+
+def test_head_only_and_resblock_probe_train_the_right_params(tmp_path, tiny_ckpt_dir, batch):
+    """W3a：靶点为空 = 只训 output_head；W3d：再整块解冻输入残差块。两者都不挂 LoRA，能存能读、读回输出一致。"""
+    head = _model(tmp_path, tiny_ckpt_dir, finetune={"lora": {"target_modules": []}})
+    assert _lora_paths(head) == []
+    n_head = sum(p.numel() for p in head.backbone.model.output_head.parameters())
+    assert head.n_params() == n_head
+    probe = _model(tmp_path, tiny_ckpt_dir, finetune={"lora": {"target_modules": []},
+                                                        "unfreeze_modules": ["pre_transformer_resblock"]})
+    n_res = sum(p.numel() for p in probe.backbone.model.pre_transformer_resblock.parameters())
+    assert probe.n_params() == n_head + n_res
+    with torch.no_grad():
+        for p in probe.backbone.model.pre_transformer_resblock.parameters():
+            p.add_(0.01)
+        want = probe(batch["batch_dict"]).aux["quantiles"]
+    w = tmp_path / "probe.safetensors"
+    save_weights(probe, w)
+    back = _model(tmp_path, tiny_ckpt_dir, finetune={"lora": {"target_modules": []}, "unfreeze_modules": ["pre_transformer_resblock"]},
+                  train={"weights_path": str(w)})
+    assert back.weights_loaded
+    with torch.no_grad():
+        assert torch.allclose(back(batch["batch_dict"]).aux["quantiles"], want, atol=1e-6)
+    with pytest.raises(ValueError, match="可训"):
+        _model(tmp_path, tiny_ckpt_dir, finetune={"lora": {"target_modules": []}, "unfreeze_output_head": False})
+    with pytest.raises(ValueError, match="unfreeze_modules"):
+        _model(tmp_path, tiny_ckpt_dir, finetune={"unfreeze_modules": ["no_such_block"]})
+
+
+def test_wise_also_blends_unfrozen_modules(tmp_path, tiny_ckpt_dir, batch):
+    bd = batch["batch_dict"]
+    probe = _model(tmp_path, tiny_ckpt_dir, finetune={"lora": {"target_modules": []}, "unfreeze_modules": ["pre_transformer_resblock"]})
+    zs = _model(tmp_path, tiny_ckpt_dir, finetune={"enabled": False})
+    with torch.no_grad():
+        for p in probe.backbone.model.pre_transformer_resblock.parameters():
+            p.add_(0.05)
+        probe.wise(0.0)
+        assert torch.allclose(probe(bd).aux["quantiles"], zs(bd).aux["quantiles"], atol=1e-5)

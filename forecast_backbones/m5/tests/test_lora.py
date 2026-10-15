@@ -90,3 +90,42 @@ def test_dropout_only_affects_lora_branch_in_train_mode():
     x = torch.randn(4, 8); m.train()
     y_a, y_b = m(x), m(x)
     assert torch.allclose(y_a, y_b)          # B=0 时 dropout 作用在零分支上，输出仍确定
+
+
+def test_regex_targets_match_full_path_and_empty_targets_inject_nothing():
+    """'re:' 开头的靶点按完整模块路径 fullmatch（可只挂某一层 / 某类注意力）；普通靶点仍按尾段；空列表不挂、不报错。"""
+    m = _Toy()
+    hits = inject_lora(m, [r"re:layers\.0\.(query|key)_proj"], rank=2, alpha=4, dropout=0.0)
+    assert sorted(hits) == ["layers.0.key_proj", "layers.0.query_proj"]
+    assert not isinstance(m.layers[1].query_proj, LoRALinear)
+    assert inject_lora(_Toy(), [], rank=2, alpha=4, dropout=0.0) == []
+    with pytest.raises(ValueError, match="命中"):
+        inject_lora(_Toy(), [r"re:nothing\..*"], rank=2, alpha=4, dropout=0.0)
+
+
+def test_unfrozen_modules_are_trained_saved_and_loaded():
+    """unfreeze_modules 里的整块参数可训，lora_state_dict 一起存；读回时按允许前缀校验，缺键 / 多余键都报错。"""
+    torch.manual_seed(0)
+    m = _Toy()
+    inject_lora(m, ["query_proj"], rank=2, alpha=4, dropout=0.0)
+    freeze_all_but_lora(m, unfreeze_output_head=True, unfreeze_modules=["layers.1.ff0"])
+    tr = {n for n, p in m.named_parameters() if p.requires_grad}
+    assert {"layers.1.ff0.weight", "layers.1.ff0.bias", "output_head.weight"} <= tr and "layers.0.ff0.weight" not in tr
+    sd = lora_state_dict(m)
+    assert "layers.1.ff0.weight" in sd and "layers.0.ff0.weight" not in sd
+    with torch.no_grad():
+        m.layers[1].ff0.weight.add_(1.0)
+    sd = lora_state_dict(m)
+    fresh = _Toy(); inject_lora(fresh, ["query_proj"], rank=2, alpha=4, dropout=0.0)
+    load_lora_state_dict(fresh, sd, allowed_prefixes=["output_head", "layers.1.ff0"])
+    assert torch.equal(fresh.layers[1].ff0.weight, m.layers[1].ff0.weight)
+    with pytest.raises(ValueError, match="unexpected"):
+        load_lora_state_dict(_with_lora(), sd)                                  # 不允许 layers.1.ff0 前缀
+    with pytest.raises(ValueError, match="缺"):
+        load_lora_state_dict(_with_lora(), {k: v for k, v in sd.items() if not k.startswith("layers.1.ff0")},
+                             allowed_prefixes=["output_head", "layers.1.ff0"])
+
+
+def _with_lora():
+    t = _Toy(); inject_lora(t, ["query_proj"], rank=2, alpha=4, dropout=0.0)
+    return t

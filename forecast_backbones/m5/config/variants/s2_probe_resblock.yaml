@@ -1,0 +1,4 @@
+# 第 2 阶段·定位对照（W3d）：不挂 LoRA，整块解冻输入残差块（2.13M）+ output_head = TimesFM 论文的「LP」设置
+finetune:
+  lora: {target_modules: []}
+  unfreeze_modules: [pre_transformer_resblock]
