@@ -8,6 +8,7 @@ build_training_args：train.py 用的 HF TrainingArguments（与 M8 相同）。
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 
 import numpy as np
@@ -114,6 +115,14 @@ def _evaluate_full(model, test_dataset, HF_collate_fn) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def per_device_batch(schedule: dict) -> int:
+    """train.schedule.batch_size 是全局 batch（所有卡合计）：每卡 = batch_size / WORLD_SIZE，卡数变了配方不变。"""
+    gb, world = int(schedule["batch_size"]), int(os.environ.get("WORLD_SIZE") or 1)   # accelerate launch / torchrun 建进程组前就设好
+    if gb % world:
+        raise ValueError(f"train.schedule.batch_size={gb} 是全局 batch，必须能被卡数 {world} 整除（换 --gpus 的卡数，或换 --batch_size）")
+    return gb // world
+
+
 def build_training_args(cfg: dict, out_dir, max_steps=None):
     """max_steps：None = 用 train.schedule.max_steps；0（或配置里 null）= 不限步数，按 epochs_max 训。"""
     from transformers import TrainingArguments
@@ -124,7 +133,7 @@ def build_training_args(cfg: dict, out_dir, max_steps=None):
     fp16 = str(s.get("precision", "fp32")) == "fp16" and cuda
     eval_kw = "eval_strategy" if "eval_strategy" in inspect.signature(TrainingArguments.__init__).parameters else "evaluation_strategy"
     return TrainingArguments(
-        output_dir=str(Path(out_dir) / "hf"), per_device_train_batch_size=int(s["batch_size"]),
+        output_dir=str(Path(out_dir) / "hf"), per_device_train_batch_size=per_device_batch(s),
         num_train_epochs=float(s["epochs_max"]), learning_rate=float(s["lr"]), weight_decay=float(s["weight_decay"]),
         max_grad_norm=float(s["grad_clip"]), bf16=bf16, fp16=fp16, use_cpu=not cuda,
         lr_scheduler_type="cosine", warmup_steps=int(s.get("warmup_steps", 0)),

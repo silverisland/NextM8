@@ -99,6 +99,7 @@ DEFAULT_CFG: dict = {
         "unfreeze_output_head": True,
     },
     "train": {
+        # batch_size：全局 batch（所有卡合计），每卡 = batch_size / 卡数，须整除；单卡时与旧口径相同
         "schedule": {"lr": 1.0e-4, "weight_decay": 0.01, "batch_size": 16, "max_steps": 4000, "epochs_max": 10,
                      "warmup_steps": 0, "grad_clip": 1.0, "precision": "fp32", "logging_steps": 20,
                      "eval_every_steps": 250, "sampling": "random", "progress_bar": True, "num_workers": 0},

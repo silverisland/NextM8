@@ -2,7 +2,8 @@
 #
 # train_m5.sh —— M5（TimesFM-3 + LoRA 微调；finetune.enabled=false 时只做零样本打分）单个配置的训练脚本。
 # 与 train_m8.sh 同一套约定：同一个 python 与 LD_LIBRARY_PATH、同一份切分目录、accelerate launch、配置只改运行时副本。
-# 底座 ~200M 参数只训 LoRA + output_head；V100 用 fp32，显存不够把 --batch_size 降到 8。
+# 底座 ~330M 参数只训 LoRA + output_head；V100 用 fp32。batch_size 是全局 batch（所有卡合计），每卡 = batch_size / 卡数，
+# 卡数变了配方不变；显存不够就多给卡（每卡变小），或把 --batch_size 降到 8。
 #
 # 用法：
 #   bash train_m5.sh --splits_dir data/splits/m8_v1 --gpus 0                                              # 默认 = l1 LoRA 基线
@@ -46,7 +47,7 @@ usage() {
   --gpu <id>               同 --gpus <id>
   --max_steps <n>          覆盖 train.schedule.max_steps；0 = 不限（按 epochs_max）
   --eval_every <n>         覆盖 train.schedule.eval_every_steps
-  --batch_size <n>         覆盖 train.schedule.batch_size（每张卡）
+  --batch_size <n>         覆盖 train.schedule.batch_size（全局 batch，所有卡合计；须能被卡数整除）
   --precision <fp32|bf16>  训练精度（默认 fp32；V100 不支持 bf16）
   --tag <name>             写进 reports/summary.csv 的变体名（默认取配置 run.tag）
   --seed <n>               覆盖 run.seeds（模型初始化 + 数据顺序 + 增强随机数）
@@ -128,9 +129,9 @@ if [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
     echo "❌ 产物目录已存在且非空: ${RUN_DIR}（换 --run_id，或加 --overwrite）" >&2; exit 1; fi
 fi
 
-"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" <<'PYEOF'
+"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" "$NP" <<'PYEOF'
 import sys, yaml, os
-src, dst, precision, batch_size, eval_every, tag, seed = sys.argv[1:8]
+src, dst, precision, batch_size, eval_every, tag, seed, n_proc = sys.argv[1:9]
 cfg = yaml.safe_load(open(src, encoding="utf-8")) or {}
 sch = cfg.setdefault("train", {}).setdefault("schedule", {})
 sch["precision"] = precision
@@ -138,6 +139,9 @@ if batch_size: sch["batch_size"] = int(batch_size)
 if eval_every: sch["eval_every_steps"] = int(eval_every)
 cfg.setdefault("run", {})["tag"] = tag
 if seed != "": cfg["run"]["seeds"] = [int(seed)]
+gb = int(sch.get("batch_size") or 16)                     # 变体没写就是默认 16（config.py DEFAULT_CFG）
+if gb % int(n_proc):
+    print(f"❌ 全局 batch {gb} 不能被卡数 {n_proc} 整除：换 --gpus 的卡数，或换 --batch_size", file=sys.stderr); sys.exit(4)
 yaml.safe_dump(cfg, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 meta = (cfg.get("dataset") or {}).get("station_meta", "forecast_backbones/m5/station_meta.csv")
 print(f"STATION_META={meta}")
@@ -145,6 +149,7 @@ sys.exit(0 if os.path.exists(meta) else 3)
 PYEOF
 RC=$?
 if [ $RC -eq 3 ]; then echo "❌ dataset.station_meta 路径不存在（见上一行）；请先填好站表" >&2; rm -f "$TMP_CFG"; exit 1
+elif [ $RC -eq 4 ]; then rm -f "$TMP_CFG"; exit 1
 elif [ $RC -ne 0 ]; then echo "❌ 生成运行时配置失败" >&2; rm -f "$TMP_CFG"; exit 1; fi
 
 echo "=============================================================="

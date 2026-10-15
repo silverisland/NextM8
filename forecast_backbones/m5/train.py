@@ -390,7 +390,8 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
             "cs_ceiling": float("nan") if ratio is None else float(ratio),
             "ema_decay": float("nan") if cfg["train"].get("ema_decay") is None else float(cfg["train"]["ema_decay"]),
             "smooth_k": int(cfg["train"]["early_stop"].get("smooth_k", 1) or 1),
-            "n_val_rows": n_val, "n_train_rows": n_train}
+            "n_val_rows": n_val, "n_train_rows": n_train,
+            "batch_global": int(cfg["train"]["schedule"]["batch_size"]), "n_gpus": _dist.world_size()}
 
 
 def _zero_shot_report(model, ds_val, collate, train_cfg, cfg, tag, out, report_dir, n_train) -> dict:
@@ -490,7 +491,7 @@ def train_m5(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
                f"验证{f'每 {eval_every} 步' if eval_every else '每个 epoch 末'}（含第 0 步零样本），早停指标 "
                f"{cfg['train']['early_stop']['metric']}，patience={cfg['train']['early_stop']['patience']}")
         print(f"[m5] 训练集站 {len(known)} 个；train={len(ds_train)} val={0 if ds_val is None else len(ds_val)} rows；"
-              f"每卡 batch {int(args.per_device_train_batch_size)}；预算 {args.max_steps} 步；{how}；采样 {sampling}；device={args.device}", flush=True)
+              f"全局 batch {int(sch['batch_size'])}（{_dist.world_size()} 卡 × 每卡 {int(args.per_device_train_batch_size)}）；预算 {args.max_steps} 步；{how}；采样 {sampling}；device={args.device}", flush=True)
     if not finetune:
         return _zero_shot_report(model, ds_val, collate, train_cfg, cfg, tag, out, report_dir, len(ds_train)) if main else {}
     best_path = out / WEIGHTS_FILE

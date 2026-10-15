@@ -92,3 +92,19 @@ def test_evaluate_model_full_mode_schema(tmp_path, tiny_ckpt_dir):
     assert {"timestamp_win", "station", "station_id", "cap", "observe_power_predict", "observe_power_future", "p_star",
             "median", "night", "elev_deg", "p_clear", "var_bin", "var_signal", "degraded", *QUANTILE_COLS} <= set(res.columns)
     assert set(res["cap"]) == {500.0, 300.0} and set(res["station"]) == {"S1001", "S1002"}
+
+
+def test_batch_size_is_global_and_split_across_processes(tmp_path, monkeypatch):
+    """train.schedule.batch_size 是全局 batch：每卡 = batch_size / WORLD_SIZE，卡数变了配方不变；除不尽直接报错。"""
+    import copy
+    from forecast_backbones.m5.config import DEFAULT_CFG
+    from forecast_backbones.m5.transformer_trainer import build_training_args, per_device_batch
+    sch = {"batch_size": 16}
+    for ws, per in [(1, 16), (2, 8), (8, 2)]:
+        monkeypatch.setenv("WORLD_SIZE", str(ws))
+        assert per_device_batch(sch) == per
+    monkeypatch.setenv("WORLD_SIZE", "3")
+    with pytest.raises(ValueError, match="整除"):
+        per_device_batch(sch)
+    monkeypatch.delenv("WORLD_SIZE")                                     # 单进程：HF 参数里每卡 = 全局
+    assert build_training_args(copy.deepcopy(DEFAULT_CFG), tmp_path).per_device_train_batch_size == 16

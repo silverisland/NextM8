@@ -45,7 +45,7 @@ train:
   schedule:
     lr: 1.0e-4
     weight_decay: 0.01
-    batch_size: 16
+    batch_size: 16                 # 全局 batch（所有卡合计）；每卡 = batch_size / 卡数，须整除
     max_steps: 4000
     epochs_max: 10
     warmup_steps: 0
