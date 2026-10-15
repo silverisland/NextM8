@@ -1,0 +1,3 @@
+# 第 5 阶段·容量：LoRA rank 4（alpha = 2·rank = 8，与 l1 的缩放 alpha/rank = 2 相同）；靶点同 l1
+finetune:
+  lora: {rank: 4, alpha: 8}

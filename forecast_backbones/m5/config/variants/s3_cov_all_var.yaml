@@ -1,0 +1,12 @@
+# 第 3 阶段·组合上限探针：四路 NWP（+ Solargis）+ 几何协变量（太阳高度角、晴空功率）+ LoRA 挂 var_attn + 输入残差块；
+# 不是单因素对照，用来看「输入 + 通路」叠起来的上限，赢了再拆
+features:
+  past_future:
+    - [general_ghi, general_ghi_predict]
+    - [general_temp, general_temp_predict]
+    - [GHI_solargis, ghi_solargis_predict]
+    - [temp_solargis, temp_solargis_predict]
+  derived: {solar_elevation: true, clear_sky_power: true}
+finetune:
+  lora:
+    target_modules: ['re:.*\.var_attn\.(query|key|value|out)_proj', hidden_layer, output_layer, residual_layer]

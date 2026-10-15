@@ -90,6 +90,14 @@ def test_validation_errors():
     ("s6_full_ft_lr1e5", lambda c: c["train"]["schedule"]["lr"] == 1e-5 and "transformer_stack" in c["finetune"]["unfreeze_modules"]),
     ("s6_partial_ends", lambda c: "transformer_stack.layers.19" in c["finetune"]["unfreeze_modules"]
                                   and "transformer_stack" not in c["finetune"]["unfreeze_modules"]),
+    ("s3_solargis_cov", lambda c: c["features"]["past_future"][2:] == [["GHI_solargis", "ghi_solargis_predict"],
+                                                                        ["temp_solargis", "temp_solargis_predict"]]
+                                  and c["finetune"]["lora"]["target_modules"] == ["query_proj", "key_proj", "value_proj", "out_proj"]),
+    ("s3_cov_all_var", lambda c: len(c["features"]["past_future"]) == 4 and c["features"]["derived"]["clear_sky_power"]
+                                 and c["finetune"]["lora"]["target_modules"][0].startswith("re:")),
+    ("s5_rank4", lambda c: (c["finetune"]["lora"]["rank"], c["finetune"]["lora"]["alpha"]) == (4, 8)),
+    ("s5_rank16", lambda c: (c["finetune"]["lora"]["rank"], c["finetune"]["lora"]["alpha"]) == (16, 32)),
+    ("s5_rank32", lambda c: (c["finetune"]["lora"]["rank"], c["finetune"]["lora"]["alpha"]) == (32, 64)),
 ])
 
 def test_variants_load(name, check):
@@ -107,5 +115,6 @@ def test_every_variant_yaml_is_covered_by_a_test():
     covered = {"z0_zeroshot", "l1_lora_r8", "d2_pstar_point", "g1_solar_cov", "g2_cs_ceiling", "s2_lr3e5_ema", "s2_lr1e4_ema",
                "s2_lr1e5_ema", "s2_head_only", "s2_frozen_head", "s2_lora_resblock", "s2_probe_resblock", "s2_lora_var_resblock",
                "s2_lora_var_only", "s2_lora_seq_only", "s6_all_linear", "s6_lora_vo_only",
-               "s6_full_ft_lr1e6", "s6_full_ft_lr1e5", "s6_partial_ends"}
+               "s6_full_ft_lr1e6", "s6_full_ft_lr1e5", "s6_partial_ends",
+               "s3_solargis_cov", "s3_cov_all_var", "s5_rank4", "s5_rank16", "s5_rank32"}
     assert names == covered, names ^ covered

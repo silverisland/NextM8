@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import torch
+from pathlib import Path
 
 pytest.importorskip("timesfm3")
 from forecast_backbones.m5.transformer_models import TransformersAdaptedM5Model, save_weights
@@ -240,3 +241,27 @@ def test_wise_also_blends_unfrozen_modules(tmp_path, tiny_ckpt_dir, batch):
             p.add_(0.05)
         probe.wise(0.0)
         assert torch.allclose(probe(bd).aux["quantiles"], zs(bd).aux["quantiles"], atol=1e-5)
+
+
+def test_combo_variant_feeds_four_nwp_plus_geometry_and_trains(tmp_path, tiny_ckpt_dir, batch):
+    """s3_cov_all_var 的形状：四路 NWP（第 3、4 路取自 Solargis 列）+ 两路几何 = 6 通道；var_attn + 残差块 LoRA 有梯度。"""
+    from forecast_backbones.m5.config import raw_override
+    over = raw_override(str(Path(__file__).resolve().parents[1] / "config" / "variants" / "s3_cov_all_var.yaml"))
+    bd, labels = dict(batch["batch_dict"]), batch["labels"]
+    bd["GHI_solargis"], bd["ghi_solargis_predict"] = bd["general_ghi"] * 0.9, bd["general_ghi_predict"] * 0.9
+    bd["temp_solargis"], bd["temp_solargis_predict"] = bd["general_temp"] + 1.0, bd["general_temp_predict"] + 1.0
+    m = _model(tmp_path, tiny_ckpt_dir, features=over["features"], finetune=over["finetune"])
+    seen = {}
+    orig = m.backbone.predict_quantiles
+
+    def spy(ctx, pf, po, **kw):
+        seen["pf"] = pf
+        return orig(ctx, pf, po, **kw)
+
+    m.backbone.predict_quantiles = spy
+    out = m(bd, labels)
+    assert seen["pf"].shape[1] == 6
+    out.loss.backward()
+    grads = [n for n, p in m.backbone.model.named_parameters() if p.grad is not None and p.grad.abs().sum() > 0]
+    assert any(".var_attn." in n for n in grads) and any(n.startswith("pre_transformer_resblock.") for n in grads)
+    assert not any(".seq_attn." in n for n in grads)

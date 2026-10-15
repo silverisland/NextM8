@@ -35,6 +35,9 @@ GPU 自动检测、按任务数平分：上面 4 个任务（z0 与种子无关�
 | `s2_probe_resblock` | 不挂 LoRA，整块解冻输入残差块 + head | TimesFM 论文的「LP」够不够 |
 | `s2_lora_var_resblock` | LoRA 只挂 var_attn + 输入残差块 + head | 新主候选：只改 NWP→功率通路、护住日形 |
 | `s2_lora_var_only` / `s2_lora_seq_only` | 只挂跨变量 / 只挂时间注意力 | 收益在哪条通路 |
+| `s3_solargis_cov` | 协变量 2 → 4 路（加 Solargis GHI / 温度，与 M8 j1 同） | 多一套 NWP 有没有用（测试 / 线上也要有这两对列） |
+| `s3_cov_all_var` | 四路 NWP + 几何协变量 + var_attn/残差块 LoRA | 组合上限探针（非单因素） |
+| `s5_rank4` / `s5_rank16` / `s5_rank32` | LoRA rank 4 / 16 / 32（alpha = 2·rank） | 容量 |
 | `s6_all_linear` / `s6_lora_vo_only` | LoRA 挂全部线性层 / 只挂 v、o | 容量 |
 | `s6_full_ft_lr1e6` / `s6_full_ft_lr1e5` | 全量微调（整块解冻 transformer_stack + 残差块 + head） | 全量微调在极小 lr 下能否赢 LoRA |
 | `s6_partial_ends` | 只解冻首尾各两层 + 残差块 + head，lr 1e-5 | 部分微调 |
