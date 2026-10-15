@@ -77,8 +77,10 @@ decision:
     by_step: []
     floor_ratio: 0.2
     tau_grid_step: 0.005
-    tail: flat
+    tail: flat                   # flat = p* 网格在 q0.1 / q0.9 之外平延；linear = 沿最外两档线性外推（钳 [0, cap]）
     shrink_factor: null
+    spread_lo: null              # 中位数以下离中位数的距离 × spread_lo（null = 不动）；在 physics_clip 之前做
+    spread_hi: null              # 中位数以上同理
 eval:
   batch_size: 64
   report_dir: ${run.out_dir}/reports

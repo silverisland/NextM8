@@ -10,6 +10,8 @@
 #   bash eval_m5.sh --runs runs/m5/m5_base/l1_lora_r8_s0 --test data/splits/m8_v1/valid.parquet
 #   bash eval_m5.sh --runs runs/m5/m5_base/l1_lora_r8_s0 --test data/splits/m8_v1/valid.parquet \
 #        --decision_yaml forecast_backbones/m5/config/variants/d2_pstar_point.yaml          # p*，不重训
+#   bash eval_m5.sh --runs runs/m5/m5_base/l1_lora_r8_s0 --test data/splits/m8_v1/valid.parquet --point p_star \
+#        --set point.tail=linear --set point.spread_lo=1.25 --wise_alpha 0.5          # O0 / T3 / W2，都不重训
 #   bash eval_m5.sh --runs runs/m5/m5_base/l1_lora_r8_s0,runs/m5/m5_base/l1_lora_r8_s1,runs/m5/m5_base/l1_lora_r8_s2 \
 #        --test "datasets/test/*.parquet" --full
 set -u
@@ -21,6 +23,8 @@ TEST=""
 OUT=""
 POINT=""
 DECISION_YAML=""
+SETS=()
+WISE=""
 GPU="0"
 BATCH_SIZE=""
 TAG=""
@@ -38,6 +42,8 @@ usage() {
   --out <dir>              输出目录（默认 单成员 <run>/eval_test，多成员 <父目录>/ensemble_eval）
   --point <rule>           覆盖决策点规则：median / p_star / p_star_l1（清空 by_step）
   --decision_yaml <yaml>   合并该 yaml 的 decision 段（如 config/variants/d2_pstar_point.yaml）
+  --set <段.键=值>         覆盖决策段的单个键，可多次（point.tail=linear / point.spread_lo=1.25 / point.default=p_star）
+  --wise_alpha <a>         WiSE-FT：LoRA 增量与 head 按 a∈[0,1] 向预训练插值（0 = 零样本；零样本 run 忽略）
   --gpu <id>               用哪张卡（默认 0）
   --batch_size <n>         推理 batch（默认配置 eval.batch_size）
   --tag <name>             写进 summary.csv 的名字
@@ -54,6 +60,8 @@ while [ $# -gt 0 ]; do
     --out)            OUT="$2";           shift 2 ;;
     --point)          POINT="$2";         shift 2 ;;
     --decision_yaml)  DECISION_YAML="$2"; shift 2 ;;
+    --set)            SETS+=("$2");       shift 2 ;;
+    --wise_alpha)     WISE="$2";          shift 2 ;;
     --gpu|--gpus)     GPU="$2";           shift 2 ;;
     --batch_size)     BATCH_SIZE="$2";    shift 2 ;;
     --tag)            TAG="$2";           shift 2 ;;
@@ -89,7 +97,12 @@ args=(--runs "${RUN_LIST[@]}" --test "$TEST" --device "$DEVICE")
 [ -n "$BATCH_SIZE" ] && args+=(--batch-size "$BATCH_SIZE")
 [ -n "$TAG" ] && args+=(--tag "$TAG")
 MODULE="forecast_backbones.m5.evaluate"
-if [ "$FULL" -eq 1 ]; then MODULE="forecast_backbones.m5.station_report"; args+=(--engine "$ENGINE"); fi
+if [ "$FULL" -eq 1 ]; then
+  if [ ${#SETS[@]} -gt 0 ] || [ -n "$WISE" ]; then echo "❌ --set / --wise_alpha 只支持快评（不加 --full）" >&2; exit 1; fi
+  MODULE="forecast_backbones.m5.station_report"; args+=(--engine "$ENGINE")
+fi
+for kv in ${SETS[@]+"${SETS[@]}"}; do args+=(--set "$kv"); done
+[ -n "$WISE" ] && args+=(--wise-alpha "$WISE")
 echo "=============================================================="
 echo "M5 测试集评估$([ "$FULL" -eq 1 ] && echo "（逐站完整，engine=$ENGINE）")   成员 ${#RUN_LIST[@]} 个   device=${DEVICE}${POINT:+   point=$POINT}${DECISION_YAML:+   decision=$DECISION_YAML}"
 echo "RUNS : ${RUNS}"

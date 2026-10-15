@@ -405,6 +405,8 @@ class TransformersAdaptedM5Model(nn.Module):
             lora.inject_lora(self.backbone.model, list(lo["target_modules"]), int(lo["rank"]), float(lo["alpha"]),
                              float(lo["dropout"]))
             lora.freeze_all_but_lora(self.backbone.model, bool(ft["unfreeze_output_head"]))
+            # 预训练 output_head 留一份（0.74M 参数），WiSE-FT 插值要用；必须在加载微调权重之前取
+            self._head_pre = {k: v.detach().clone() for k, v in self.backbone.model.output_head.state_dict().items()}
             wp = Path(str(self.cfg["train"]["weights_path"]))
             if wp.exists():
                 load_weights(self, wp)
@@ -412,6 +414,26 @@ class TransformersAdaptedM5Model(nn.Module):
         else:
             self.backbone.requires_grad_(False)
         self.backbone.eval()               # LoRA 的 dropout 默认 train 态：落回推理态，训练脚本显式 .train()
+
+    def wise(self, alpha: float) -> None:
+        """W2 WiSE-FT（评估用，可反复调）：LoRA 增量 × alpha，output_head = alpha·微调 + (1−alpha)·预训练。
+        alpha=1 = 原微调结果，alpha=0 = 零样本。第一次调用时把当前（微调后）的 head 存为插值端点。"""
+        alpha = float(alpha)
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"WiSE alpha 必须在 [0, 1]（得到 {alpha}）")
+        lora = _dep("lora")
+        if getattr(self, "backbone", None) is None or not hasattr(self, "_head_pre"):
+            raise ValueError("WiSE 只适用于挂了 LoRA 的模型（finetune.enabled=true）；零样本 run 没有可插值的增量")
+        head = self.backbone.model.output_head
+        if not hasattr(self, "_head_ft"):
+            self._head_ft = {k: v.detach().clone() for k, v in head.state_dict().items()}
+        for m in self.backbone.modules():
+            if isinstance(m, lora.LoRALinear):
+                m._scaling_ft = getattr(m, "_scaling_ft", m.scaling)
+                m.scaling = alpha * m._scaling_ft
+        head.load_state_dict({k: alpha * self._head_ft[k] + (1.0 - alpha) * self._head_pre[k].to(self._head_ft[k].device)
+                              for k in self._head_ft})
+        self.wise_alpha = alpha
 
     # ================================================================== full 模式：推理 / 决策 / 损失
     def _covariates(self, batch_dict: dict, ctx):
@@ -483,19 +505,19 @@ class TransformersAdaptedM5Model(nn.Module):
         dm = _dep("decision")
         dec = decision if decision is not None else self.cfg["decision"]
         ph, pt = dec["physics"], dec["point"]
-        if pt.get("tail", "flat") != "flat":
-            raise ValueError(f"decision.point.tail: only 'flat' is implemented (got {pt.get('tail')!r})")
+        tail = str(pt.get("tail") or "flat")
         nz, cn = bool(ph["night_zero"]), bool(ph.get("clip_negative", True))
         night_physics = night_fut if nz else np.zeros_like(night_fut)
         ratio = ph.get("clear_sky_cap_ratio")
-        q_cal = dm.physics_clip(dm.enforce_monotone(q_raw), night_physics, p_clear_fut, cap[:, None],
+        q_mono = dm.scale_spread(dm.enforce_monotone(q_raw), self.levels, pt.get("spread_lo"), pt.get("spread_hi"))
+        q_cal = dm.physics_clip(q_mono, night_physics, p_clear_fut, cap[:, None],
                                 None if ratio is None else float(ratio), bool(ph["capacity_cap"]),
                                 night_ceiling=nz, clip_negative=cn)
         shrink = float(pt.get("shrink_factor") or 1.0)
         point = dm.select_point(q_cal, self.levels, cap, pt["default"], list(pt.get("by_step") or ()), shrink,
-                                float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
+                                float(pt["floor_ratio"]), float(pt["tau_grid_step"]), tail)
         median = dm.level_value(q_cal, self.levels, 0.5)
-        pstar = dm.p_star(q_cal, self.levels, cap[:, None], float(pt["floor_ratio"]), float(pt["tau_grid_step"]))
+        pstar = dm.p_star(q_cal, self.levels, cap[:, None], float(pt["floor_ratio"]), float(pt["tau_grid_step"]), tail)
         return point, q_cal, median, pstar, night_physics
 
     def _forward_full(self, batch_dict: dict, labels=None) -> TransformersAdaptedModelOutput:

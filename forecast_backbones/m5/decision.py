@@ -10,19 +10,27 @@ MODEL_LEVELS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 CAL_LEVELS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99)
 
 
-def _interp_weights(levels, taus):
+TAILS = ("flat", "linear")
+
+
+def _interp_weights(levels, taus, tail: str = "flat"):
+    """tail="flat"：两端平延（最低 / 最高一档之外取端点值）；"linear"：沿最外两档的斜率线性外推（w 不钳到 [0,1]）。"""
+    if tail not in TAILS:
+        raise ValueError(f"decision.point.tail 只能是 {TAILS}（得到 {tail!r}）")
     lv = np.asarray(levels, float)
     idx = np.clip(np.searchsorted(lv, taus, side="right") - 1, 0, len(lv) - 2)
     lo, hi = idx, idx + 1
-    w = np.clip((taus - lv[lo]) / (lv[hi] - lv[lo]), 0.0, 1.0)      # 两端平延
+    w = (taus - lv[lo]) / (lv[hi] - lv[lo])
+    if tail == "flat":
+        w = np.clip(w, 0.0, 1.0)
     return lo, hi, w
 
 
-def quantile_grid(q, levels, step: float = 0.005) -> np.ndarray:
-    """[..., K] 分位 → [..., G] 等概率网格上的分位函数值（线性插值，尾部平延）。"""
+def quantile_grid(q, levels, step: float = 0.005, tail: str = "flat") -> np.ndarray:
+    """[..., K] 分位 → [..., G] 等概率网格上的分位函数值（档间线性插值；尾部按 tail 平延或线性外推，不钳位）。"""
     q = np.asarray(q, float)
     taus = np.arange(step / 2, 1.0, step)
-    lo, hi, w = _interp_weights(levels, taus)
+    lo, hi, w = _interp_weights(levels, taus, tail)
     return q[..., lo] * (1.0 - w) + q[..., hi] * w
 
 
@@ -37,14 +45,20 @@ def _cap_like(cap, grid: np.ndarray) -> np.ndarray:
     return np.broadcast_to(np.asarray(cap, float), grid.shape[:-1])[..., None]
 
 
-def p_star(q, levels, cap, floor_ratio: float = 0.2, step: float = 0.005) -> np.ndarray:
-    y = quantile_grid(q, levels, step)
+def _grid(q, levels, cap, step: float, tail: str) -> np.ndarray:
+    """p* 用的网格：线性外推时把外推出的值钳回 [0, cap]（平延时分位已被 physics_clip 钳过，原样返回、逐位不变）。"""
+    y = quantile_grid(q, levels, step, tail)
+    return np.clip(y, 0.0, _cap_like(cap, y)) if tail == "linear" else y
+
+
+def p_star(q, levels, cap, floor_ratio: float = 0.2, step: float = 0.005, tail: str = "flat") -> np.ndarray:
+    y = _grid(q, levels, cap, step, tail)
     w = 1.0 / np.maximum(y, floor_ratio * _cap_like(cap, y)) ** 2
     return (y * w).sum(-1) / w.sum(-1)
 
 
-def p_star_l1(q, levels, cap, floor_ratio: float = 0.2, step: float = 0.005) -> np.ndarray:
-    y = quantile_grid(q, levels, step)                       # 沿网格非降
+def p_star_l1(q, levels, cap, floor_ratio: float = 0.2, step: float = 0.005, tail: str = "flat") -> np.ndarray:
+    y = _grid(q, levels, cap, step, tail)                    # 沿网格非降
     w = 1.0 / np.maximum(y, floor_ratio * _cap_like(cap, y))
     cw = np.cumsum(w, axis=-1)
     k = (cw >= 0.5 * cw[..., -1:]).argmax(axis=-1)
@@ -66,6 +80,24 @@ def global_shrink_factor(y, p, cap, floor_ratio: float = 0.2) -> float:
 
 def enforce_monotone(q) -> np.ndarray:
     return np.sort(np.asarray(q, float), axis=-1)
+
+
+def scale_spread(q, levels, lo: float | None = None, hi: float | None = None) -> np.ndarray:
+    """T3 离散度缩放（中位数不动）：中位数以下各档 q̃ = m + lo·(q − m)，以上各档 q̃ = m + hi·(q − m)；None = 该侧不动。
+    p* 的权重 1/max(y,0.2C)² 压在低端，所以下尾宽度直接改 p*。缩放后越出 [0, cap] 的值交给随后的 physics_clip。"""
+    q = np.asarray(q, float)
+    if lo is None and hi is None:
+        return q
+    lv = np.asarray(levels, float)
+    m = level_value(q, levels, 0.5)[..., None]
+    out = q.copy()
+    for s, side in ((lo, lv < 0.5), (hi, lv > 0.5)):
+        if s is None:
+            continue
+        if not float(s) > 0:
+            raise ValueError(f"decision.point.spread_lo / spread_hi 必须 > 0（得到 {s}）")
+        out[..., side] = m + float(s) * (q[..., side] - m)
+    return out
 
 
 def physics_clip(q, night, p_clear, cap, clear_sky_cap_ratio: float | None = 1.05, capacity_cap: bool = True,
@@ -98,11 +130,12 @@ def physics_clip(q, night, p_clear, cap, clear_sky_cap_ratio: float | None = 1.0
     return q
 
 
-def _point_by_method(q, levels, cap_bt, method: str, shrink_factor: float, floor_ratio: float, step: float):
+def _point_by_method(q, levels, cap_bt, method: str, shrink_factor: float, floor_ratio: float, step: float,
+                     tail: str = "flat"):
     if method == "p_star":
-        return p_star(q, levels, cap_bt, floor_ratio, step)
+        return p_star(q, levels, cap_bt, floor_ratio, step, tail)
     if method == "p_star_l1":
-        return p_star_l1(q, levels, cap_bt, floor_ratio, step)
+        return p_star_l1(q, levels, cap_bt, floor_ratio, step, tail)
     if method == "median":
         return level_value(q, levels, 0.5)
     if method == "global_shrink":
@@ -113,7 +146,7 @@ def _point_by_method(q, levels, cap_bt, method: str, shrink_factor: float, floor
 
 
 def select_point(q, levels, cap, default: str, by_step=(), shrink_factor: float = 1.0,
-                 floor_ratio: float = 0.2, step: float = 0.005) -> np.ndarray:
+                 floor_ratio: float = 0.2, step: float = 0.005, tail: str = "flat") -> np.ndarray:
     """q [B,T,K] → [B,T]。by_step: [{'steps':[lo,hi), 'method':...}]，先匹配者胜；其余用 default。
     default 只在 by_step 规则未覆盖的步上计算（不对全部 T 都跑一遍再被覆盖丢弃）。"""
     q = np.asarray(q, float)
@@ -128,12 +161,12 @@ def select_point(q, levels, cap, default: str, by_step=(), shrink_factor: float 
         if sl.size == 0:
             continue
         out[:, sl] = _point_by_method(q[:, sl], levels, cap_bt[:, sl], rule["method"],
-                                      shrink_factor, floor_ratio, step)
+                                      shrink_factor, floor_ratio, step, tail)
         assigned[sl] = True
     remaining = np.flatnonzero(~assigned)
     if remaining.size:
         out[:, remaining] = _point_by_method(q[:, remaining], levels, cap_bt[:, remaining], default,
-                                             shrink_factor, floor_ratio, step)
+                                             shrink_factor, floor_ratio, step, tail)
     return out
 
 

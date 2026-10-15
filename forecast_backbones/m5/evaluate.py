@@ -69,8 +69,9 @@ def expand_paths(items) -> list[str]:
     return out
 
 
-def load_member(run_dir, device) -> TransformersAdaptedM5Model:
-    """train_m5 的产物目录 → 推理态模型。LoRA run 必须有 model.safetensors；零样本 run（finetune.enabled=false）没有权重文件。"""
+def load_member(run_dir, device, wise_alpha: float | None = None) -> TransformersAdaptedM5Model:
+    """train_m5 的产物目录 → 推理态模型。LoRA run 必须有 model.safetensors；零样本 run（finetune.enabled=false）没有权重文件。
+    wise_alpha（W2 WiSE-FT）：LoRA 增量 × alpha、head 与预训练 head 按 alpha 插值；零样本 run 忽略（本来就是 alpha=0）。"""
     run = Path(run_dir)
     cfg_path, w = run / CONFIG_FILE, run / WEIGHTS_FILE
     if not cfg_path.exists():
@@ -86,24 +87,35 @@ def load_member(run_dir, device) -> TransformersAdaptedM5Model:
     if not m.cfg["dataset"].get("known_stations"):
         warnings.warn(f"{cfg_path} 没有 known_stations：所有站都按已见站处理")
     m.to(device); m.eval()
+    if wise_alpha is not None and finetune:
+        m.wise(float(wise_alpha))
     return m
 
 
-def decision_override(base: dict, point: str | None = None, decision_yaml: str | None = None) -> dict:
-    """评估时覆盖决策规则：--decision-yaml 合并该 yaml 的 decision 段；--point 设 point.default 并清空 by_step。"""
+def decision_override(base: dict, point: str | None = None, decision_yaml: str | None = None, sets=None) -> dict:
+    """评估时覆盖决策规则（按此顺序）：--decision-yaml 合并该 yaml 的 decision 段；--point 设 point.default 并清空 by_step；
+    --set 段.键=值（可多个，值按 yaml 解析，如 point.tail=linear、point.spread_lo=1.25、physics.night_zero=true）。"""
     dec = copy.deepcopy(base)
     if decision_yaml:
         y = yaml.safe_load(Path(decision_yaml).read_text(encoding="utf-8")) or {}
         dec = deep_merge(dec, y.get("decision") or {})
     if point:
         dec["point"]["default"] = str(point); dec["point"]["by_step"] = []
+    for kv in sets or ():
+        key, sep, val = str(kv).partition("=")
+        if not sep or "." not in key:
+            raise ValueError(f"--set 要写成 段.键=值（如 point.tail=linear），得到 {kv!r}")
+        sec, k = key.split(".", 1)
+        dec.setdefault(sec, {})[k] = yaml.safe_load(val)
     return dec
 
 
 def describe_point(dec: dict) -> str:
     pt = dec["point"]
     steps = ";".join(f"{b['steps'][0]}-{b['steps'][1]}:{b['method']}" for b in (pt.get("by_step") or ()))
-    return pt["default"] + (f"[{steps}]" if steps else "")
+    extra = [f"tail={pt['tail']}"] if pt.get("tail", "flat") != "flat" else []
+    extra += [f"{k}={pt[k]}" for k in ("spread_lo", "spread_hi", "shrink_factor") if pt.get(k) is not None]
+    return pt["default"] + (f"[{steps}]" if steps else "") + (f"({','.join(extra)})" if extra else "")
 
 
 def run_inference(members, ds, idx, collate, decision: dict, batch_size: int, show: bool = True) -> pd.DataFrame:
@@ -151,11 +163,11 @@ def run_inference(members, ds, idx, collate, decision: dict, batch_size: int, sh
 
 def evaluate(runs, test_paths, out_dir=None, point: str | None = None, decision_yaml: str | None = None,
              issue_every_min: int = 60, batch_size: int | None = None, device: str | None = None,
-             tag: str | None = None, progress: bool = True) -> dict:
+             tag: str | None = None, progress: bool = True, decision_sets=None, wise_alpha: float | None = None) -> dict:
     t0 = time.time()
     runs = [str(r) for r in runs]
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    members = [load_member(r, device) for r in runs]
+    members = [load_member(r, device, wise_alpha) for r in runs]
     m0 = members[0]; cfg = m0.cfg
     out = Path(out_dir) if out_dir else (Path(runs[0]) / "eval_test" if len(runs) == 1 else Path(runs[0]).parent / "ensemble_eval")
     out.mkdir(parents=True, exist_ok=True); rep = out / "reports"; rep.mkdir(exist_ok=True)
@@ -167,7 +179,7 @@ def evaluate(runs, test_paths, out_dir=None, point: str | None = None, decision_
     idx = sorted(set(int(i) for i in scored_row_index(ds, st_col, ts_col)) | set(int(i) for i in issue_grid_row_index(ds, ts_col, issue_every_min)))
     if not idx:
         raise ValueError("测试集里没有可打分的起报行（10:00 行 / 整点行都没有）")
-    decision = decision_override(cfg["decision"], point, decision_yaml)
+    decision = decision_override(cfg["decision"], point, decision_yaml, decision_sets)
     bs = int(batch_size or cfg["eval"].get("batch_size", 256))
     print(f"[m5-eval] 成员 {len(members)} 个，测试文件 {len(paths)} 个，行 {len(ds)}，打分行 {len(idx)}，决策 {describe_point(decision)}，device={device}", flush=True)
     res = run_inference(members, ds, idx, functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True), decision, bs, progress)
@@ -180,6 +192,7 @@ def evaluate(runs, test_paths, out_dir=None, point: str | None = None, decision_
     summary = {"tag": tag, "nanwang_short_D+1": nw, "nanwang_seen": seen, "nanwang_unseen": unseen, "n_unseen_stations": n_unseen,
                "nrmse_pct": nrmse_pct(hourly), "nanwang_ultra_proxy": ultra_proxy_pct(hourly),
                "n_members": len(members), "point_rule": describe_point(decision),
+               "wise_alpha": float("nan") if wise_alpha is None else float(wise_alpha),
                "n_stations": int(table["station_id"].nunique()) if len(table) else 0, "n_station_days": int(table["n_days"].sum()) if len(table) else 0,
                "n_scored_rows": len(res), "eval_minutes": (time.time() - t0) / 60.0, "members": "|".join(runs), "test": "|".join(paths)}
     members_tab = pd.DataFrame()
@@ -213,13 +226,17 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="输出目录（默认 单成员 <run>/eval_test，多成员 <runs 的父目录>/ensemble_eval）")
     ap.add_argument("--point", default=None, help="覆盖 decision.point.default（median / p_star / p_star_l1），并清空 by_step")
     ap.add_argument("--decision-yaml", default=None, help="合并该 yaml 的 decision 段（如 config/variants/d2_pstar_point.yaml）")
+    ap.add_argument("--set", dest="sets", action="append", default=None,
+                    help="覆盖决策段的单个键：段.键=值，可多次（如 --set point.tail=linear --set point.spread_lo=1.25）")
+    ap.add_argument("--wise-alpha", type=float, default=None, help="WiSE-FT：LoRA 增量与 head 按 alpha∈[0,1] 向预训练插值（0 = 零样本）")
     ap.add_argument("--issue-every-min", type=int, default=60, help="nrmse 用的起报间隔（分钟）")
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--tag", default=None)
     ap.add_argument("--no-progress", action="store_true")
     a = ap.parse_args(argv)
-    evaluate(a.runs, a.test, a.out, a.point, a.decision_yaml, a.issue_every_min, a.batch_size, a.device, a.tag, not a.no_progress)
+    evaluate(a.runs, a.test, a.out, a.point, a.decision_yaml, a.issue_every_min, a.batch_size, a.device, a.tag, not a.no_progress,
+             a.sets, a.wise_alpha)
 
 
 if __name__ == "__main__":

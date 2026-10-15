@@ -24,6 +24,13 @@ GPU 自动检测、按任务数平分：上面 4 个任务（z0 与种子无关�
 每卡 = 全局 / 卡数，所以卡数不同的 run 配方相同、分数可比；summary 里 `batch_global` / `n_gpus` 两列记着。
 一次调用默认占满所有卡，不要同时开两个（要并发就用 `--gpus` 把卡分开）。
 
+## 免训练旋钮（不重训，同一批 checkpoint 上比较）
+
+    bash eval_shell/eval_m5.sh --runs <run> --test <parquet> --point p_star \
+         --set point.tail=linear        # O0：p* 网格在 q0.1/q0.9 之外线性外推（默认 flat 平延）
+         --set point.spread_lo=1.25     # T3：中位数以下离中位数的距离 ×1.25（spread_hi 同理）
+         --wise_alpha 0.5               # W2 WiSE-FT：LoRA 增量与 head 向预训练插值（0 = 零样本）
+
 ## 站表
 
 `station_meta.csv` 从 M8 复制，M5 / M6 / M8 各一份、各自维护；改站表要三处一起改。容量只取 `cap_mw`（每站固定值）。

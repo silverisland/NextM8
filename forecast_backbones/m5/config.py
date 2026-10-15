@@ -113,7 +113,7 @@ DEFAULT_CFG: dict = {
         # D8：clear_sky_cap_ratio=null → 无晴空上限，只钳到容量；g2 变体 = 1.05（与 M8 同口径）
         "physics": {"night_zero": False, "clear_sky_cap_ratio": None, "capacity_cap": True, "clip_negative": True},
         "point": {"default": "median", "by_step": [], "floor_ratio": 0.2, "tau_grid_step": 0.005,
-                  "tail": "flat", "shrink_factor": None},
+                  "tail": "flat", "shrink_factor": None, "spread_lo": None, "spread_hi": None},
     },
     "eval": {"batch_size": 64, "report_dir": "${run.out_dir}/reports"},
 }

@@ -70,3 +70,30 @@ def test_station_report_native(runs, tmp_path):
     assert list(tab["station"]) == ["S1001", "S1002"] and tab["seen"].tolist() == [True, False]
     assert np.isfinite(tab[["nanwang_short_D+1", "nanwang_ultra_short"]].astype(float).to_numpy()).all()
     assert (tmp_path / "f" / "metrics_ens" / "S1001-metrics.xlsx").exists()
+
+
+def test_wise_alpha_zero_scores_like_zero_shot_and_summary_records_it(runs, tmp_path):
+    """W2：LoRA run 用 --wise-alpha 0 评估 = 零样本 run 的分数；summary 记 wise_alpha。"""
+    from forecast_backbones.m5.evaluate import evaluate
+    tmp, splits = runs
+    v = [str(splits / "valid.parquet")]
+    z = evaluate([tmp / "z0"], v, out_dir=tmp_path / "z0", progress=False)["summary"]
+    w0 = evaluate([tmp / "l1"], v, out_dir=tmp_path / "w0", wise_alpha=0.0, progress=False)["summary"]
+    w1 = evaluate([tmp / "l1"], v, out_dir=tmp_path / "w1", progress=False)["summary"]
+    assert w0["nanwang_short_D+1"] == pytest.approx(z["nanwang_short_D+1"], abs=1e-3)
+    assert w0["wise_alpha"] == 0.0 and np.isnan(w1["wise_alpha"])
+    assert w1["nanwang_short_D+1"] != pytest.approx(z["nanwang_short_D+1"], abs=1e-3)       # lr 1e-2 训过，确实挪开了
+
+
+def test_decision_set_overrides(runs, tmp_path):
+    """--set point.tail=linear 等键值覆盖决策段，summary 的 point_rule 记下来。"""
+    from forecast_backbones.m5.evaluate import decision_override, evaluate
+    tmp, splits = runs
+    dec = decision_override({"point": {"default": "median", "by_step": [], "tail": "flat"}, "physics": {}},
+                            sets=["point.tail=linear", "point.spread_lo=1.25", "point.default=p_star"])
+    assert dec["point"] == {"default": "p_star", "by_step": [], "tail": "linear", "spread_lo": 1.25}
+    with pytest.raises(ValueError, match="段.键=值"):
+        decision_override({"point": {}}, sets=["point.tail"])
+    r = evaluate([tmp / "z0"], [str(splits / "valid.parquet")], out_dir=tmp_path / "s",
+                 decision_sets=["point.default=p_star", "point.tail=linear"], progress=False)
+    assert "tail=linear" in r["summary"]["point_rule"]

@@ -140,3 +140,51 @@ def test_predict_raw_restores_per_module_training_flags(tmp_path, tiny_ckpt_dir,
     before = {n: mod.training for n, mod in m.named_modules()}
     m.predict_raw(batch["batch_dict"])
     assert {n: mod.training for n, mod in m.named_modules()} == before
+
+
+def _perturb(m, seed=0):
+    """把 LoRA B 与 output_head 随机挪开，模拟训练过的 run。"""
+    g = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for x in m.backbone.modules():
+            if isinstance(x, LoRALinear):
+                x.lora_B.copy_(torch.randn(x.lora_B.shape, generator=g) * 0.05)
+        for p in m.backbone.model.output_head.parameters():
+            p.add_(torch.randn(p.shape, generator=g) * 0.05)
+
+
+def test_wise_alpha_interpolates_between_zero_shot_and_finetuned(tmp_path, tiny_ckpt_dir, batch):
+    """W2 WiSE-FT：alpha=0 与零样本逐位一致，alpha=1 回到微调结果，中间值两头都不是；可反复调。"""
+    bd = batch["batch_dict"]
+    lo, zs = _model(tmp_path, tiny_ckpt_dir), _model(tmp_path, tiny_ckpt_dir, finetune={"enabled": False})
+    _perturb(lo)
+    with torch.no_grad():
+        ft, z = lo(bd).aux["quantiles"].clone(), zs(bd).aux["quantiles"]
+        assert not torch.allclose(ft, z, atol=1e-4)
+        lo.wise(0.0)
+        assert torch.allclose(lo(bd).aux["quantiles"], z, atol=1e-5)
+        lo.wise(0.5)
+        mid = lo(bd).aux["quantiles"]
+        assert not torch.allclose(mid, z, atol=1e-5) and not torch.allclose(mid, ft, atol=1e-5)
+        lo.wise(1.0)
+        assert torch.allclose(lo(bd).aux["quantiles"], ft, atol=1e-6)
+    with pytest.raises(ValueError, match="alpha"):
+        lo.wise(1.5)
+    with pytest.raises(ValueError, match="LoRA"):
+        zs.wise(0.5)
+
+
+def test_decide_applies_spread_and_linear_tail_from_config(tmp_path, tiny_ckpt_dir):
+    import copy
+    m = _model(tmp_path, tiny_ckpt_dir)
+    B = 2
+    q = np.tile(np.linspace(10.0, 90.0, 9), (B, H, 1))
+    night, pc, cap = np.zeros((B, H), bool), np.full((B, H), 100.0), np.full(B, 100.0)
+    base = m.cfg["decision"]
+    _, q0, med0, ps0, _ = m.decide(q, night, pc, cap)
+    dec = copy.deepcopy(base); dec["point"]["spread_lo"] = 1.5
+    _, q1, med1, _, _ = m.decide(q, night, pc, cap, dec)
+    assert np.allclose(med1, med0) and np.allclose(q1[..., 5:], q0[..., 5:]) and (q1[..., :4] < q0[..., :4]).all()
+    dec = copy.deepcopy(base); dec["point"]["tail"] = "linear"
+    _, _, _, ps2, _ = m.decide(q, night, pc, cap, dec)
+    assert (ps2 < ps0).all()
