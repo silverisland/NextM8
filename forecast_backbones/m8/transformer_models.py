@@ -93,6 +93,14 @@ class TransformersAdaptedM8Model(nn.Module):
     def config(self) -> dict:
         return self.cfg
 
+    @property
+    def context_length(self) -> int:                      # pipelines/rolling_wrapper_inference 读这两个名字
+        return self.context_len
+
+    @property
+    def prediction_length(self) -> int:
+        return self.pred_len
+
     @staticmethod
     def compute_metrics(eval_pred) -> dict:
         return {}

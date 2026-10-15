@@ -212,3 +212,9 @@ def test_no_station_emb_variant_ignores_known_list(small_cfg, batch):
     with torch.no_grad():
         a = m(batch["batch_dict"]).logits; m.set_known_stations([1002]); b = m(batch["batch_dict"]).logits
     assert torch.equal(a, b)
+
+
+def test_exposes_rolling_inference_lengths(small_cfg):
+    """pipelines/rolling_wrapper_inference.rolling_inference 读 context_length / prediction_length（M1/M4 的命名）。"""
+    m = _model(small_cfg)
+    assert (m.context_length, m.prediction_length) == (m.context_len, m.pred_len)
