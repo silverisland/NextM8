@@ -44,7 +44,7 @@ def dump_config(cfg: dict, path) -> None:
     Path(path).write_text(yaml.safe_dump(plain, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
-__all__ = ["DEFAULT_CFG", "load_config", "deep_merge", "interpolate", "dump_config", "raw_override"]
+__all__ = ["DEFAULT_CFG", "load_config", "deep_merge", "interpolate", "dump_config", "raw_override", "future_only_cols"]
 
 DEFAULT_CFG: dict = {
     "run": {"model_name": "m8", "seeds": [0], "out_dir": "runs/m8_baseline"},
@@ -78,6 +78,11 @@ DEFAULT_CFG: dict = {
         "future_only": [],                                 # 例：[{"col": "timesfm_predict", "scale": "target"}]
         # 残差学习：模型输出 = 该 future_only 列（归一后）+ 网络输出；须是 future_only 里 scale=target 的列
         "residual_base_col": None,
+        # 插值列（2026-10-15）：TimesFM 之类每次起报生成的单变量 192 步预测，列名按你的数据写；null = 不用。
+        #   它不是 NWP 协变量（不进 past_future、不随 cov_dropout 清零，走 hint_dropout），等价于 future_only 末尾追加 {col, scale: target}。
+        #   训练数据里没有这一列直接报错；推理时缺列按 hint_missing 兜底。train_m8.sh --hint_col <列名> 可在不改 yaml 的情况下换名
+        "hint_col": None,
+        "hint_residual": False,                            # true = 残差学习：输出 = 插值列（归一后）+ 网络输出（代替 residual_base_col）
         # 列名（小写）含某个键时按 [shift, scale] 归一：(x - shift) / scale；都不含用 default
         "scales": {"ghi": [0.0, 1000.0], "ssrd": [0.0, 1000.0], "temp": [15.0, 15.0], "t2m": [15.0, 15.0], "default": [0.0, 1.0]},
         "clear_sky_index_col": "general_ghi_predict",       # 驱动 k_nwp / nwp_resid 的 GHI 类未来列（其历史列按 past_future 配对找）
@@ -172,6 +177,29 @@ def normalize_future_only(entries) -> list[dict]:
     return out
 
 
+def future_only_cols(fe: dict) -> tuple[list[tuple[str, str]], str | None]:
+    """features → ([(列名, scale)], 残差基准列)：future_only 在前、插值列 hint_col 追加在末尾（通道顺序与旧写法 future_only=[该列] 相同，
+    旧 checkpoint 可直接加载）；残差基准 = hint_residual 时取 hint_col，否则取 residual_base_col。"""
+    fo = [(d["col"], d["scale"]) for d in normalize_future_only(fe.get("future_only"))]
+    hint, rb = fe.get("hint_col"), fe.get("residual_base_col")
+    if fe.get("hint_residual") and not hint:
+        raise ValueError("features.hint_residual=true 须同时给 features.hint_col（插值列名）")
+    if fe.get("hint_residual") and rb is not None:
+        raise ValueError(f"features.hint_residual 与 residual_base_col={rb!r} 只能二选一")
+    if hint:
+        hint = str(hint)
+        if hint in {c for c, _ in fo}:
+            raise ValueError(f"features.hint_col={hint!r} 不要再写进 future_only（插值列单独声明即可）")
+        if hint in {c for pair in fe.get("past_future") or () for c in pair} | set(fe.get("past_only") or ()):
+            raise ValueError(f"features.hint_col={hint!r} 与 NWP 协变量列同名：插值列须是单独的一列（如 TimesFM 预测）")
+        fo.append((hint, "target"))
+        if fe.get("hint_residual"):
+            rb = hint
+    if rb is not None and (rb, "target") not in fo:
+        raise ValueError(f"features.residual_base_col={rb!r} 须是 features.future_only 里 scale=target 的列")
+    return fo, rb
+
+
 # 2026-10-14 瘦身删掉的开关：旧 yaml 再写这些键直接报错，而不是被 deep_merge 静默收下、什么都不做
 REMOVED_KEYS = (("features", "nwp_members"), ("model", "layout"), ("model", "head_mode"), ("model", "bidirectional"),
                 ("model", "mean_head"), ("model", "recent_skip"), ("model", "ultra_head"),
@@ -202,9 +230,7 @@ def load_config(src) -> dict:
     ds, m = cfg["dataset"], cfg["model"]
     fe = cfg["features"]
     fe["future_only"] = normalize_future_only(fe.get("future_only"))
-    rb = fe.get("residual_base_col")
-    if rb is not None and not any(d["col"] == rb and d["scale"] == "target" for d in fe["future_only"]):
-        raise ValueError(f"features.residual_base_col={rb!r} 须是 features.future_only 里 scale=target 的列")
+    future_only_cols(fe)                                                       # 插值列 / 残差基准的合法性
     P = int(m["patch_len"])
     if int(ds["context_len"]) % P or int(ds["pred_len"]) % P:
         raise ValueError(f"model.patch_len={P} 须整除 dataset.context_len={ds['context_len']} 与 pred_len={ds['pred_len']}")

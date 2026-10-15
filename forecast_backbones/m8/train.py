@@ -27,7 +27,7 @@ import torch
 from transformers import Trainer, TrainerCallback
 
 try:
-    from .config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override
+    from .config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override, future_only_cols
     from .features import station_cap_mw
     from .transformer_trainer import evaluate_model, build_training_args
     from .transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
@@ -36,7 +36,7 @@ try:
     from . import _dist
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from forecast_backbones.m8.config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override
+    from forecast_backbones.m8.config import DEFAULT_CFG, load_config, deep_merge, dump_config, raw_override, future_only_cols
     from forecast_backbones.m8.features import station_cap_mw
     from forecast_backbones.m8.transformer_trainer import evaluate_model, build_training_args
     from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
@@ -363,8 +363,8 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
             "patch_len": cfg["model"]["patch_len"], "d_model": cfg["model"]["d_model"],
             "target_scale": cfg["features"].get("target_scale", "cap"), "cpm": cfg["train"]["cpm"]["enabled"],
             "cov_dropout": cfg["train"].get("cov_dropout", 0.0),
-            "future_only": "+".join(d["col"] for d in cfg["features"].get("future_only", [])) or "",
-            "residual": cfg["features"].get("residual_base_col") or "",
+            "future_only": "+".join(c for c, _ in future_only_cols(cfg["features"])[0]) or "",
+            "residual": future_only_cols(cfg["features"])[1] or "",
             "ema_decay": float("nan") if cfg["train"].get("ema_decay") is None else float(cfg["train"]["ema_decay"]), "smooth_k": int(cfg["train"]["early_stop"].get("smooth_k", 1) or 1),
             "n_val_rows": n_val, "n_train_rows": n_train}
 

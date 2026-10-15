@@ -19,12 +19,12 @@ import pandas as pd
 try:
     from .solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
     from ._arrays import interp_nan
-    from .config import normalize_future_only
+    from .config import future_only_cols
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
     from forecast_backbones.m8._arrays import interp_nan
-    from forecast_backbones.m8.config import normalize_future_only
+    from forecast_backbones.m8.config import future_only_cols
 
 _WARNED_MISSING: set = set()
 _DEGRADED_WARNED: set = set()
@@ -165,10 +165,7 @@ class FeatureBuilder:
         self.step_min = int(ds["step_min"])
         self.pairs = [tuple(p) for p in fe["past_future"]]
         self.past_only = list(fe["past_only"])
-        self.future_only = [(d["col"], d["scale"]) for d in normalize_future_only(fe.get("future_only"))]
-        self.resid_col = fe.get("residual_base_col")
-        if self.resid_col is not None and (self.resid_col, "target") not in self.future_only:
-            raise ValueError(f"features.residual_base_col={self.resid_col!r} 须是 future_only 里 scale=target 的列")
+        self.future_only, self.resid_col = future_only_cols(fe)                 # future_only + 插值列 hint_col（末尾）
         self.scales = fe["scales"]
         self.derived = fe["derived"]
         self.static_cfg = fe["static"]
@@ -380,6 +377,9 @@ class FeatureBuilder:
             if training and ph > 0:
                 hint_missing = rng.random(B) < ph
             absent = [c for c, _ in self.future_only if c not in batch_dict]
+            if absent and training:
+                raise ValueError(f"训练数据里没有插值 / 提示列 {absent}：检查 features.hint_col（或 train_m8.sh --hint_col）"
+                                 f"是否写成了数据里的列名；现有列 {sorted(batch_dict)[:30]}")
             if absent:
                 for c in absent:
                     if c not in _WARNED_MISSING:

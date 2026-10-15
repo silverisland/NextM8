@@ -169,7 +169,8 @@ def test_timesfm_variant_files_train_step(small_cfg, batch, name):
     cfg["dataset"]["station_meta"] = small_cfg["dataset"]["station_meta"]
     cfg["model"].update(small_cfg["model"])
     m = build_model(model_name="m8", model_config=cfg); m.train()
-    out = m(batch["batch_dict"], labels=batch["labels"]); out.loss.backward()
+    bd = {**batch["batch_dict"], cfg["features"]["hint_col"]: batch["batch_dict"]["timesfm_predict"]}   # 合成数据的提示列改成变体声明的插值列名
+    out = m(bd, labels=batch["labels"]); out.loss.backward()
     assert torch.isfinite(out.loss) and out.logits.shape == (batch["labels"]["observe_power_future"].shape[0], 192)
 
 
@@ -179,7 +180,7 @@ def test_j1_final2_stacks_d3_and_h4_on_e1_final():
     v = ROOT / "forecast_backbones/m8/config/variants"
     j1, e1 = load_config(str(v / "j1_final2.yaml")), load_config(str(v / "e1_final.yaml"))
     assert j1["features"]["derived"]["clear_sky_ratio"]["enabled"] and j1["features"]["derived"]["history_envelope"]["enabled"]
-    assert j1["features"]["future_only"] == [{"col": "timesfm3", "scale": "target"}] and j1["train"]["hint_dropout"] == 0.3
+    assert j1["features"]["hint_col"] == "timesfm3" and j1["train"]["hint_dropout"] == 0.3
     assert j1["train"]["schedule"] == e1["train"]["schedule"] and j1["train"]["early_stop"] == e1["train"]["early_stop"]
     assert j1["decision"]["point"] == e1["decision"]["point"] and j1["model"] == e1["model"]
 

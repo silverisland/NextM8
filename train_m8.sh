@@ -10,6 +10,7 @@
 #   bash train_m8.sh --gpus 0 --max_steps 20 --run_id smoke                          # 冒烟
 #   bash train_m8.sh --train_parquet "/data/train/*.parquet" --config forecast_backbones/m8/config/variants/j1_final2.yaml --max_steps 6000 --gpus 0
 #                                                                                    # 全量训练：现成的训练 parquet 直接吃，不切分、不剔行、无验证
+#   bash train_m8.sh --train_parquet ... --config .../k3_resid.yaml --hint_col tfm_pred --max_steps 6000   # 数据里插值列叫 tfm_pred（不改 yaml）
 #   批量跑全部变体见 train_m8_variants.sh
 set -u
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +32,7 @@ OVERWRITE=0
 ALLOW_CPU=0
 TAG=""
 SEED=""
+HINT_COL=""                         # 插值列名（TimesFM 等）：覆盖配置 features.hint_col；配置本身不用插值列时忽略
 REFIT=0
 VENV_PY="/home/ma-user/ts3/bin/python"
 PRE_CUDA_LD="/usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu"
@@ -52,6 +54,8 @@ usage() {
   --precision <fp32|bf16>  训练精度（默认 fp32；V100 不支持 bf16）
   --tag <name>             写进 reports/summary.csv 的变体名（默认取配置 run.tag）
   --seed <n>               覆盖 run.seeds（模型初始化 + 数据顺序 + 增强随机数）
+  --hint_col <列名>        插值列（TimesFM 等只有未来段的单变量预测）在你数据里的列名，覆盖配置 features.hint_col；
+                           配置不用插值列（如 e1_final）时忽略。训练数据缺这一列直接报错
   --refit                  全量重训：train ∪ valid 全当训练行，不验证、不早停，固定 --max_steps 步后存最终权重
                            （配方选定后给最终模型；切分用 data/splits/m8_refit.yaml 落的目录，valid.parquet 为 0 行）
   --port <n>               多进程通信端口（默认 29700）
@@ -75,6 +79,7 @@ while [ $# -gt 0 ]; do
     --precision)    PRECISION="$2";   shift 2 ;;
     --tag)          TAG="$2";         shift 2 ;;
     --seed)         SEED="$2";        shift 2 ;;
+    --hint_col)     HINT_COL="$2";    shift 2 ;;
     --refit)        REFIT=1;          shift   ;;
     --port)         PORT="$2";        shift 2 ;;
     --cpu_threads)  CPU_THREADS="$2"; shift 2 ;;
@@ -130,9 +135,9 @@ if [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
     echo "❌ 产物目录已存在且非空: ${RUN_DIR}（换 --run_id，或加 --overwrite）" >&2; exit 1; fi
 fi
 
-"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" <<'PYEOF'
+"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" "$HINT_COL" <<'PYEOF'
 import sys, yaml, os
-src, dst, precision, batch_size, eval_every, tag, seed = sys.argv[1:8]
+src, dst, precision, batch_size, eval_every, tag, seed, hint_col = sys.argv[1:9]
 cfg = yaml.safe_load(open(src, encoding="utf-8")) or {}
 sch = cfg.setdefault("train", {}).setdefault("schedule", {})
 sch["precision"] = precision
@@ -140,6 +145,12 @@ if batch_size: sch["batch_size"] = int(batch_size)
 if eval_every: sch["eval_every_steps"] = int(eval_every)
 cfg.setdefault("run", {})["tag"] = tag
 if seed != "": cfg["run"]["seeds"] = [int(seed)]
+fe = cfg.get("features") or {}
+if hint_col and fe.get("hint_col"):
+    fe["hint_col"] = hint_col
+elif hint_col:
+    print(f"⚠️  该配置不用插值列（features.hint_col 为空），忽略 --hint_col {hint_col}")
+print(f"HINT_COL={fe.get('hint_col') or '（不用）'}")
 yaml.safe_dump(cfg, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 meta = (cfg.get("dataset") or {}).get("station_meta", "forecast_backbones/m8/station_meta.csv")
 print(f"STATION_META={meta}")

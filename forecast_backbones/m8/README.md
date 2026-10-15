@@ -221,7 +221,7 @@ M8 以前在决策层把夜间强制归零，等于比别的模型多了一道�
 | 变体 | 改动 | 动它的理由 |
 |---|---|---|
 | k1_hint01 / k2_hint00 | `train.hint_dropout` 0.3 → 0.1 / 0 | 线上一定有 TimesFM 列，为缺列买的保险可以减少 |
-| k3_resid | `features.residual_base_col: timesfm3`（= d4） | round6 里残差版超短期代理 +0.65、D+1 持平 |
+| k3_resid | `features.hint_residual: true`（= d4） | round6 里残差版超短期代理 +0.65、D+1 持平 |
 | k4_lr2e4 / k5_lr5e4 | `train.schedule.lr` 3e-4 → 2e-4 / 5e-4 | 常规扫描 |
 | k6_regular | `weight_decay` 0.05 → 0.1、`model.dropout` 0.1 → 0.2 | 500 万参数对这个数据量，看已见站是否过拟合 |
 
@@ -314,11 +314,27 @@ bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/
 
 ## 外部提示通道（`features.future_only`）与残差学习
 
+**插值列 `features.hint_col`（2026-10-15 起，推荐写法）**：TimesFM 之类的插值 / 单变量预测列单独声明，和 NWP 协变量
+（`past_future`）分开——列名按你的数据写，训练时数据里没有这一列 **直接报错**（不再静默置 0）。
+
+```yaml
+features:
+  hint_col: timesfm3        # 你数据里插值列的名字
+  hint_residual: true       # 可选：残差学习（= 旧写法 residual_base_col），k3_resid / d4 用
+```
+
+不改 yaml 换名：`bash train_m8.sh ... --hint_col tfm_pred`（`train_m8_variants.sh` 原样透传；配置本身不用插值列时忽略）。
+推理读的是 run 目录 `model_config.yaml` 里记下的列名；线上列名不同时改那里的 `features.hint_col` 即可（权重不受影响）。
+它等价于 `future_only` 末尾追加 `{col: <hint_col>, scale: target}`，通道顺序与旧写法相同，旧 run 目录照常加载。
+插值列不能同时写进 `future_only`，也不能与 NWP 协变量同名。
+
+下面是底层通用写法（多个提示列、fixed 尺度时才需要）：
+
 `future_only: [{col: timesfm_predict, scale: target}]` 把一列 **只有未来 192 步** 的数组（每行在起报时刻生成，如 TimesFM-3 的单变量
 预测）当协变量：历史段恒 0（CPM 掩掉的历史不会从这里漏回来），未来段除以每行目标尺度并随幅度调制同乘；`train.hint_dropout`
 以独立概率整组清零并把 `hint_missing` 置 1，防止模型只抄提示而不学 NWP。`residual_base_col: timesfm_predict` 再加一条从提示到
 输出的恒等跳连（输出 = 提示 + 网络输出；提示被 dropout 时基准同步为 0）。训练行与推理行的提示必须用同一套方法生成
-（同一模型版本、上下文长度、取点方式），否则分布不一致。缺列时只警告一次，通道置 0、`hint_missing=1`。
+（同一模型版本、上下文长度、取点方式），否则分布不一致。训练时缺列直接报错；推理时缺列警告一次，通道置 0、`hint_missing=1`。
 
 ## 注意
 

@@ -3,7 +3,7 @@
 run: {tag: k6_regular, out_dir: runs/m8/k6_regular}
 features:
   derived: {clear_sky_ratio: {enabled: true}, history_envelope: {enabled: true}}
-  future_only: [{col: timesfm3, scale: target}]
+  hint_col: timesfm3                 # 插值列名：数据里叫别的就改这里，或 train_m8.sh --hint_col <列名>
 model: {dropout: 0.2}
 train:
   schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250, weight_decay: 0.1}

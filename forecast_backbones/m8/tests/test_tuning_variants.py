@@ -9,7 +9,7 @@ D = ROOT / "forecast_backbones/m8/config/decision"
 EXPECTED = {
     "k1_hint01":  {"train.hint_dropout": 0.1},
     "k2_hint00":  {"train.hint_dropout": 0.0},
-    "k3_resid":   {"features.residual_base_col": "timesfm3"},
+    "k3_resid":   {"features.hint_residual": True},
     "k4_lr2e4":   {"train.schedule.lr": 2e-4},
     "k5_lr5e4":   {"train.schedule.lr": 5e-4},
     "k6_regular": {"train.schedule.weight_decay": 0.1, "model.dropout": 0.2},

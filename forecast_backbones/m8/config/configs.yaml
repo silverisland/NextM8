@@ -26,7 +26,10 @@ features:
   # 只有未来段的"提示"通道（如 TimesFM 单变量预测）：历史段恒 0；scale=target 按每行目标尺度归一并随幅度调制，fixed 用 scales 表
   future_only: []                    # 例：[{col: timesfm_predict, scale: target}]
   residual_base_col: null            # 残差学习：输出 = 该列（归一后）+ 网络输出；须是 future_only 里 scale=target 的列
-  nwp_members: {enabled: false, cols: [SSRD_pos_1, SSRD_pos_2, SSRD_pos_3, SSRD_pos_4, SSRD_pos_5, SSRD_pos_6, SSRD_pos_7, SSRD_pos_8, SSRD_pos_9], future_suffix: _predict}
+  # 插值列：TimesFM 之类每次起报生成的单变量预测（只有未来段），列名按你的数据写；null = 不用。与 NWP 协变量分开声明，
+  # 训练数据缺这一列直接报错。train_m8.sh --hint_col <列名> 可不改 yaml 换名
+  hint_col: null
+  hint_residual: false               # true = 残差学习：输出 = 插值列（归一后）+ 网络输出
   scales: {ghi: [0.0, 1000.0], ssrd: [0.0, 1000.0], temp: [15.0, 15.0], t2m: [15.0, 15.0], default: [0.0, 1.0]}
   clear_sky_index_col: general_ghi_predict
   target_scale: cap                    # cap | recent_peak
@@ -34,15 +37,12 @@ features:
   # derived.clear_sky_ratio（h 系列）/ derived.history_envelope（缺坐标站用历史日形代替钟表几何）默认都关，键与默认值见 config.py
   static: {station_embedding: true, n_station_slots: 4096, context_stats: true, coords: true, log_cap: true}   # coords/log_cap 能标识站点，可关
 model:
-  layout: fused                        # fused | split
-  head_mode: step_cov                  # step_cov | token
   patch_len: 16
   d_model: 256
   n_heads: 4
   d_ff: 1024
-  blocks: [conv, deltanet, conv, deltanet]   # conv | deltanet | slstm | attention；[] = 无混合器
+  blocks: [conv, deltanet, conv, deltanet]   # conv | deltanet | attention；[] = 无混合器
   dropout: 0.1
-  bidirectional: false
   short_conv_kernel: 4
   deltanet_gated: true
   head_hidden: 256

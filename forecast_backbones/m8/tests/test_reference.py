@@ -21,7 +21,7 @@ def _j1_small(tmp_path):
     cfg = load_config(str(ROOT / "forecast_backbones/m8/config/variants/j1_final2.yaml"))
     cfg["dataset"]["station_meta"] = str(write_station_meta(tmp_path, drop_coords_for=(1002,)))   # 1002 缺坐标 → 走包络
     cfg["model"].update({"d_model": 32, "d_ff": 64, "head_hidden": 32, "n_heads": 2, "blocks": ["conv", "deltanet"], "pos_in_patch_dim": 8})
-    cfg["features"]["future_only"] = [{"col": "timesfm_predict", "scale": "target"}]              # 合成 batch 里的提示列名
+    cfg["features"]["hint_col"] = "timesfm_predict"                                               # 合成 batch 里的插值列名
     cfg["features"]["static"]["n_station_slots"] = 64                                             # 站点嵌入缩小，参考文件才小
     cfg["run"]["out_dir"] = str(tmp_path / "run")
     return cfg

@@ -11,6 +11,7 @@
 #                                                                                   # 全量重训 3 颗种子（--refit 透传给 train_m8.sh）
 #   bash train_m8_variants.sh --train_parquet "/data/train/*.parquet" --variants j1_final2,k1_hint01,k3_resid --max_steps 6000 --batch_tag full
 #                                                                                   # 全量训练：现成的训练 parquet 直接吃，不切分、不剔行、无验证
+#   bash train_m8_variants.sh --train_parquet ... --variants k3_resid,j1_final2 --hint_col tfm_pred ...   # 插值列换名：其余参数原样透传给 train_m8.sh
 # 产物：runs/m8/<batch_tag>/<变体>/…，汇总 runs/m8/<batch_tag>/variants_summary.csv
 set -u
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

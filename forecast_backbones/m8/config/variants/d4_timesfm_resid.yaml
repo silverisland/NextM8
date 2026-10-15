@@ -1,7 +1,7 @@
 # D4 残差学习：在 D3 基础上让网络只学 y − TimesFM（输出 = TimesFM 归一值 + 网络输出；提示被 dropout 时基准同步为 0，
 #    模型靠 hint_missing 标志区分两种状态）。与 D3 的差别只是从提示通道到输出的一条恒等跳连。e1_final 配方。
 run: {tag: d4_timesfm_resid, out_dir: runs/m8/d4_timesfm_resid}
-features: {future_only: [{col: timesfm3, scale: target}], residual_base_col: timesfm3}
+features: {hint_col: timesfm3, hint_residual: true}
 train:
   schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250}
   early_stop: {patience: 8}
