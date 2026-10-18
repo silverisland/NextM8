@@ -29,6 +29,7 @@ try:
     from .solar import station_cap_mw
     from .transformer_trainer import evaluate_model, build_training_args
     from .transformer_models import TransformersAdaptedM5Model, save_weights, load_weights
+    from .lora import load_lora_weights
     from .data import _dataset_with_station_id, _check_presplit_dir
     from .rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
     from . import _dist
@@ -38,6 +39,7 @@ except ImportError:
     from forecast_backbones.m5.solar import station_cap_mw
     from forecast_backbones.m5.transformer_trainer import evaluate_model, build_training_args
     from forecast_backbones.m5.transformer_models import TransformersAdaptedM5Model, save_weights, load_weights
+    from forecast_backbones.m5.lora import load_lora_weights
     from forecast_backbones.m5.data import _dataset_with_station_id, _check_presplit_dir
     from forecast_backbones.m5.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
     from forecast_backbones.m5 import _dist
@@ -293,10 +295,64 @@ class EvalCallback(TrainerCallback):
         return control
 
 
+def param_groups(model: torch.nn.Module, optim: dict, lr: float, weight_decay: float) -> list[dict] | None:
+    """train.optim → AdamW 参数组；全 null → None（交给 HF 默认单组）。
+    组：lora_A（lr）、lora_B（lr × lora_plus_ratio）、output_head（head_lr）、其余可训参数（adapter_lr：解冻块 / (IA)³ / m5_adapters）。
+    一维参数（偏置、缩放向量、prompt 以外的向量）不做 weight decay，与 HF 默认一致。空组丢掉。"""
+    ratio, head_lr, adapter_lr = (optim or {}).get("lora_plus_ratio"), (optim or {}).get("head_lr"), (optim or {}).get("adapter_lr")
+    # (IA)³ 缩放的恒等点是 1：HF 默认分组只按名字（bias / norm）免 decay，会把它往 0 拉，所以有 (IA)³ 时也走这里（一维参数不 decay）
+    has_ia3 = any(n.endswith(".ia3_scale") and p.requires_grad for n, p in model.named_parameters())
+    if ratio is None and head_lr is None and adapter_lr is None and not has_ia3:
+        return None
+    buckets: dict = {}
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if n.endswith(".lora_A"):
+            g_lr = lr
+        elif n.endswith(".lora_B"):
+            g_lr = lr * float(ratio if ratio is not None else 1.0)
+        elif ".output_head." in f".{n}":
+            g_lr = float(head_lr if head_lr is not None else lr)
+        else:
+            g_lr = float(adapter_lr if adapter_lr is not None else lr)
+        wd = weight_decay if p.ndim >= 2 else 0.0
+        buckets.setdefault((g_lr, wd), []).append(p)
+    return [{"params": ps, "lr": g_lr, "weight_decay": wd} for (g_lr, wd), ps in buckets.items()]
+
+
+def warm_start(model, path, seed: int) -> list[str]:
+    """LP-FT（finetune.init_from）：把权重文件里与本模型同名、同形的可训参数拷进来（训练前、构造后）。
+    文件里有本模型没有 / 不可训 / 形状不同的键 → 报错（防止拿错文件静默跳过）。→ 拷入的键名。"""
+    p = Path(str(path).replace("{seed}", str(int(seed))))
+    if not p.exists():
+        raise FileNotFoundError(f"finetune.init_from={path!r} → {p} 不存在（LP-FT 热启动要先训好 head_only 那一组）")
+    sd = load_lora_weights(p)
+    params = {n: q for n, q in model.backbone.model.named_parameters() if q.requires_grad}
+    bad = [k for k, v in sd.items() if k not in params or tuple(params[k].shape) != tuple(v.shape)]
+    if bad:
+        raise ValueError(f"finetune.init_from {p} 里有本模型没有 / 不可训 / 形状不同的键：{bad[:5]}")
+    with torch.no_grad():
+        for k, v in sd.items():
+            params[k].copy_(v.to(params[k].device, params[k].dtype))
+    return sorted(sd)
+
+
 class _M5Trainer(Trainer):
-    def __init__(self, *a, sampling: str = "random", station_col: str = "station_id", ts_col: str = "timestamp_win", **kw):
+    def __init__(self, *a, sampling: str = "random", station_col: str = "station_id", ts_col: str = "timestamp_win",
+                 optim: dict | None = None, **kw):
         super().__init__(*a, **kw)
         self._sampling, self._station_col, self._ts_col = sampling, station_col, ts_col
+        self._optim = optim or {}
+
+    def create_optimizer(self, *a, **kw):
+        """train.optim 有设置时自建 AdamW 参数组（β、ε 与 HF 默认相同）；否则走 HF 默认。"""
+        if self.optimizer is None:
+            groups = param_groups(self.model, self._optim, float(self.args.learning_rate), float(self.args.weight_decay))
+            if groups is not None:
+                self.optimizer = torch.optim.AdamW(groups, lr=float(self.args.learning_rate), betas=(self.args.adam_beta1, self.args.adam_beta2),
+                                                   eps=self.args.adam_epsilon)
+        return super().create_optimizer(*a, **kw)
 
     def _get_train_sampler(self, *a, **kw):          # transformers>=4.46 多传一个 dataset 位置参数，4.40 不传：两种签名都接
         if self._sampling == "station_day":
@@ -386,6 +442,9 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
             "target_modules": "+".join(lo["target_modules"]) if on else "",
             "unfreeze_head": bool(ft["unfreeze_output_head"]) and on,
             "unfreeze_modules": "+".join(ft.get("unfreeze_modules") or []) if on else "",
+            "adapters": adapter_desc(cfg) if on else "",
+            "lr_scheduler": str(cfg["train"]["schedule"].get("lr_scheduler") or "cosine"),
+            "optim": "+".join(f"{k}={v}" for k, v in (cfg["train"].get("optim") or {}).items() if v is not None),
             "n_trainable": model.n_params(), "lr": float(cfg["train"]["schedule"]["lr"]),
             "derived": "+".join(k for k, v in cfg["features"]["derived"].items() if v),
             "cs_ceiling": float("nan") if ratio is None else float(ratio),
@@ -393,6 +452,35 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
             "smooth_k": int(cfg["train"]["early_stop"].get("smooth_k", 1) or 1),
             "n_val_rows": n_val, "n_train_rows": n_train,
             "batch_global": int(cfg["train"]["schedule"]["batch_size"]), "n_gpus": _dist.world_size()}
+
+
+def step0_is_zero_shot(cfg) -> bool:
+    """第 0 步是不是零样本：prompt（随机 token 进 softmax）与 LP-FT（已热启动的 head）都不是 → summary 的 nanwang_zeroshot / gain 记 NaN，
+    这些变体直接与 z0 比。"""
+    ft = cfg["finetune"]
+    return not (int((ft.get("prompt") or {}).get("n_tokens", 0) or 0) > 0 or ft.get("init_from"))
+
+
+def adapter_desc(cfg) -> str:
+    """summary 的 adapters 列：开了哪些 LoRA 之外的适配器 / LP-FT（空串 = 纯 LoRA）。"""
+    ft, lo = cfg["finetune"], cfg["finetune"]["lora"]
+    out = []
+    if int(lo.get("experts", 1) or 1) > 1:
+        out.append(f"experts{int(lo['experts'])}")
+    if lo.get("gate"):
+        out.append("gate")
+    if (ft.get("ia3") or {}).get("target_modules"):
+        out.append("ia3:" + "+".join(ft["ia3"]["target_modules"]))
+    pr = ft.get("prompt") or {}
+    if int(pr.get("n_tokens", 0) or 0) > 0:
+        out.append(f"prompt{int(pr['n_tokens'])}" + ("_station" if pr.get("per_station") else ""))
+    if (ft.get("static_embed") or {}).get("enabled"):
+        out.append("static")
+    if int((ft.get("resblock_adapter") or {}).get("rank", 0) or 0) > 0:
+        out.append(f"rb_adapter{int(ft['resblock_adapter']['rank'])}")
+    if ft.get("init_from"):
+        out.append("lpft")
+    return "+".join(out)
 
 
 def _zero_shot_report(model, ds_val, collate, train_cfg, cfg, tag, out, report_dir, n_train) -> dict:
@@ -461,6 +549,10 @@ def train_m5(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
     set_seed(int(args.seed))               # LoRA 的 lora_A 在构造里随机初始化，须先于构造定种子（否则 run.seeds 管不到）
     model = TransformersAdaptedM5Model(train_cfg)
     model.reseed(int(args.seed) * 1000 + _dist.rank())
+    if finetune and cfg["finetune"].get("init_from"):
+        keys = warm_start(model, cfg["finetune"]["init_from"], int(args.seed))
+        if main:
+            print(f"[m5] LP-FT 热启动：从 {cfg['finetune']['init_from']} 拷入 {len(keys)} 个张量（{', '.join(sorted({k.split('.')[0] for k in keys}))}）", flush=True)
     model.to(args.device)
     scratch = out / ".data"
     station_col, ts_col = str(cfg["dataset"]["station_id_col"]), str(cfg["dataset"]["ts_col"])
@@ -506,7 +598,7 @@ def train_m5(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
     callbacks = ([EmaCallback(ema, model)] if ema is not None else []) + ([cb] if cb else [])
     model.train()
     trainer = _M5Trainer(model=model, args=args, data_collator=collate, train_dataset=ds_train, callbacks=callbacks,
-                         sampling=sampling, station_col=station_col, ts_col=ts_col)
+                         sampling=sampling, station_col=station_col, ts_col=ts_col, optim=cfg["train"].get("optim"))
     t0 = time.time()
     trainer.train()
     if not main:
@@ -537,7 +629,7 @@ def train_m5(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
     nw_seen, nw_unseen, n_unseen = seen_unseen_scores(station_tab)
     summary = pd.DataFrame([row(best_step=cb.best_step, n_evals=len(cb.history), minutes=(time.time() - t0) / 60.0, n_val=len(ds_val),
                                 nw=nw_score, nr=nr, seen=nw_seen, unseen=nw_unseen, n_unseen=n_unseen,
-                                ultra=ultra_proxy_pct(res_hourly), zs=float(cb.zeroshot))])
+                                ultra=ultra_proxy_pct(res_hourly), zs=float(cb.zeroshot) if step0_is_zero_shot(cfg) else float("nan"))])
     summary.to_csv(report_dir / "summary.csv", index=False)
     station_tab.to_csv(report_dir / "station_table.csv", index=False)
     log = json.loads((out / "train_log.json").read_text(encoding="utf-8"))

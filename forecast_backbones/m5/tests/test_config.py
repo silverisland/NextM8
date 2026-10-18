@@ -15,7 +15,8 @@ def test_finetune_yaml_is_default_cfg_on_disk():
 def test_defaults_match_spec():
     from forecast_backbones.m5.config import load_config
     c = load_config(None)
-    assert c["features"]["derived"] == {"solar_elevation": False, "clear_sky_power": False}
+    assert c["features"]["derived"] == {"solar_elevation": False, "clear_sky_power": False,
+                                        "history_envelope": False, "envelope_nwp": False}
     assert c["features"]["past_future"] == [["general_ghi", "general_ghi_predict"], ["general_temp", "general_temp_predict"]]
     assert c["decision"]["physics"] == {"night_zero": False, "clear_sky_cap_ratio": None, "capacity_cap": True, "clip_negative": True}
     assert c["decision"]["point"]["default"] == "median"
@@ -23,7 +24,14 @@ def test_defaults_match_spec():
     assert c["train"]["schedule"]["precision"] == "fp32" and c["train"]["schedule"]["lr"] == 1.0e-4
     assert c["finetune"]["enabled"] is True and c["finetune"]["method"] == "lora"
     assert c["finetune"]["lora"] == {"rank": 8, "alpha": 16, "dropout": 0.05,
-                                     "target_modules": ["query_proj", "key_proj", "value_proj", "out_proj"]}
+                                     "target_modules": ["query_proj", "key_proj", "value_proj", "out_proj"],
+                                     "experts": 1, "gate": False}
+    # LoRA 之外的适配器 / 协议旋钮默认全关
+    ft = c["finetune"]
+    assert ft["ia3"]["target_modules"] == [] and ft["prompt"]["n_tokens"] == 0 and ft["static_embed"]["enabled"] is False
+    assert ft["resblock_adapter"]["rank"] == 0 and ft["init_from"] is None
+    assert c["train"]["schedule"]["lr_scheduler"] == "cosine"
+    assert c["train"]["optim"] == {"lora_plus_ratio": None, "head_lr": None, "adapter_lr": None}
     assert c["train"]["weights_path"] == "runs/m5_baseline/model.safetensors"
     sm = Path(c["dataset"]["station_meta"])
     assert sm.parts[:2] == ("forecast_backbones", "m5") and (ROOT / sm).exists()
@@ -55,6 +63,12 @@ def test_validation_errors():
         load_config({"finetune": {"inference_path": "jax"}})
     with pytest.raises(ValueError, match="rank"):
         load_config({"finetune": {"lora": {"rank": 0}}})
+    with pytest.raises(ValueError, match="二选一"):
+        load_config({"finetune": {"lora": {"gate": True, "experts": 2}}})
+    with pytest.raises(ValueError, match="experts"):
+        load_config({"finetune": {"lora": {"experts": 0}}})
+    with pytest.raises(ValueError, match="lr_scheduler"):
+        load_config({"train": {"schedule": {"lr_scheduler": "onecycle"}}})
     with pytest.raises(ValueError, match="clear_sky_cap_ratio"):
         load_config({"decision": {"physics": {"clear_sky_cap_ratio": 0}}})
     with pytest.raises(ValueError, match="station_meta"):
@@ -65,7 +79,8 @@ def test_validation_errors():
     ("z0_zeroshot", lambda c: c["finetune"]["enabled"] is False and c["finetune"]["inference_path"] == "torch"),
     ("l1_lora_r8", lambda c: c["finetune"]["enabled"] is True and c["finetune"]["lora"]["rank"] == 8),
     ("d2_pstar_point", lambda c: c["decision"]["point"]["default"] == "p_star"),
-    ("g1_solar_cov", lambda c: c["features"]["derived"] == {"solar_elevation": True, "clear_sky_power": True}),
+    ("g1_solar_cov", lambda c: c["features"]["derived"] == {"solar_elevation": True, "clear_sky_power": True,
+                                                         "history_envelope": False, "envelope_nwp": False}),
     ("g2_cs_ceiling", lambda c: c["decision"]["physics"]["clear_sky_cap_ratio"] == 1.05),
     # 第 2 阶段：训练协议 + 收益定位（与 l1 同协议，只差一处）
     ("s2_lr3e5_ema", lambda c: c["train"]["schedule"]["lr"] == 3e-5 and c["train"]["ema_decay"] == 0.998
@@ -95,9 +110,41 @@ def test_validation_errors():
                                   and c["finetune"]["lora"]["target_modules"] == ["query_proj", "key_proj", "value_proj", "out_proj"]),
     ("s3_cov_all_var", lambda c: len(c["features"]["past_future"]) == 4 and c["features"]["derived"]["clear_sky_power"]
                                  and c["finetune"]["lora"]["target_modules"][0].startswith("re:")),
-    ("s5_rank4", lambda c: (c["finetune"]["lora"]["rank"], c["finetune"]["lora"]["alpha"]) == (4, 8)),
-    ("s5_rank16", lambda c: (c["finetune"]["lora"]["rank"], c["finetune"]["lora"]["alpha"]) == (16, 32)),
-    ("s5_rank32", lambda c: (c["finetune"]["lora"]["rank"], c["finetune"]["lora"]["alpha"]) == (32, 64)),
+    # rsLoRA 口径：alpha/√rank 与 r8·α16 相同（≈5.66），冻结 head
+    ("s5_rank4", lambda c: c["finetune"]["lora"]["rank"] == 4 and c["finetune"]["lora"]["alpha"] / 4 ** 0.5 == pytest.approx(16 / 8 ** 0.5, rel=1e-3)
+                           and c["finetune"]["unfreeze_output_head"] is False),
+    ("s5_rank16", lambda c: c["finetune"]["lora"]["rank"] == 16 and c["finetune"]["lora"]["alpha"] / 16 ** 0.5 == pytest.approx(16 / 8 ** 0.5, rel=1e-3)
+                            and c["finetune"]["unfreeze_output_head"] is False),
+    ("s5_rank32", lambda c: c["finetune"]["lora"]["rank"] == 32 and c["finetune"]["lora"]["alpha"] / 32 ** 0.5 == pytest.approx(16 / 8 ** 0.5, rel=1e-3)
+                            and c["finetune"]["unfreeze_output_head"] is False),
+    # 第 7 阶段：协议 / 优化器 / PEFT 对照（都冻结 head，s7_head_lr_split / s7_lpft 除外）
+    ("s7_fh_lr3e4", lambda c: c["train"]["schedule"]["lr"] == 3e-4 and c["train"]["schedule"]["max_steps"] == 8000
+                              and c["finetune"]["unfreeze_output_head"] is False),
+    ("s7_fh_lr1e3", lambda c: c["train"]["schedule"]["lr"] == 1e-3 and c["train"]["schedule"]["max_steps"] == 8000),
+    ("s7_fh_const", lambda c: c["train"]["schedule"]["lr_scheduler"] == "constant" and c["train"]["ema_decay"] is None
+                              and c["train"]["schedule"]["max_steps"] == 4000),
+    ("s7_lora_plus", lambda c: c["train"]["optim"]["lora_plus_ratio"] == 16 and c["finetune"]["unfreeze_output_head"] is False),
+    ("s7_head_lr_split", lambda c: c["train"]["optim"]["head_lr"] == 1e-5 and c["train"]["schedule"]["lr"] == 3e-4
+                                   and c["finetune"]["unfreeze_output_head"] is True),
+    ("s7_lpft", lambda c: "{seed}" in c["finetune"]["init_from"] and "s2_head_only" in c["finetune"]["init_from"]),
+    ("s7_ia3", lambda c: c["finetune"]["lora"]["target_modules"] == [] and c["finetune"]["ia3"]["target_modules"] == ["key_proj", "value_proj", "ff0"]),
+    ("s7_rb_adapter", lambda c: c["finetune"]["resblock_adapter"]["rank"] == 32 and c["finetune"]["lora"]["target_modules"]),
+    # 第 8 阶段：soft prompt / 静态站点信息
+    ("s8_prompt4", lambda c: c["finetune"]["prompt"]["n_tokens"] == 4 and not c["finetune"]["prompt"]["per_station"]),
+    ("s8_prompt4_station", lambda c: c["finetune"]["prompt"]["per_station"] and c["finetune"]["prompt"]["station_dropout"] == 0.25),
+    ("s8_prompt_only", lambda c: c["finetune"]["lora"]["target_modules"] == [] and c["finetune"]["prompt"]["n_tokens"] == 8),
+    ("s8_static_embed", lambda c: c["finetune"]["static_embed"]["enabled"] and c["finetune"]["lora"]["target_modules"]),
+    # 第 9 阶段：条件 LoRA
+    ("s9_gated_lora", lambda c: c["finetune"]["lora"]["gate"] is True and c["finetune"]["lora"]["experts"] == 1
+                                and c["train"]["optim"]["adapter_lr"] == 1e-3),
+    ("s9_hydra_k3", lambda c: c["finetune"]["lora"]["experts"] == 3 and c["finetune"]["lora"]["gate"] is False
+                              and c["train"]["optim"]["adapter_lr"] == 1e-3),
+    # 第 3 阶段：历史日形包络（C1 / C2），训练版冻结 head，零样本版不训
+    ("s3_c1_envelope", lambda c: c["features"]["derived"]["history_envelope"] and not c["features"]["derived"]["envelope_nwp"]
+                                 and c["finetune"]["enabled"]),
+    ("s3_c2_envelope_nwp", lambda c: c["features"]["derived"]["history_envelope"] and c["features"]["derived"]["envelope_nwp"]),
+    ("s3_c1_envelope_zs", lambda c: c["features"]["derived"]["history_envelope"] and c["finetune"]["enabled"] is False),
+    ("s3_c2_envelope_nwp_zs", lambda c: c["features"]["derived"]["envelope_nwp"] and c["finetune"]["enabled"] is False),
 ])
 
 def test_variants_load(name, check):
@@ -116,5 +163,8 @@ def test_every_variant_yaml_is_covered_by_a_test():
                "s2_lr1e5_ema", "s2_head_only", "s2_frozen_head", "s2_lora_resblock", "s2_probe_resblock", "s2_lora_var_resblock",
                "s2_lora_var_only", "s2_lora_seq_only", "s6_all_linear", "s6_lora_vo_only",
                "s6_full_ft_lr1e6", "s6_full_ft_lr1e5", "s6_partial_ends",
-               "s3_solargis_cov", "s3_cov_all_var", "s5_rank4", "s5_rank16", "s5_rank32"}
+               "s3_solargis_cov", "s3_cov_all_var", "s5_rank4", "s5_rank16", "s5_rank32",
+               "s7_fh_lr3e4", "s7_fh_lr1e3", "s7_fh_const", "s7_lora_plus", "s7_head_lr_split", "s7_lpft", "s7_ia3", "s7_rb_adapter",
+               "s8_prompt4", "s8_prompt4_station", "s8_prompt_only", "s8_static_embed", "s9_gated_lora", "s9_hydra_k3",
+               "s3_c1_envelope", "s3_c2_envelope_nwp", "s3_c1_envelope_zs", "s3_c2_envelope_nwp_zs"}
     assert names == covered, names ^ covered

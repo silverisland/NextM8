@@ -136,7 +136,7 @@ def build_training_args(cfg: dict, out_dir, max_steps=None):
         output_dir=str(Path(out_dir) / "hf"), per_device_train_batch_size=per_device_batch(s),
         num_train_epochs=float(s["epochs_max"]), learning_rate=float(s["lr"]), weight_decay=float(s["weight_decay"]),
         max_grad_norm=float(s["grad_clip"]), bf16=bf16, fp16=fp16, use_cpu=not cuda,
-        lr_scheduler_type="cosine", warmup_steps=int(s.get("warmup_steps", 0)),
+        lr_scheduler_type=str(s.get("lr_scheduler") or "cosine"), warmup_steps=int(s.get("warmup_steps", 0)),
         save_strategy="no", logging_steps=int(s.get("logging_steps", 50)), report_to=[],
         remove_unused_columns=False, disable_tqdm=not bool(s.get("progress_bar", True)), dataloader_pin_memory=cuda,
         dataloader_num_workers=int(s.get("num_workers", 0)),

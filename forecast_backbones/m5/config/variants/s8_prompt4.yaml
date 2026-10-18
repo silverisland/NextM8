@@ -1,0 +1,5 @@
+# 第 8 阶段·soft prompt：LoRA 同 l1 + 4 个全局虚拟变量（可学 token，经 var_attn 被功率与 NWP 看到），冻结 head。
+# 注意：prompt 开时第 0 步不再等于零样本（多出的 token 进 softmax），训练日志第 0 步分数会偏离 z0
+finetune:
+  unfreeze_output_head: false
+  prompt: {n_tokens: 4}

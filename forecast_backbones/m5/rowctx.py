@@ -76,6 +76,7 @@ class RowCtx:
     degraded: np.ndarray        # [B] bool：站表缺坐标，走钟表几何
     cs_ratio: np.ndarray = None # [B]，M5 恒 1
     envelope_used: np.ndarray = None   # [B]，M5 恒 False
+    slot: np.ndarray = None     # [B, T] int：每步的一天内时刻槽号（0..n_day-1，本地墙钟），历史包络按它对齐
 
 
 class RowContextBuilder:
@@ -114,6 +115,8 @@ class RowContextBuilder:
                               f"（M5 默认不用几何，只影响 aux 与 g1 / g2 变体）")
                 _DEGRADED_WARNED.update(new)
         p_clear = np.where(degraded[:, None], np.where(ghi > 0, cap[:, None], 0.0), ghi / 1000.0 * cap[:, None])
+        tsm = ts.astype("datetime64[m]")
+        slot = ((tsm - tsm.astype("datetime64[D]")).astype(np.int64) // self.step_min).astype(np.int64)
         return RowCtx(station_id=sid, cap=cap, elev_deg=elev, ghi_clear=ghi, p_clear=p_clear, night=elev <= 0.0,
                       k_steps=np.zeros((B, self.H)), var_signal=np.zeros(B), degraded=degraded,
-                      cs_ratio=np.ones(B), envelope_used=np.zeros(B, bool))
+                      cs_ratio=np.ones(B), envelope_used=np.zeros(B, bool), slot=slot)

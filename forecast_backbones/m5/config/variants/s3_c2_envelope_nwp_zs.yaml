@@ -1,0 +1,5 @@
+# 第 3 阶段·C2 零样本：C1 + C2 两条通道的零样本分（与 z0、s3_c1_envelope_zs 比）
+features:
+  derived: {history_envelope: true, envelope_nwp: true}
+finetune:
+  enabled: false

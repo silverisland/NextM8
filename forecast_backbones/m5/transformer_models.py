@@ -369,6 +369,7 @@ class TransformersAdaptedM5Model(nn.Module):
         self.backbone = None                      # torch 路径的 TorchBackbone 子模块（_attach_torch_path 赋值）
         self._backbone, self._backbone_device = None, None
         self.weights_loaded = False
+        self._cond = None                         # adapters.CondState（prompt / 静态嵌入 / 门控 LoRA 开时）
         self._progress_desc = None
         if bool(t3.get("eager_init", True)):
             self._ensure_backbone(self._resolve_device())
@@ -408,7 +409,11 @@ class TransformersAdaptedM5Model(nn.Module):
             bad = [b for b in blocks if b not in known]
             if bad:
                 raise ValueError(f"finetune.unfreeze_modules 里的模块不存在：{bad}（顶层可选：{sorted(n for n in known if n and '.' not in n)}）")
-            lora.inject_lora(root, list(lo["target_modules"]), int(lo["rank"]), float(lo["alpha"]), float(lo["dropout"]))
+            lora.inject_lora(root, list(lo["target_modules"]), int(lo["rank"]), float(lo["alpha"]), float(lo["dropout"]),
+                             int(lo.get("experts", 1) or 1))
+            lora.inject_ia3(root, list((ft.get("ia3") or {}).get("target_modules") or []))
+            self._cond = _dep("adapters").attach(root, ft, n_slots=1 + len(self.station_meta.ids()),
+                                                 n_z=_dep("envelope").N_REGIME)
             lora.freeze_all_but_lora(root, bool(ft["unfreeze_output_head"]), unfreeze_modules=blocks)
             if not any(p.requires_grad for p in root.parameters()):
                 raise ValueError("finetune.enabled=true 但没有任何可训参数：lora.target_modules 为空、unfreeze_output_head=false、"
@@ -462,9 +467,63 @@ class TransformersAdaptedM5Model(nn.Module):
             pf.append(ctx.elev_deg.astype(np.float32))
         if d.get("clear_sky_power"):
             pf.append(ctx.p_clear.astype(np.float32))
+        if d.get("history_envelope"):
+            pf.append(self._envelopes(batch_dict, ctx)["power_env"].astype(np.float32))
+        if d.get("envelope_nwp"):
+            e = self._envelopes(batch_dict, ctx)
+            pf.append((e["power_env"] * e["ratio"]).astype(np.float32))
         po = [self._col(batch_dict, c)[:, -L:] for c in self.past_only_cols]
         return (np.stack(pf, axis=1).astype(np.float32) if pf else None,
                 np.stack(po, axis=1).astype(np.float32) if po else None)
+
+    def _envelopes(self, batch_dict: dict, ctx) -> dict:
+        """C1 / C2 / 形势特征共用的包络（envelope.py），一次前向只算一次（缓存挂在 ctx 上）。
+        → power_env [B,T] 功率历史日形包络；ratio [B,T] = clip(GHI_nwp / GHI 历史包络, 0, clip_max)；
+          k_fut [B,H] 未来晴空指数（上限 1.5）、day_fut [B,H] 白天步。"""
+        cached = getattr(ctx, "_m5_env", None)
+        if cached is not None:
+            return cached
+        ev, en = _dep("envelope"), self.cfg["features"]["envelope"]
+        L, H = self.context_len, self.pred_len
+        n_day = 1440 // int(self.cfg["dataset"]["step_min"])
+        q, sm = float(en["quantile"]), int(en["smooth"])
+        hist_c, fut_c = en["ghi"]
+        missing = [c for c in (hist_c, fut_c) if c not in batch_dict]
+        if missing:
+            raise KeyError(f"features.envelope.ghi 的列 {missing} 不在数据里：历史包络 × NWP（envelope_nwp）与门控 / 路由 LoRA 的形势特征要用它，"
+                           f"改 features.envelope.ghi 成数据里的 GHI 列对")
+        y = np.asarray(self._col(batch_dict, self.target_col)[:, -L:], float)
+        ghi_h = np.asarray(self._col(batch_dict, hist_c)[:, -L:], float)
+        ghi = np.concatenate([ghi_h, np.asarray(self._col(batch_dict, fut_c)[:, :H], float)], axis=1)
+        power_env = ev.envelope_rows(y, ctx.slot, n_day, q, sm)
+        ghi_env = ev.envelope_rows(ghi_h, ctx.slot, n_day, q, sm)
+        floor = float(en["ghi_floor"])
+        out = {"power_env": power_env, "ratio": ev.nwp_ratio(ghi, ghi_env, floor, float(en["clip_max"])),
+               "k_fut": ev.nwp_ratio(ghi[:, L:], ghi_env[:, L:], floor, 1.5), "day_fut": ghi_env[:, L:] > floor}
+        ctx._m5_env = out
+        return out
+
+    def _set_cond(self, batch_dict: dict, ctx) -> None:
+        """适配器的逐样本条件量写进 CondState（adapters.py）：静态特征、prompt 逐站行号、形势特征 → LoRA 门 / 路由权重。"""
+        mods = getattr(self.backbone.model, _dep("lora").ADAPTER_ROOT)
+        ad = _dep("adapters")
+        dev = self.backbone.device
+        sid = np.asarray(ctx.station_id, int)
+        static = slot = z = lora_w = None
+        if "static_embed" in mods:
+            static = torch.as_tensor(ad.static_features(self.station_meta, lambda s: self.ctx_builder.station_caps(np.array([s]))[0], sid),
+                                     device=dev)
+        if "prompt" in mods and mods["prompt"].station is not None:
+            known = set(int(s) for s in (self.cfg["dataset"].get("known_stations") or []))
+            ids = self.station_meta.ids()
+            slot = torch.as_tensor([1 + ids.index(int(s)) if int(s) in known and int(s) in ids else 0 for s in sid],
+                                   dtype=torch.long, device=dev)
+        if "lora_cond" in mods:
+            e = self._envelopes(batch_dict, ctx)
+            has = np.array([self.station_meta.has_coords(int(s)) for s in sid], float)
+            z = torch.as_tensor(_dep("envelope").regime_features(e["k_fut"], e["day_fut"], has), device=dev)
+            lora_w = mods["lora_cond"](z)
+        self._cond.set(len(sid), static=static, slot=slot, z=z, lora_w=lora_w)
 
     def _quantiles(self, tgt: np.ndarray, pf, po) -> torch.Tensor:
         """→ [B,H,9] float32 真实单位。torch 路径可微（训练时带梯度）；evaluator 路径走 predict_batch（无梯度）。"""
@@ -493,6 +552,8 @@ class TransformersAdaptedM5Model(nn.Module):
         tgt = self._col(batch_dict, self.target_col)[:, -self.context_len:]
         ctx = self.ctx_builder.build(batch_dict)
         pf, po = self._covariates(batch_dict, ctx)
+        if self._cond is not None:
+            self._set_cond(batch_dict, ctx)
         return self._quantiles(tgt, pf, po), ctx
 
     @torch.no_grad()

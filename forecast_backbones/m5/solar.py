@@ -137,6 +137,9 @@ class StationMeta:
     def get(self, station_id) -> dict | None:
         return self._rows.get(int(station_id))
 
+    def ids(self) -> list[int]:
+        return sorted(self._rows)
+
     def has_coords(self, station_id) -> bool:
         r = self.get(station_id)
         return r is not None and np.isfinite(r["lat"]) and np.isfinite(r["lon"])

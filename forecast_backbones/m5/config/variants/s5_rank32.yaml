@@ -1,3 +1,5 @@
-# 第 5 阶段·容量：LoRA rank 32（alpha = 2·rank = 64，与 l1 的缩放 alpha/rank = 2 相同）；靶点同 l1
+# 第 5 阶段·容量：LoRA rank 32，冻结 head（= s2_frozen_head 基线）。alpha 按 rsLoRA 口径取 32.0（α/√r 与 r8·α16 相同 = 5.66），
+# 让秩与有效步长不混在一起（α=2r 时 r4/r16/r32 的有效步长是 r8 的 ×0.71/×1.41/×2）；靶点同 l1
 finetune:
-  lora: {rank: 32, alpha: 64}
+  lora: {rank: 32, alpha: 32.0}
+  unfreeze_output_head: false

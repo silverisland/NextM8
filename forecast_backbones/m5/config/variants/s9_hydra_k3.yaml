@@ -1,0 +1,7 @@
+# 第 9 阶段·HydraLoRA 式：共享 A、3 个 B，按天气形势逐样本路由（softmax），冻结 head；可训参数约 l1 的 2 倍。
+# 让晴天 / 多云 / 转折天各自有一套增量；与 s9_gated_lora 二选一的结构
+finetune:
+  unfreeze_output_head: false
+  lora: {experts: 3}
+train:
+  optim: {adapter_lr: 1.0e-3}    # 门控 / 路由网络用 1e-3（主 lr 1e-4 下 4000 步只挪 ~0.4 个 logit，路由近乎冻结在初值）

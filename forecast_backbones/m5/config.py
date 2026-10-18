@@ -58,6 +58,7 @@ def raw_override(config_path) -> dict:
 
 
 LORA_TARGETS = ["query_proj", "key_proj", "value_proj", "out_proj"]
+LR_SCHEDULERS = ("cosine", "constant", "constant_with_warmup", "linear")
 
 DEFAULT_CFG: dict = {
     "run": {"model_name": "m5", "seeds": [0], "out_dir": "runs/m5_baseline"},
@@ -89,22 +90,37 @@ DEFAULT_CFG: dict = {
         "past_future": [["general_ghi", "general_ghi_predict"], ["general_temp", "general_temp_predict"]],
         "past_only": [],
         # D8：几何协变量默认关，输入与线上 M5 相同；g1 变体打开（太阳高度角 / 晴空出力各一个 past_future 通道）
-        "derived": {"solar_elevation": False, "clear_sky_power": False},
+        # history_envelope（C1）：功率历史日形包络一条通道；envelope_nwp（C2）：包络 × clip(GHI_nwp / GHI 历史包络)；都不需要坐标
+        "derived": {"solar_elevation": False, "clear_sky_power": False, "history_envelope": False, "envelope_nwp": False},
+        # 包络参数（C1 / C2 与门控 / 路由 LoRA 的形势特征共用）：上下文 7 天同一时刻槽的 quantile 分位、环形平滑 smooth 步；
+        # ghi = [历史列, 未来列]（C2 与形势特征用）；ghi_floor：GHI 包络低于它的步当夜间（比值记 0）；clip_max：C2 比值上限
+        "envelope": {"quantile": 0.9, "smooth": 3, "ghi": ["general_ghi", "general_ghi_predict"], "ghi_floor": 20.0, "clip_max": 1.2},
     },
     "finetune": {
         "enabled": True,
         "inference_path": "torch",          # enabled=false 时零样本走哪条：torch（与 LoRA 同一可微路径）| evaluator（predict_batch）
         "method": "lora",                   # 目前只有 lora；后续 PEFT 变体的开关位
-        "lora": {"rank": 8, "alpha": 16, "dropout": 0.05, "target_modules": list(LORA_TARGETS)},
+        # experts>1：HydraLoRA 式（共享 A、K 个 B，按形势特征路由）；gate：Gated-LoRA（按形势特征逐样本调 LoRA 强度，初值 1）
+        "lora": {"rank": 8, "alpha": 16, "dropout": 0.05, "target_modules": list(LORA_TARGETS), "experts": 1, "gate": False},
         "unfreeze_output_head": True,
         # 整块解冻（全参数可训，与 LoRA 并存）：如 ["pre_transformer_resblock"]（读 NWP 前瞻的输入残差块）
         "unfreeze_modules": [],
+        # 以下适配器全部默认关（adapters.py）；关时模型与原 LoRA 逐位相同
+        "ia3": {"target_modules": []},      # (IA)³ 逐通道缩放（靶点规则同 LoRA，不能与 LoRA 靶点重叠）
+        "prompt": {"n_tokens": 0, "per_station": False, "station_dropout": 0.25, "init_std": 0.02},   # 虚拟变量 soft prompt
+        "static_embed": {"enabled": False, "dropout": 0.25},   # 零初始化静态加性嵌入（经纬度 / 海拔 / log 容量 / has_coords）
+        "resblock_adapter": {"rank": 0},    # 残差块输出上的非线性适配器（0 = 关）
+        "init_from": None,                  # LP-FT 热启动：训练前从这个权重文件拷入同名可训参数（如 head_only run 的 model.safetensors）；{seed} 换成本 run 种子
     },
     "train": {
         # batch_size：全局 batch（所有卡合计），每卡 = batch_size / 卡数，须整除；单卡时与旧口径相同
         "schedule": {"lr": 1.0e-4, "weight_decay": 0.01, "batch_size": 16, "max_steps": 4000, "epochs_max": 10,
                      "warmup_steps": 0, "grad_clip": 1.0, "precision": "fp32", "logging_steps": 20,
-                     "eval_every_steps": 250, "sampling": "random", "progress_bar": True, "num_workers": 0},
+                     "eval_every_steps": 250, "sampling": "random", "progress_bar": True, "num_workers": 0,
+                     "lr_scheduler": "cosine"},     # cosine | constant | constant_with_warmup | linear（HF lr_scheduler_type）
+        # 优化器参数分组（全 null = HF 默认单组）：lora_plus_ratio = LoRA+（lora_B 的 lr = lr × 该值）；
+        # head_lr / adapter_lr = output_head / 其余可训参数（解冻块、(IA)³、prompt 等）单独的 lr
+        "optim": {"lora_plus_ratio": None, "head_lr": None, "adapter_lr": None},
         # night_weight：夜间步在损失里的权重（1 = 同权）。normalize_by_cap：q、y 都除以该行 cap 再算 pinball（false = 真实单位）
         "loss": {"night_weight": 1.0, "normalize_by_cap": True},
         "early_stop": {"metric": "nanwang_after_pstar", "patience": 5, "nrmse_issue_every_min": 60, "smooth_k": 1},
@@ -170,6 +186,13 @@ def load_config(src) -> dict:
         raise ValueError(f"finetune.inference_path 须是 torch 或 evaluator，得到 {ft['inference_path']!r}")
     if int(ft["lora"]["rank"]) <= 0:
         raise ValueError(f"finetune.lora.rank 须 > 0，得到 {ft['lora']['rank']!r}")
+    if ft["lora"].get("experts") is None or int(ft["lora"]["experts"]) < 1:
+        raise ValueError(f"finetune.lora.experts 须 ≥ 1，得到 {ft['lora'].get('experts')!r}")
+    if bool(ft["lora"].get("gate")) and int(ft["lora"].get("experts", 1) or 1) > 1:
+        raise ValueError("finetune.lora.gate 与 experts>1 二选一（experts>1 的路由权重本身就是逐样本门）")
+    sched = str(cfg["train"]["schedule"].get("lr_scheduler") or "cosine")
+    if sched not in LR_SCHEDULERS:
+        raise ValueError(f"train.schedule.lr_scheduler 须是 {LR_SCHEDULERS} 之一，得到 {sched!r}")
     ratio = cfg["decision"]["physics"].get("clear_sky_cap_ratio")
     if ratio is not None and not float(ratio) > 0:
         raise ValueError(f"decision.physics.clear_sky_cap_ratio 须为 null（无晴空上限）或正数，得到 {ratio!r}")

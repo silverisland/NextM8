@@ -1,0 +1,7 @@
+# 第 7 阶段·优化器分组（LoRA+）：lora_B 的 lr = 16 × lora_A 的 lr（Hayou 等 2024 的常用比值），冻结 head；
+# 文献里调好 lr 后 LoRA+ 只领先约 0.08 分，所以只在 lr 上探（s7_fh_lr*）之后看它是否还有增量
+finetune:
+  unfreeze_output_head: false
+train:
+  schedule: {max_steps: 8000}
+  optim: {lora_plus_ratio: 16}

@@ -1,0 +1,5 @@
+# 第 7 阶段·协议（lr 上探）：s2 里 lr 1e-5 → 3e-5 → 1e-4 单调上升且 best_step 撞 4000 上限 → 冻结 head + lr 3e-4、预算 8000 步
+finetune:
+  unfreeze_output_head: false
+train:
+  schedule: {lr: 3.0e-4, max_steps: 8000}

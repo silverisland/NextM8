@@ -1,0 +1,5 @@
+# 第 7 阶段·LP-FT：先线性探测（s2_head_only 已训好的 head）再接着训 LoRA + head（Kumar 等 2022）。主要预期是降低种子方差。
+# init_from 默认指向 m5_s2 批次的 head_only 产物（{seed} = 本 run 种子，s0/s1/s2 各接各的）；目录不同就改这里
+finetune:
+  unfreeze_output_head: true
+  init_from: runs/m5/m5_s2/s2_head_only_s{seed}/model.safetensors
