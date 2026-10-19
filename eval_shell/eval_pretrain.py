@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""eval_pretrain.py —— 零样本基础模型（M5 TimesFM-3 / M7 PatchTST-FM-r2 …）单站 192 步评测入口。
+"""eval_pretrain.py —— 零样本基础模型（M5 TimesFM-3 / M7 Timestral-209M …）单站 192 步评测入口。
 （原 m5_station_script.py，推广为按 --model 选模型的公用脚本。）
 
 背景：M1-M4 的 eval_station_script.py 走 load_model_from_checkpoint,要求
 model.safetensors + strict load_state_dict；零样本 adapter 没有训练
 checkpoint、不 load_state_dict（权重由 adapter 内部按配置里的 checkpoint 字段加载：
-M5 为 timesfm3.checkpoint，M7 为 patchtst_fm.checkpoint）。因此与 mF_mean 的
+M5 为 timesfm3.checkpoint，M7 为 timestral.checkpoint）。因此与 mF_mean 的
 fusion_station_script.py 同理：
   配置档 -> pipelines.model_registry.import_model_class(<model>)(config) -> model.to(device).eval()
 新增零样本模型只要满足 M5/M7 的 adapter 契约（Model(model_config)、forward(batch_dict)
@@ -38,7 +38,7 @@ make_models_summary 汇总。
     --tail_scale <factor>：把每条历史序列末尾 --tail_len（默认 4）个点整体乘以 factor
     （如 0.1 = 末尾 4 点×0.1）。不传 --tail_scale 则行为与旧版完全一致（无缩放）。
     
-huggingface-cli download ibm-granite/granite-timeseries-patchtst-fm-r2 --local-dir /data/tangqingang/granite-timeseries-patchtst-fm-r2
+huggingface-cli download mistralai/Timestral-209M --local-dir /data/tangqingang/Timestral-209M
 """
 
 import argparse
@@ -86,7 +86,7 @@ def load_pretrain_model(model_name, checkpoint_dir, device):
     """从配置直接构建零样本 adapter（无 safetensors 加载）-> (model, model_config)。
 
     与 eval_station_script.load_model_from_checkpoint 的区别：零样本模型没有可加载的
-    state_dict；checkpoint_dir 只提供配置（M5 的 timesfm3 段 / M7 的 patchtst_fm 段），
+    state_dict；checkpoint_dir 只提供配置（M5 的 timesfm3 段 / M7 的 timestral 段），
     基础模型权重由 adapter 自己加载。model_name 为 None 时取配置里的 run.model_name。
     构建后 to(device).eval()。
     """

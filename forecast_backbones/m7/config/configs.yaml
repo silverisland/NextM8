@@ -3,18 +3,23 @@ run:
 model: {}
 dataset:
   pv_col: observe_power
-patchtst_fm:
-  # 服务器本地权重目录（离线）：huggingface-cli download ibm-granite/granite-timeseries-patchtst-fm-r2 --local-dir <下行路径>
-  checkpoint: /data/tangqingang/granite-timeseries-patchtst-fm-r2
+timestral:
+  # 服务器本地权重目录（离线）：huggingface-cli download mistralai/Timestral-209M --local-dir <下行路径>
+  checkpoint: /data/tangqingang/Timestral-209M
   context_len: 672
   pred_len: 192
   eager_init: true
   device: auto
+  # 与 M5 零样本相同的两对未来已知协变量（历史 672 + 未来 192 拼接）
+  past_future_cols:
+    - [general_ghi,general_ghi_predict]
+    - [general_temp,general_temp_predict]
+  past_only_cols: []
   per_core_batch_size: 64
-  # 与 M5 的 9 档对齐（须是模型 0.01~0.99 的子集）
+  # 与 M5 的 9 档对齐（须是模型 21 档 0.01/0.05/0.1/…/0.95/0.99 的子集）
   quantile_levels: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
   return_quantiles: true
-  predict_quantile: null   # null=模型点预测（99 档分位积分的均值）；0.5=中位数
-  nan_policy: interp
+  predict_quantile: null   # null=中位数（同 M5）
+  nan_policy: interp       # 同 M5；native=NaN 交给 Timestral 的观测掩码
   make_positive: true
-  # 注意：PatchTST-FM 不支持协变量，没有 past_future_cols / past_only_cols
+  symmetric_averaging: true

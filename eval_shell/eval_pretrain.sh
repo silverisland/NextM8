@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# eval_pretrain.sh —— 零样本基础模型（M5 TimesFM-3 / M7 PatchTST-FM-r2 …）逐站 192 步并行评测
+# eval_pretrain.sh —— 零样本基础模型（M5 TimesFM-3 / M7 Timestral-209M …）逐站 192 步并行评测
 # （原 eval_m5.sh，按 MODEL 选模型，M5/M7 共用同一套分片 + eval_pretrain.py）
 #
 # 与 eval_station_parallel_shell.sh 完全同构（各 worker 独占 GPU，按连续块切分）：
@@ -11,10 +11,10 @@
 #
 # 用法（cwd 任意）：
 #   bash eval_shell/eval_pretrain.sh                 # 默认 MODEL=m5，与旧 eval_m5.sh 行为一致
-#   MODEL=m7 bash eval_shell/eval_pretrain.sh        # PatchTST-FM-r2
+#   MODEL=m7 bash eval_shell/eval_pretrain.sh        # Timestral-209M
 # 环境变量（均有默认）：
-#   MODEL        模型名            默认 m5（m7 = PatchTST-FM-r2）
-#   PYTHON       解释器            默认 /home/ma-user/ts3/bin/python（M7 需在该环境装 granite-tsfm>=0.3.9）
+#   MODEL        模型名            默认 m5（m7 = Timestral-209M）
+#   PYTHON       解释器            默认 /home/ma-user/ts3/bin/python（M7 需在该环境装 timestral，torch 较老时 --no-deps）
 #   CKPT_DIR     模型配置目录      默认 $BASE_DIR/forecast_backbones/$MODEL
 #   STATION_DIR  17 站 test 数据  默认 $BASE_DIR/datasets/test
 #   OUT_DIR      结果输出目录     默认 $BASE_DIR/runs/$MODEL/pretrain_100m_v1/metrics_ens
