@@ -17,12 +17,12 @@ import numpy as np
 import pandas as pd
 
 try:
-    from .solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
+    from .solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw, norm_station_name
     from ._arrays import interp_nan
     from .config import future_only_cols
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from forecast_backbones.m8.solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
+    from forecast_backbones.m8.solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw, norm_station_name
     from forecast_backbones.m8._arrays import interp_nan
     from forecast_backbones.m8.config import future_only_cols
 
@@ -170,6 +170,13 @@ class FeatureBuilder:
         self.derived = fe["derived"]
         self.static_cfg = fe["static"]
         self.csi_col = fe.get("clear_sky_index_col")
+        # 列名解析（2026-10-19）：配置列名 → 数据列名。先精确匹配，再查 col_aliases（如 timesfm3 ← 线上的 tsfm_predict），
+        # 最后大小写不敏感（general_ghi ↔ general_GHI）；同一列有两个大小写变体时报错，不猜
+        self.col_aliases = {str(k): [str(a) for a in (v if isinstance(v, (list, tuple)) else [v])]
+                            for k, v in (fe.get("col_aliases") or {}).items()}
+        # 训练数据里实际有的 past_future 对（训练入口写进 model_config.yaml）：推理时其中任何一对缺列 → 整行按 cov_dropout 兜底
+        cp = fe.get("cov_present")
+        self.cov_present = None if cp is None else {tuple(p) for p in cp}
         self.envelope_cfg = dict(self.derived.get("history_envelope") or {})
         if bool(self.envelope_cfg.get("enabled", False)) and self.L % (1440 // self.step_min) != 0:
             raise ValueError(f"features.derived.history_envelope 要求 context_len({self.L}) 是一天步数({1440 // self.step_min})的整数倍")
@@ -207,11 +214,74 @@ class FeatureBuilder:
         shift, scale = self.scales.get("default", [0.0, 1.0])
         return float(shift), float(scale)
 
+    def resolve_col(self, keys, col: str) -> str | None:
+        """配置列名 col → keys（数据列名 / batch_dict 键）里实际用的那一个；找不到返回 None。"""
+        keys = list(keys)
+        if col in keys:
+            return col
+        for a in self.col_aliases.get(col, ()):
+            if a in keys:
+                return a
+        for c in [col] + self.col_aliases.get(col, []):
+            hits = [k for k in keys if isinstance(k, str) and k.lower() == c.lower()]
+            if len(hits) > 1:
+                raise ValueError(f"列 {c!r} 在数据里有多个大小写变体 {hits}，无法确定用哪个；请删掉多余的列")
+            if hits:
+                return hits[0]
+        return None
+
+    def _get(self, batch_dict: dict, col: str) -> str | None:
+        """resolve_col + 非精确匹配时提示一次（训练日志 / 线上日志里能看到配置列名实际对上了哪一列）。"""
+        k = self.resolve_col(batch_dict.keys(), col)
+        if k is not None and k != col and (col, k) not in _WARNED_MISSING:
+            warnings.warn(f"配置列 {col!r} 用数据里的 {k!r}（别名 / 大小写不敏感匹配）")
+            _WARNED_MISSING.add((col, k))
+        return k
+
+    def input_report(self, columns) -> tuple[list[str], dict]:
+        """数据列名 → (可读的逐行说明, {配置列: 数据列或 None})。训练开始与线上推理前各打一次，核对协变量设置。"""
+        cols = [str(c) for c in columns]
+        res: dict = {}
+
+        def show(c):
+            k = self.resolve_col(cols, c); res[c] = k
+            return f"{c} ✓" if k == c else (f"{c} → 数据列 {k} ✓" if k else f"{c} ✗ 数据里没有")
+
+        sid = self.sid_col if self.sid_col in cols else ("station" if "station" in cols else None)
+        lines = [f"站点列: {sid or '✗ 没有 station_id / station'}" + ("（站名，按 station_meta 映射成站号）" if sid == "station" else ""),
+                 f"目标列（历史功率）: {show(self.pv_col)}"]
+        lc = self.cfg["dataset"]["label_col"]
+        if lc in cols:
+            lines.append(f"标签列: {lc} ✓")
+        lines.append(f"NWP 协变量 past_future（{len(self.pairs)} 对，缺列的对通道恒 0）:")
+        for h, f in self.pairs:
+            lines.append(f"  - 历史 {show(h)} | 未来 {show(f)}")
+        if self.past_only:
+            lines.append("past_only: " + "，".join(show(c) for c in self.past_only))
+        hint = self.cfg["features"].get("hint_col")
+        for c, spec in self.future_only:
+            role = "插值列 hint_col" if c == hint else "future_only"
+            lines.append(f"{role}（scale={spec}{'，残差基准' if c == self.resid_col else ''}）: {show(c)}")
+        if not self.future_only:
+            lines.append("插值列 hint_col: 不用")
+        csi = self.csi_col
+        lines.append(f"晴空指数列 clear_sky_index_col: {show(csi) if csi else '无'}")
+        d = self.derived
+        lines.append("派生通道: " + "，".join(k for k in ("solar", "time_encoding", "nwp_resid") if d.get(k, True))
+                     + f"；clear_sky_ratio={'开' if (d.get('clear_sky_ratio') or {}).get('enabled') else '关'}"
+                     + f"；history_envelope={'开' if (d.get('history_envelope') or {}).get('enabled') else '关'}")
+        st = self.static_cfg
+        lines.append("静态: " + "，".join(k for k in ("station_embedding", "context_stats", "coords", "log_cap") if st.get(k, True))
+                     + f"；target_scale={self.target_scale}")
+        lines.append(f"模型输入通道（{len(self.channel_names)}）: {self.channel_names}")
+        return lines, res
+
     def _pair(self, batch_dict: dict, hist_c: str, fut_c: str):
         """→ [B, T] 原始单位（已插值）；缺列返回 None（只提示一次）。"""
-        if hist_c in batch_dict and fut_c in batch_dict:
-            h = _col(batch_dict, hist_c, keep_nan=False)[:, -self.L:]
-            f = _col(batch_dict, fut_c, keep_nan=False)[:, :self.H]
+        hk, fk = self._get(batch_dict, hist_c), self._get(batch_dict, fut_c)
+        if hk is not None and fk is not None:
+            h = _col(batch_dict, hk, keep_nan=False)[:, -self.L:]
+            f = _col(batch_dict, fk, keep_nan=False)[:, :self.H]
             return np.concatenate([h, f], axis=1)
         if (hist_c, fut_c) not in _WARNED_MISSING:
             warnings.warn(f"past_future 协变量对 {(hist_c, fut_c)} 在 batch_dict 里缺列，该通道置 0（只提示一次）")
@@ -231,9 +301,18 @@ class FeatureBuilder:
         rng = rng if rng is not None else np.random.default_rng()
         ts_epoch = _to_np(batch_dict[self.ts_col]).astype(np.int64).reshape(-1)
         B = ts_epoch.shape[0]
-        if self.sid_col not in batch_dict:
-            raise ValueError(f"batch_dict 缺 {self.sid_col!r} 列：M8 按站查 station_meta 取容量与坐标，必须带数值 station_id")
-        sid = _to_np(batch_dict[self.sid_col]).astype(int).reshape(-1)
+        if self.sid_col in batch_dict:
+            sid = _to_np(batch_dict[self.sid_col]).astype(int).reshape(-1)
+        elif "station" in batch_dict:                                              # 只有站名（如 plant_guangfu1358）：按 station_meta 映射
+            names = list(np.asarray(_to_np(batch_dict["station"]) if hasattr(batch_dict["station"], "detach") else batch_dict["station"],
+                                    dtype=object).reshape(-1))
+            mapping, unknown, conflicts = self.meta.resolve(names)
+            if conflicts or unknown:
+                raise ValueError(f"站名映射失败：station_meta 里找不到 {unknown[:10]} {'；'.join(conflicts)}"
+                                 f"（station_meta 的 station 列要写数据里的站名）")
+            sid = np.array([mapping[norm_station_name(n)] for n in names], dtype=int)
+        else:
+            raise ValueError(f"batch_dict 缺 {self.sid_col!r} 列（也没有 station 站名列）：M8 按站查 station_meta 取容量与坐标")
         cap = self.station_caps(sid)
         ts = window_timestamps(ts_epoch, L, H, self.step_min)                         # [B, T] datetime64[s]
 
@@ -308,19 +387,24 @@ class FeatureBuilder:
         C = len(self.channel_names)
         x = np.zeros((B, T, C), np.float32)
         ghi_pred_full = None
+        csi = (self.csi_col or "").lower()
+        absent_trained = []                                                         # 训练时有、这次缺的对
         for hist_c, fut_c in self.pairs:
             arr = self._pair(batch_dict, hist_c, fut_c)
             if arr is None:
+                if self.cov_present is not None and (hist_c, fut_c) in self.cov_present:
+                    absent_trained.append((hist_c, fut_c))
                 continue
-            if fut_c == self.csi_col or (ghi_pred_full is None and ("ghi" in fut_c.lower() or "ssrd" in fut_c.lower())):
-                if fut_c == self.csi_col or ghi_pred_full is None:
+            if fut_c.lower() == csi or (ghi_pred_full is None and ("ghi" in fut_c.lower() or "ssrd" in fut_c.lower())):
+                if fut_c.lower() == csi or ghi_pred_full is None:
                     ghi_pred_full = arr
             sh, sc = self._scale(hist_c)
             x[:, :, self.idx[f"pf:{hist_c}"]] = (arr - sh) / sc
         for c in self.past_only:
-            if c in batch_dict:
+            k = self._get(batch_dict, c)
+            if k is not None:
                 sh, sc = self._scale(c)
-                x[:, :L, self.idx[f"po:{c}"]] = (_col(batch_dict, c, keep_nan=False)[:, -L:] - sh) / sc
+                x[:, :L, self.idx[f"po:{c}"]] = (_col(batch_dict, k, keep_nan=False)[:, -L:] - sh) / sc
         if ghi_pred_full is None:
             ghi_pred_full = np.zeros((B, T))
         k_nwp = np.clip(np.where(ghi > 50.0, ghi_pred_full / np.maximum(ghi, 1e-6), 0.0), 0.0, 1.5)
@@ -364,8 +448,13 @@ class FeatureBuilder:
         pdrop = float(self.cfg["train"].get("cov_dropout", 0.0))
         if training and pdrop > 0:
             cov_missing = rng.random(B) < pdrop
-            if cov_missing.any():
-                x[np.ix_(np.flatnonzero(cov_missing), np.arange(T), self.nwp_channels)] = 0.0
+        if absent_trained and not training:                                         # 线上缺了训练时有的 NWP：整组清零 + cov_missing=1（训练时 cov_dropout 见过这种输入）
+            if tuple(absent_trained) not in _WARNED_MISSING:
+                warnings.warn(f"训练时有的 NWP 协变量 {absent_trained} 推理时缺列：全部 NWP 通道按 cov_dropout 兜底（置 0、cov_missing=1）")
+                _WARNED_MISSING.add(tuple(absent_trained))
+            cov_missing[:] = True
+        if cov_missing.any():
+            x[np.ix_(np.flatnonzero(cov_missing), np.arange(T), self.nwp_channels)] = 0.0
         x[:, :, self.idx["cov_missing"]] = cov_missing[:, None]
 
         # 只有未来段的提示通道（如 TimesFM 预测）：历史段恒 0，CPM 掩掉的历史不会从这里漏回来；
@@ -376,7 +465,8 @@ class FeatureBuilder:
             ph = float(self.cfg["train"].get("hint_dropout", 0.0))
             if training and ph > 0:
                 hint_missing = rng.random(B) < ph
-            absent = [c for c, _ in self.future_only if c not in batch_dict]
+            keys = {c: self._get(batch_dict, c) for c, _ in self.future_only}
+            absent = [c for c, k in keys.items() if k is None]
             if absent and training:
                 raise ValueError(f"训练数据里没有插值 / 提示列 {absent}：检查 features.hint_col（或 train_m8.sh --hint_col）"
                                  f"是否写成了数据里的列名；现有列 {sorted(batch_dict)[:30]}")
@@ -389,7 +479,7 @@ class FeatureBuilder:
             for col, spec in self.future_only:
                 if col in absent:
                     continue
-                arr = _col(batch_dict, col, keep_nan=False)[:, :H]
+                arr = _col(batch_dict, keys[col], keep_nan=False)[:, :H]
                 if spec == "target":
                     val = arr * amp[:, None] / scale[:, None]
                 else:

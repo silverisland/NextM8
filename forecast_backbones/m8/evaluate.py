@@ -4,7 +4,7 @@
 
   python -m forecast_backbones.m8.evaluate --runs runs/m8/final/e1_s0 --test "datasets/test/*.parquet"
   python -m forecast_backbones.m8.evaluate --runs runs/m8/final/e1_s0 runs/m8/final/e1_s1 runs/m8/final/e1_s2 \\
-         --test datasets/test --out runs/m8/final/ens_eval --decision-yaml forecast_backbones/m8/config/variants/d2_pstar_point.yaml
+         --test datasets/test --out runs/m8/final/ens_eval --decision-yaml forecast_backbones/m8/config/decision/cap_ratio_115.yaml
 
 多个 run 目录 = 集成：各成员的原始分位（真实单位）逐分位平均后再过一次决策层；reports/members.csv 另报每个成员单独的分数。
 决策规则可在评估时覆盖（--point / --decision-yaml），不用重训：决策层没有可训练参数。
@@ -207,7 +207,7 @@ def main(argv=None):
     ap.add_argument("--test", nargs="+", required=True, help="测试 parquet：目录 / 文件 / 通配符")
     ap.add_argument("--out", default=None, help="输出目录（默认 单成员 <run>/eval_test，多成员 <runs 的父目录>/ensemble_eval）")
     ap.add_argument("--point", default=None, help="覆盖 decision.point.default（median / p_star / p_star_l1），并清空 by_step")
-    ap.add_argument("--decision-yaml", default=None, help="合并该 yaml 的 decision 段（如 config/variants/d2_pstar_point.yaml）")
+    ap.add_argument("--decision-yaml", default=None, help="合并该 yaml 的 decision 段（如 config/decision/cap_ratio_115.yaml）")
     ap.add_argument("--issue-every-min", type=int, default=60, help="nrmse 用的起报间隔（分钟）")
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--device", default=None)

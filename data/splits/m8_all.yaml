@@ -3,7 +3,7 @@
 #   用途：只做与 M1–M4 同口径的对照数字；配方必须在 m8_v1 上选，最终可信数字看 m8_refit（同配方同种子各跑一遍，两者之差 = 泄漏带来的虚高）。
 #   python -m pipelines.time_splits --parquet "<训练文件夹>/*.parquet" --split-yaml data/splits/m8_all.yaml --dry-run   # 逐站训练占比应全为 1.0
 #   python -m pipelines.time_splits --parquet "<训练文件夹>/*.parquet" --split-yaml data/splits/m8_all.yaml --out-dir data/splits/m8_all
-#   bash train_shell/train_m8_variants.sh --splits_dir data/splits/m8_all --variants e1_final --seeds 0,1,2 --refit --max_steps 5000 --batch_tag final_all
+#   bash train_shell/train_m8_variants.sh --splits_dir data/splits/m8_all --variants j1_final2 --seeds 0,1,2 --refit --max_steps 6000 --batch_tag final_all
 train_start: null
 test_start: "2030-01-01"           # 远未来占位：没有任何行落在测试段，也没有 purge
 val_blocks: []

@@ -8,11 +8,11 @@
 #          推理默认走线上接口 pipelines.pipeline_wrapper_inference.unified_inference（--engine native 走仓库内路径）
 #
 # 用法：
-#   bash eval_m8.sh --runs runs/m8/round2a/a1_hybrid_s0 --test datasets/test
-#   bash eval_m8.sh --runs runs/m8/final/e1_final_s0,runs/m8/final/e1_final_s1,runs/m8/final/e1_final_s2 \
+#   bash eval_m8.sh --runs runs/m8/final/j1_final2_s0 --test datasets/test
+#   bash eval_m8.sh --runs runs/m8/final/j1_final2_s0,runs/m8/final/j1_final2_s1,runs/m8/final/j1_final2_s2 \
 #        --test "datasets/test/*.parquet" --out runs/m8/final/ens_eval
-#   bash eval_m8.sh --runs runs/m8/round2a/a1_hybrid_s0 --test datasets/test --decision_yaml forecast_backbones/m8/config/variants/d2_pstar_point.yaml
-#   bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/m8/refit/e1_final_s2 \
+#   bash eval_m8.sh --runs runs/m8/final/j1_final2_s0 --test datasets/test --decision_yaml forecast_backbones/m8/config/decision/cap_ratio_115.yaml
+#   bash eval_m8.sh --runs runs/m8/refit/j1_final2_s0,runs/m8/refit/j1_final2_s1,runs/m8/refit/j1_final2_s2 \
 #        --test "datasets/test/*.parquet" --out runs/m8/refit/full_eval --full
 set -u
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,7 +39,7 @@ usage() {
   --test <path>            测试 parquet 的目录 / 文件 / 通配符（通配符加引号）
   --out <dir>              输出目录（默认 单成员 <run>/eval_test，多成员 <父目录>/ensemble_eval）
   --point <rule>           覆盖决策点规则：median / p_star / p_star_l1（清空 by_step）
-  --decision_yaml <yaml>   合并该 yaml 的 decision 段（如 config/variants/d2_pstar_point.yaml）
+  --decision_yaml <yaml>   合并该 yaml 的 decision 段（如 config/decision/cap_ratio_115.yaml）
   --gpu <id>               用哪张卡（默认 0）
   --batch_size <n>         推理 batch（默认配置 eval.batch_size）
   --tag <name>             写进 summary.csv 的名字

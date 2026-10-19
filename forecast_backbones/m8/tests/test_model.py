@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 import pytest
 import torch
 from pipelines.model_registry import build_model
@@ -162,7 +163,7 @@ def test_residual_variant_is_identity_shift_of_hint(small_cfg, batch):
     assert torch.isfinite(out.loss)
 
 
-@pytest.mark.parametrize("name", ["d3_timesfm_hint", "d4_timesfm_resid", "j1_final2"])
+@pytest.mark.parametrize("name", ["j1_final2", "k3_resid"])
 def test_timesfm_variant_files_train_step(small_cfg, batch, name):
     from forecast_backbones.m8.tests.conftest import ROOT
     cfg = load_config(str(ROOT / "forecast_backbones/m8/config/variants" / f"{name}.yaml"))
@@ -174,22 +175,25 @@ def test_timesfm_variant_files_train_step(small_cfg, batch, name):
     assert torch.isfinite(out.loss) and out.logits.shape == (batch["labels"]["observe_power_future"].shape[0], 192)
 
 
-def test_j1_final2_stacks_d3_and_h4_on_e1_final():
-    """j1_final2 = e1_final 调度 / 决策 + h4（晴空出力比 + 历史包络）+ d3（timesfm3 未来提示 + hint_dropout）。"""
+def test_j1_final2_recipe():
+    """j1_final2 = 退火调度 + p* 分段选点 + 晴空出力比 + 历史包络 + timesfm3 未来提示（hint_dropout 0.3），默认骨干。"""
+    from forecast_backbones.m8.config import DEFAULT_CFG
     from forecast_backbones.m8.tests.conftest import ROOT
-    v = ROOT / "forecast_backbones/m8/config/variants"
-    j1, e1 = load_config(str(v / "j1_final2.yaml")), load_config(str(v / "e1_final.yaml"))
+    j1 = load_config(str(ROOT / "forecast_backbones/m8/config/variants/j1_final2.yaml"))
     assert j1["features"]["derived"]["clear_sky_ratio"]["enabled"] and j1["features"]["derived"]["history_envelope"]["enabled"]
-    assert j1["features"]["hint_col"] == "timesfm3" and j1["train"]["hint_dropout"] == 0.3
-    assert j1["train"]["schedule"] == e1["train"]["schedule"] and j1["train"]["early_stop"] == e1["train"]["early_stop"]
-    assert j1["decision"]["point"] == e1["decision"]["point"] and j1["model"] == e1["model"]
+    assert j1["features"]["hint_col"] == "timesfm3" and j1["train"]["hint_dropout"] == 0.3 and not j1["features"]["hint_residual"]
+    sch = j1["train"]["schedule"]
+    assert (sch["lr"], sch["max_steps"], sch["warmup_steps"], sch["eval_every_steps"]) == (3e-4, 6000, 300, 250)
+    assert j1["train"]["early_stop"]["patience"] == 8 and j1["model"] == DEFAULT_CFG["model"]
+    pt = j1["decision"]["point"]
+    assert pt["default"] == "p_star" and [r["method"] for r in pt["by_step"]] == ["p_star_l1", "p_star"]
 
 
 def test_all_variant_configs_load(small_cfg):
     import glob
     from forecast_backbones.m8.tests.conftest import ROOT
     files = sorted(glob.glob(str(ROOT / "forecast_backbones/m8/config/variants/*.yaml")))
-    assert len(files) >= 10
+    assert {Path(f).stem for f in files} == {"j1_final2", "k1_hint01", "k2_hint00", "k3_resid", "k4_lr2e4", "k5_lr5e4", "k6_regular"}
     tags = [load_config(f)["run"]["tag"] for f in files]
     assert len(set(tags)) == len(tags)
 

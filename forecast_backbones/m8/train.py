@@ -7,6 +7,9 @@
      或 nrmse：整点起报行 → 192 步容量归一 RMSE%），patience 按验证次数计，最优权重存 model.safetensors（完整 state_dict）
   4. 训后：加载最优权重 → 验证集推理 → result_val.parquet（默认只存整点起报行）→ reports/summary.csv、reports/station_table.csv
   5. --refit（配方选定后给最终模型）：train ∪ valid 全当训练行，不验证、不早停，固定 max_steps 步后存最终权重；summary 里没有验证分数
+  7. --save-every N / train.schedule.save_every（2026-10-19）：每 N 个优化步存一份完整 checkpoint 到 checkpoints/step_XXXXX/
+     （model.safetensors + model_config.yaml，开了 EMA 存 EMA 权重），可直接给线上推理脚本加载。全量训练没有验证集、不能早停时，
+     训完用推理脚本在训练期之后的时段上逐个评测、挑最优步 = 事后早停
   6. --train-parquet（2026-10-14）：训练 parquet 已经切好时直接吃文件夹 / 通配符 / 文件列表，不走 time_splits、不切块、不剔除任何行、
      没有验证集（等于 refit）。与 --splits-dir 二选一
 多卡：accelerate launch / torchrun 起多进程，每进程各持一份模型吃不同的批；打分、存盘、报表只在主进程做。
@@ -191,6 +194,37 @@ class EmaCallback(TrainerCallback):
         return control
 
 
+class CheckpointCallback(TrainerCallback):
+    """每 every 个优化步存一份自包含 checkpoint：<out>/checkpoints/step_XXXXX/{model.safetensors, model_config.yaml}。
+    model_config.yaml 的 run.out_dir 指向该目录本身，train.weights_path = ${run.out_dir}/model.safetensors，原地就能加载；
+    开了 EMA 存 EMA 权重（与最终权重同口径）。须排在 EmaCallback 后面（同一步存更新后的 shadow）。只在主进程调用。"""
+
+    def __init__(self, model: torch.nn.Module, out: Path, every: int, cfg_dump: dict, ema: "WeightEma | None" = None):
+        self.model, self.root, self.every, self.cfg_dump, self.ema = model, Path(out) / "checkpoints", int(every), cfg_dump, ema
+        self.saved: list[int] = []
+
+    def save(self, step: int) -> Path:
+        d = self.root / f"step_{int(step):05d}"
+        d.mkdir(parents=True, exist_ok=True)
+        if self.ema is not None:
+            with self.ema.applied(self.model):
+                save_weights(self.model, d / WEIGHTS_FILE)
+        else:
+            save_weights(self.model, d / WEIGHTS_FILE)
+        cfg = deep_merge(self.cfg_dump, {"run": {"out_dir": str(d.resolve())},
+                                         "train": {"weights_path": "${run.out_dir}/" + WEIGHTS_FILE}})
+        dump_config(cfg, d / CONFIG_FILE)
+        self.saved.append(int(step))
+        return d
+
+    def on_step_end(self, args, state, control, **kwargs):
+        step = int(state.global_step)
+        if step > 0 and step % self.every == 0 and step not in self.saved:
+            d = self.save(step)
+            print(f"[m8] checkpoint step {step} → {d}", flush=True)
+        return control
+
+
 class EvalCallback(TrainerCallback):
     def __init__(self, model, ds_val, collate, cfg, best_path, patience: int, log_path, eval_every_steps=None, ema: WeightEma | None = None):
         self.model, self.ds_val, self.collate, self.cfg, self.ema = model, ds_val, collate, cfg, ema
@@ -308,14 +342,37 @@ def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir, reuse: bool 
     return ds_train, ds_val, man
 
 
+def report_inputs(model, columns, verbose: bool = True) -> list[list[str]]:
+    """训练开始前核对"配置要的列 ↔ 训练数据里的列"并打进日志；插值 / future_only 列缺了直接报错。
+    返回训练数据里实际有的 past_future 对（写进 model_config.yaml 的 features.cov_present，推理时据此判断 NWP 缺列兜底）。"""
+    lines, res = model.fe.input_report(columns)
+    if verbose:
+        print("[m8] ======== 输入列核对（配置列 → 训练数据列；✗ = 数据里没有）========")
+        for ln in lines:
+            print(f"[m8]   {ln}")
+    missing_fo = [c for c, _ in model.fe.future_only if res.get(c) is None]
+    if missing_fo:
+        raise ValueError(f"训练数据里没有插值 / future_only 列 {missing_fo}：检查 features.hint_col（或 train_m8.sh --hint_col）；"
+                         f"数据列 {sorted(map(str, columns))}")
+    present = [[h, f] for h, f in model.fe.pairs if res.get(h) and res.get(f)]
+    if verbose:
+        absent = [[h, f] for h, f in model.fe.pairs if [h, f] not in present]
+        print(f"[m8]   → 实际使用的 NWP 协变量对 {len(present)}/{len(model.fe.pairs)}：{present}"
+              + (f"；缺列、通道恒 0：{absent}" if absent else ""))
+        if not present and model.fe.pairs:
+            print("[m8]   ⚠️ 一对 NWP 协变量都没对上：模型等于不看天气预报，请检查 features.past_future 的列名", flush=True)
+    return present
+
+
 def expand_parquets(items) -> list[str]:
-    """目录 → 其下全部 *.parquet；通配符 → 展开；文件 → 原样。按路径排序，去重。"""
+    """目录 → 其下全部 *.parquet（递归，train/date=2026-06-01/data_0.parquet 这种分区目录也行）；通配符 → 展开；文件 → 原样。
+    按路径排序，去重。"""
     import glob
     out: list[str] = []
     for it in items or ():
         p = Path(str(it))
         if p.is_dir():
-            out += sorted(str(f) for f in p.glob("*.parquet"))
+            out += sorted(str(f) for f in p.rglob("*.parquet") if not any(part.startswith(".") for part in f.relative_to(p).parts))
         else:
             hits = sorted(glob.glob(str(it)))
             if not hits:
@@ -371,7 +428,7 @@ def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_tra
 
 # ------------------------------------------------------------------ 主流程
 def train_m8(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: str | None = None, refit: bool = False,
-             train_parquet=None) -> dict:
+             train_parquet=None, save_every: int | None = None) -> dict:
     """splits_dir：time_splits 落好的切分目录（有验证集，可早停）；train_parquet：现成的训练 parquet，全量训练、无验证（等于 refit）。二选一。"""
     if (splits_dir is None) == (train_parquet is None):
         raise ValueError("--splits-dir 与 --train-parquet 二选一：切分目录（带验证集）或现成的训练 parquet（全量、无验证）")
@@ -386,6 +443,11 @@ def train_m8(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
         cfg["eval"]["report_dir"] = str(out / "reports")
     report_dir = Path(cfg["eval"]["report_dir"]); report_dir.mkdir(parents=True, exist_ok=True)
     sch = cfg["train"]["schedule"]
+    if save_every is not None:
+        sch["save_every"] = int(save_every)
+    save_every = int(sch.get("save_every") or 0)
+    if save_every < 0:
+        raise ValueError(f"train.schedule.save_every 须 >= 0（0 / null = 不存中间 checkpoint），得到 {save_every}")
     sampling = str(sch.get("sampling") or "random")
     if sampling not in ("random", "station_day"):
         raise ValueError(f"train.schedule.sampling={sampling!r} 不在 ('random', 'station_day')")
@@ -415,12 +477,16 @@ def train_m8(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
     if not main:
         loaded = _load(reuse=True)
     ds_train, ds_val, man = loaded
+    cov_present = report_inputs(model, list(ds_train.column_names) + [str(cfg["dataset"]["label_col"])], verbose=main)
+    train_cfg["features"]["cov_present"] = cov_present
     known = model.set_known_stations(row_stations(ds_train, station_col).tolist())     # 验证/测试里名单外的站走未知站槽
     train_cfg["dataset"]["known_stations"] = known
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     eval_every = sch.get("eval_every_steps")
     if main:
-        dump_config(deep_merge(deep_merge(DEFAULT_CFG, raw_override(config_path)), {"dataset": {"known_stations": known}}), out / CONFIG_FILE)
+        cfg_dump = deep_merge(deep_merge(DEFAULT_CFG, raw_override(config_path)),
+                              {"dataset": {"known_stations": known}, "features": {"cov_present": cov_present}})
+        dump_config(cfg_dump, out / CONFIG_FILE)
         if train_parquet is not None:
             print(f"[m8] 全量训练：{len(man['train_parquet'])} 个 parquet、{len(ds_train)} 行、站 {len(known)} 个，一行不删、无验证集，"
                   f"固定 {args.max_steps} 步后存最终权重")
@@ -450,7 +516,11 @@ def train_m8(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
     cb = None if refit else EvalCallback(model, ds_val, collate, train_cfg, best_path=best_path,
                                          patience=int(cfg["train"]["early_stop"]["patience"]),
                                          log_path=out / "train_log.json", eval_every_steps=eval_every, ema=ema)
-    callbacks = ([EmaCallback(ema, model)] if ema is not None else []) + ([cb] if cb else [])    # EMA 更新排在验证前
+    ckpt = CheckpointCallback(model, out, save_every, cfg_dump, ema) if (main and save_every > 0) else None
+    if ckpt is not None:
+        print(f"[m8] 每 {save_every} 步存 checkpoint → {out / 'checkpoints'}/step_XXXXX/（{'EMA 权重' if ema is not None else '当前权重'}）；"
+              f"最后一步也存一份", flush=True)
+    callbacks = ([EmaCallback(ema, model)] if ema is not None else []) + ([ckpt] if ckpt else []) + ([cb] if cb else [])   # EMA 更新排在存盘 / 验证前
     model.train()
     trainer = _M8Trainer(model=model, args=args, data_collator=collate, train_dataset=ds_train, callbacks=callbacks,
                          sampling=sampling, station_col=station_col, ts_col=ts_col)
@@ -464,11 +534,17 @@ def train_m8(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
         if ema is not None:
             ema.load_into(model)
         save_weights(model, best_path)
+        if ckpt is not None and int(trainer.state.global_step) not in ckpt.saved:                    # 最后一步也进 checkpoints/，挑选时一并评测
+            ckpt.ema = None                                                                          # EMA 已写进模型
+            ckpt.save(int(trainer.state.global_step))
+        if ckpt is not None:
+            print(f"[m8] 中间 checkpoint {len(ckpt.saved)} 个：{out / 'checkpoints'}（步数 {ckpt.saved}）")
         hist = [{"step": int(h["step"]), "train_loss": float(h["loss"])} for h in trainer.state.log_history if "loss" in h]
         summary = pd.DataFrame([row(best_step=int(args.max_steps), n_evals=0, minutes=(time.time() - t0) / 60.0, n_val=0)])
         summary.to_csv(report_dir / "summary.csv", index=False)
         (out / "train_log.json").write_text(json.dumps({"history": hist, "best": None, "best_step": int(args.max_steps),
                                                         "patience": None, "metric": None, "refit": True, "ema_decay": ema_decay,
+                                                        "checkpoints": [] if ckpt is None else [f"checkpoints/step_{t:05d}" for t in ckpt.saved],
                                                         "final": summary.to_dict("records")[0]},
                                                        indent=2, ensure_ascii=False, default=str), encoding="utf-8")
         print(summary.to_string(index=False))
@@ -505,7 +581,10 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=None)
     ap.add_argument("--max-steps", type=int, default=None, help="覆盖 train.schedule.max_steps；0 = 不限步数（按 epochs_max）")
     ap.add_argument("--tag", default=None, help="写进 reports/summary.csv 的变体名")
+    ap.add_argument("--save-every", type=int, default=None,
+                    help="每 N 个优化步存一份完整 checkpoint 到 <out>/checkpoints/step_XXXXX/（覆盖 train.schedule.save_every；0 = 不存）")
     ap.add_argument("--refit", action="store_true",
                     help="全量重训：train ∪ valid 全当训练行，不验证、不早停，固定 max_steps 步后存最终权重（配方选定后给最终模型）")
     a = ap.parse_args()
-    train_m8(a.config, a.splits_dir, out_dir=a.out, max_steps=a.max_steps, tag=a.tag, refit=a.refit, train_parquet=a.train_parquet)
+    train_m8(a.config, a.splits_dir, out_dir=a.out, max_steps=a.max_steps, tag=a.tag, refit=a.refit, train_parquet=a.train_parquet,
+             save_every=a.save_every)

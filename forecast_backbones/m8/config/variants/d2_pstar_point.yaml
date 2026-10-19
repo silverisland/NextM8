@@ -1,3 +1,0 @@
-# D2 决策层：提交点用 p*（南网 RMSE 型最优点）而不是中位数（未校准的 9 档分位上 p* 偏高，看实际差多少）
-run: {tag: d2_pstar_point, out_dir: runs/m8/d2_pstar_point}
-decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

@@ -64,12 +64,12 @@ def test_hint_col_bad_config_rejected(small_cfg, features):
         load_config({**small_cfg, "features": features})
 
 
-@pytest.mark.parametrize("name", ["d3_timesfm_hint", "d4_timesfm_resid", "j1_final2", "k1_hint01", "k2_hint00",
+@pytest.mark.parametrize("name", ["j1_final2", "k1_hint01", "k2_hint00",
                                   "k3_resid", "k4_lr2e4", "k5_lr5e4", "k6_regular"])
 def test_variants_declare_hint_col(name):
     fe = load_config(str(V / f"{name}.yaml"))["features"]
     assert fe["hint_col"] == "timesfm3" and fe["future_only"] == [] and fe["residual_base_col"] is None
-    assert fe["hint_residual"] == (name in ("d4_timesfm_resid", "k3_resid"))
+    assert fe["hint_residual"] == (name == "k3_resid")
 
 
 def test_old_run_config_loads_into_new_style_model(small_cfg, batch):

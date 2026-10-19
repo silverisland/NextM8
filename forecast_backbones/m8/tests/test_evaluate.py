@@ -41,7 +41,7 @@ def test_decision_override_without_retrain(trained, tmp_path):
     from forecast_backbones.m8.evaluate import evaluate
     import json
     run, test = trained
-    d2 = "forecast_backbones/m8/config/variants/d2_pstar_point.yaml"
+    d2 = "forecast_backbones/m8/config/variants/j1_final2.yaml"                   # 只取它的 decision 段（p* 分段选点）
     r = evaluate([run], [str(test)], out_dir=tmp_path / "p", decision_yaml=d2, progress=False)
     assert r["summary"]["point_rule"].startswith("p_star[")
     dec = json.loads((tmp_path / "p" / "reports" / "decision.json").read_text(encoding="utf-8"))

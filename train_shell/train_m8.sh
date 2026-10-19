@@ -6,11 +6,13 @@
 #
 # 用法：
 #   bash train_m8.sh --splits_dir /data/xxx/splits                                   # 默认配置，全部可见 GPU
-#   bash train_m8.sh --config forecast_backbones/m8/config/variants/a2_slstm.yaml --gpus 0   # 某个变体，单卡
+#   bash train_m8.sh --config forecast_backbones/m8/config/variants/k3_resid.yaml --gpus 0   # 某个变体，单卡
 #   bash train_m8.sh --gpus 0 --max_steps 20 --run_id smoke                          # 冒烟
 #   bash train_m8.sh --train_parquet "/data/train/*.parquet" --config forecast_backbones/m8/config/variants/j1_final2.yaml --max_steps 6000 --gpus 0
 #                                                                                    # 全量训练：现成的训练 parquet 直接吃，不切分、不剔行、无验证
 #   bash train_m8.sh --train_parquet ... --config .../k3_resid.yaml --hint_col tfm_pred --max_steps 6000   # 数据里插值列叫 tfm_pred（不改 yaml）
+#   bash train_m8.sh --train_parquet "/data/train" --config .../j1_final2.yaml --max_steps 8000 --save_every 500 --gpus 0
+#                                                                                    # 全量训练每 500 步存一份 checkpoint，训完逐个评测挑最优步
 #   批量跑全部变体见 train_m8_variants.sh
 set -u
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +35,8 @@ ALLOW_CPU=0
 TAG=""
 SEED=""
 HINT_COL=""                         # 插值列名（TimesFM 等）：覆盖配置 features.hint_col；配置本身不用插值列时忽略
+SAVE_EVERY=""                       # 每 N 步存一份完整 checkpoint（checkpoints/step_XXXXX/）；全量训练时事后挑最优步用
+STATION_META=""                     # 站表路径：覆盖配置 dataset.station_meta（线上 info.csv 表头自动识别）
 REFIT=0
 VENV_PY="/home/ma-user/ts3/bin/python"
 PRE_CUDA_LD="/usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu"
@@ -55,7 +59,11 @@ usage() {
   --tag <name>             写进 reports/summary.csv 的变体名（默认取配置 run.tag）
   --seed <n>               覆盖 run.seeds（模型初始化 + 数据顺序 + 增强随机数）
   --hint_col <列名>        插值列（TimesFM 等只有未来段的单变量预测）在你数据里的列名，覆盖配置 features.hint_col；
-                           配置不用插值列（如 e1_final）时忽略。训练数据缺这一列直接报错
+                           配置不用插值列时忽略。训练数据缺这一列直接报错
+  --save_every <n>         每 n 个优化步存一份完整 checkpoint 到 <run_dir>/checkpoints/step_XXXXX/（权重 + model_config.yaml，
+                           开了 EMA 存 EMA 权重；最后一步也存）。全量训练没有验证集、不能早停时用：训完逐个推理评测，挑最优步
+  --station_meta <csv>     站表（覆盖 dataset.station_meta）。可直接给线上的 info.csv（plantid / plant_pointname / GCCAPACITY /
+                           LONGITUDE / LATITUDE 表头自动识别，station 列按 plant_pointname 对数据里的 plant_guangfu1358）
   --refit                  全量重训：train ∪ valid 全当训练行，不验证、不早停，固定 --max_steps 步后存最终权重
                            （配方选定后给最终模型；切分用 data/splits/m8_refit.yaml 落的目录，valid.parquet 为 0 行）
   --port <n>               多进程通信端口（默认 29700）
@@ -80,6 +88,8 @@ while [ $# -gt 0 ]; do
     --tag)          TAG="$2";         shift 2 ;;
     --seed)         SEED="$2";        shift 2 ;;
     --hint_col)     HINT_COL="$2";    shift 2 ;;
+    --station_meta) STATION_META="$2"; shift 2 ;;
+    --save_every)   SAVE_EVERY="$2";  shift 2 ;;
     --refit)        REFIT=1;          shift   ;;
     --port)         PORT="$2";        shift 2 ;;
     --cpu_threads)  CPU_THREADS="$2"; shift 2 ;;
@@ -95,7 +105,7 @@ done
 [ -f "$CONFIG" ]  || { echo "❌ 找不到配置: $CONFIG" >&2; exit 1; }
 if [ -n "$TRAIN_PARQUET" ]; then
   REFIT=1
-  if [ -d "$TRAIN_PARQUET" ]; then n=$(ls "$TRAIN_PARQUET"/*.parquet 2>/dev/null | wc -l); else n=$(compgen -G "$TRAIN_PARQUET" | wc -l); fi
+  if [ -d "$TRAIN_PARQUET" ]; then n=$(find "$TRAIN_PARQUET" -name '*.parquet' -not -path '*/.*' 2>/dev/null | wc -l); else n=$(compgen -G "$TRAIN_PARQUET" | wc -l); fi
   [ "$n" -gt 0 ] || { echo "❌ --train_parquet 没有匹配到 parquet: $TRAIN_PARQUET" >&2; exit 1; }
   [ -n "$MAX_STEPS" ] || { echo "❌ 全量训练没有验证集、不能早停：请给 --max_steps（j1_final2 用 6000）" >&2; exit 1; }
 else
@@ -135,9 +145,9 @@ if [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
     echo "❌ 产物目录已存在且非空: ${RUN_DIR}（换 --run_id，或加 --overwrite）" >&2; exit 1; fi
 fi
 
-"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" "$HINT_COL" <<'PYEOF'
+"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" "$HINT_COL" "$STATION_META" <<'PYEOF'
 import sys, yaml, os
-src, dst, precision, batch_size, eval_every, tag, seed, hint_col = sys.argv[1:9]
+src, dst, precision, batch_size, eval_every, tag, seed, hint_col, station_meta = sys.argv[1:10]
 cfg = yaml.safe_load(open(src, encoding="utf-8")) or {}
 sch = cfg.setdefault("train", {}).setdefault("schedule", {})
 sch["precision"] = precision
@@ -151,6 +161,8 @@ if hint_col and fe.get("hint_col"):
 elif hint_col:
     print(f"⚠️  该配置不用插值列（features.hint_col 为空），忽略 --hint_col {hint_col}")
 print(f"HINT_COL={fe.get('hint_col') or '（不用）'}")
+if station_meta:
+    cfg.setdefault("dataset", {})["station_meta"] = os.path.abspath(station_meta)
 yaml.safe_dump(cfg, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 meta = (cfg.get("dataset") or {}).get("station_meta", "forecast_backbones/m8/station_meta.csv")
 print(f"STATION_META={meta}")
@@ -176,11 +188,13 @@ cmd=("$VENV_PY" -m accelerate.commands.launch --num_processes="$NP" --num_machin
 cmd+=(-m forecast_backbones.m8.train --config "$TMP_CFG" --out "$RUN_DIR" --tag "$TAG")
 if [ -n "$TRAIN_PARQUET" ]; then cmd+=(--train-parquet "$TRAIN_PARQUET"); else cmd+=(--splits-dir "$SPLITS_DIR"); fi
 [ -n "$MAX_STEPS" ] && cmd+=(--max-steps "$MAX_STEPS")
+[ -n "$SAVE_EVERY" ] && cmd+=(--save-every "$SAVE_EVERY")
 [ "$REFIT" -eq 1 ] && cmd+=(--refit)
 echo "CMD: ${cmd[*]}"
 "${cmd[@]}" 2>&1 | tee "$LOG_FILE"
 rc=${PIPESTATUS[0]}
 rm -f "$TMP_CFG"
+[ -n "$SAVE_EVERY" ] && echo "中间 checkpoint: $RUN_DIR/checkpoints/"
 if [ $rc -ne 0 ]; then echo "❌ M8 训练失败 (exit=$rc)，日志: $LOG_FILE" >&2; exit 1; fi
 for f in model.safetensors model_config.yaml train_log.json reports/summary.csv; do
   [ -f "$RUN_DIR/$f" ] || { echo "❌ 训练结束但缺少 $RUN_DIR/$f" >&2; exit 1; }

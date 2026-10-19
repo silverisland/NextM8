@@ -4,8 +4,8 @@
 #   python -m pipelines.time_splits --parquet "<训练文件夹>/*.parquet" --test-parquets "<测试文件夹>/*.parquet" \
 #       --split-yaml data/splits/m8_refit.yaml --dry-run                      # 先看逐站报告：验证天应全为 0
 #   …同上去掉 --dry-run 加 --out-dir data/splits/m8_refit                     # 落盘
-#   bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants e1_final --seeds 0,1,2 --refit --max_steps 5000 --batch_tag refit
-#   bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/m8/refit/e1_final_s2 --test "<测试文件夹>/*.parquet"
+#   bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants j1_final2 --seeds 0,1,2 --refit --max_steps 6000 --batch_tag refit
+#   bash eval_m8.sh --runs runs/m8/refit/j1_final2_s0,runs/m8/refit/j1_final2_s1,runs/m8/refit/j1_final2_s2 --test "<测试文件夹>/*.parquet"
 train_start: null                  # 训练数据从最早一天起，不截
 val_blocks: []                     # 没有验证块（与 allow_stations_without_val: true 搭配才合法）
 cal_days: 0

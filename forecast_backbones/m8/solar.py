@@ -70,6 +70,20 @@ class StationMeta:
 
     COLS = ("station_id", "station", "lat", "lon", "alt_m", "cap_mw")
     OPTIONAL = ("lat", "lon", "alt_m")          # 映射里写 null = 表里没有这一列（当全缺：缺坐标站退化、海拔 0）
+    # 线上站点信息表 info.csv 的表头（2026-10-19）：没给 station_meta_cols、表里又没有标准列时按它自动映射。
+    # station = plant_pointname（数据 station 列里的 plant_guangfu1358 这种），容量 GCCAPACITY（MW），没有海拔列
+    INFO_CSV_COLS = {"station_id": "plantid", "station": "plant_pointname", "lat": "LATITUDE", "lon": "LONGITUDE",
+                     "alt_m": None, "cap_mw": "GCCAPACITY"}
+
+    @classmethod
+    def detect_cols(cls, columns, cols: dict | None) -> dict | None:
+        """显式映射优先；否则标准列不全而 info.csv 表头齐全时返回 INFO_CSV_COLS。"""
+        if cols:
+            return cols
+        names = {str(c).strip() for c in columns}
+        if not set(cls.COLS) <= names and {v for v in cls.INFO_CSV_COLS.values() if v} <= names:
+            return dict(cls.INFO_CSV_COLS)
+        return cols
 
     @classmethod
     def apply_cols(cls, df: pd.DataFrame, cols: dict | None) -> pd.DataFrame:
@@ -97,7 +111,7 @@ class StationMeta:
         return d
 
     def __init__(self, df: pd.DataFrame, cols: dict | None = None):
-        df = self.apply_cols(df, cols)
+        df = self.apply_cols(df, self.detect_cols(df.columns, cols))
         missing = [c for c in self.COLS if c not in df.columns]
         if missing:
             raise KeyError(f"station_meta 缺列: {missing}")
@@ -126,11 +140,12 @@ class StationMeta:
     @classmethod
     def from_csv(cls, path: str | Path, cols: dict | None = None) -> "StationMeta":
         """UTF-8（含 Excel 的带 BOM 版）或 GBK（中文 Windows 下 Excel 另存的 CSV）都能读。cols 见 apply_cols。"""
-        name_col = str((cols or {}).get("station") or "station").strip()
         try:
-            df = pd.read_csv(path, dtype={name_col: str}, encoding="utf-8-sig")
+            head = pd.read_csv(path, nrows=0, encoding="utf-8-sig"); enc = "utf-8-sig"
         except UnicodeDecodeError:
-            df = pd.read_csv(path, dtype={name_col: str}, encoding="gbk")
+            head = pd.read_csv(path, nrows=0, encoding="gbk"); enc = "gbk"
+        name_col = str((cls.detect_cols(head.columns, cols) or {}).get("station") or "station").strip()
+        df = pd.read_csv(path, dtype={name_col: str}, encoding=enc)
         df.columns = [str(c).strip() for c in df.columns]
         return cls(df, cols)
 

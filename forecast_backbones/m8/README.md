@@ -51,10 +51,10 @@ Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU 
 ```bash
 # 单个配置（默认全部可见 GPU；模型小，单卡足够）
 bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --gpus 0
-bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --config forecast_backbones/m8/config/variants/a3_attention.yaml --gpus 1
+bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --config forecast_backbones/m8/config/variants/k3_resid.yaml --gpus 1
 # 全部变体批量跑：每张卡一条队列，跑完汇总 variants_summary.csv
 bash train_m8_variants.sh --splits_dir data/splits/m1_m4_v1 --gpus 0,1,2,3,4,5,6,7
-bash train_m8_variants.sh --splits_dir ... --variants e1_final,h4_envelope,d3_timesfm_hint,j1_final2 --gpus 0,1
+bash train_m8_variants.sh --splits_dir ... --variants j1_final2,k3_resid --seeds 0,1,2 --gpus 0,1
 bash train_m8_variants.sh --splits_dir ... --max_steps 50 --gpus 0 --batch_tag smoke       # 先冒烟
 # 直接用 python
 python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/configs.yaml --splits-dir data/splits/m1_m4_v1 --out runs/m8/x
@@ -72,27 +72,25 @@ python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/conf
 
 | 组 | 变体 | 用途 |
 |---|---|---|
-| 对照 | a1_hybrid（原始基线）/ a3_attention / a6_no_mixer | 默认骨干；换成注意力；没有序列混合器的下界 |
-| 决策 | d2_pstar_point | 只改决策层（p* 分段选点），给 `--decision_yaml` 用，不用重训 |
-| 外部提示 | d3_timesfm_hint / d4_timesfm_resid（需 timesfm3 列） | TimesFM-3 预测作未来提示通道；在其上做残差学习（超短期代理 +0.65） |
-| 配方 | e1_final / e1_night_old | 第二轮定的配方（a1 + 退火调度 + p* 决策）；同配方的旧夜间口径（A/B 用） |
-| 物理先验 | h1_cs_ratio / h4_envelope | 按站晴空出力比；h1 + 缺坐标站历史日形包络 |
-| 最终 | j1_final2（需 timesfm3 列） | e1_final + h4 + d3。round6：D+1 75.75（e1 75.01），可加性成立 |
-| 调参 | k1–k6（见「参数调参」一节） | 在 j1 上每个只动一处 |
+| 方案 A | j1_final2（需 TimesFM-3 列） | 最终配方：退火调度 + p* 分段选点 + 按站晴空出力比 + 缺坐标站历史日形包络 + TimesFM 提示通道。round6：D+1 75.75 |
+| 方案 B | k3_resid | j1_final2 + 残差学习（输出 = TimesFM 归一值 + 网络输出），结构 / 参数量相同。round6 残差版超短期代理 +0.65、D+1 持平 |
+| 调参 | k1_hint01 / k2_hint00 / k4_lr2e4 / k5_lr5e4 / k6_regular（见「参数调参」一节） | 在 j1 上每个只动一处 |
 
-2026-10-14 瘦身前这里有 42 个变体（骨干 / 融合 / 规模 / 站点身份 / 超短期模块 / 训练协议），结论都在种子噪声内或从未跑过，
-yaml 与对应代码一起删了；历史结论保留在各节文字里，要复现去 git 历史（commit 203c735 之前）。
+2026-10-19 起只保留这 7 个：方案定为 j1_final2 / k3_resid 两套，a1 / a3 / a6（骨干对照）、d2（决策层，现在 j1 自带 p* 分段选点，
+`--decision_yaml` 直接给 j1_final2.yaml）、d3 / d4（TimesFM 提示 / 残差，已并入 j1 / k3）、e1_final / e1_night_old（第二轮配方 /
+夜间口径 A/B）、h1 / h4（晴空出力比 / 历史包络，已并入 j1）的 yaml 删除，开关本身都还在；下文各节的历史结论保留，
+要复现去 git 历史。2026-10-14 瘦身前这里有 42 个变体，结论都在种子噪声内或从未跑过（commit 203c735 之前）。
 
 ## 测试集评估与集成（`evaluate.py` / `eval_m8.sh`）
 
 训练脚本只在验证集上打分；测试集要单独跑：
 
 ```bash
-bash eval_m8.sh --runs runs/m8/round2a/a1_hybrid_s0 --test datasets/test                       # 单个产物
-bash eval_m8.sh --runs runs/m8/final/e1_final_s0,runs/m8/final/e1_final_s1,runs/m8/final/e1_final_s2 \
+bash eval_m8.sh --runs runs/m8/final/j1_final2_s0 --test datasets/test                         # 单个产物
+bash eval_m8.sh --runs runs/m8/final/j1_final2_s0,runs/m8/final/j1_final2_s1,runs/m8/final/j1_final2_s2 \
      --test "datasets/test/*.parquet" --out runs/m8/final/ens_eval                              # 三种子集成
-bash eval_m8.sh --runs runs/m8/round2a/a1_hybrid_s0 --test datasets/test \
-     --decision_yaml forecast_backbones/m8/config/variants/d2_pstar_point.yaml                   # 换决策规则，不重训
+bash eval_m8.sh --runs runs/m8/final/j1_final2_s0 --test datasets/test \
+     --decision_yaml forecast_backbones/m8/config/decision/cap_ratio_115.yaml                    # 换决策规则，不重训
 ```
 
 - 多个 run 目录 = 集成：各成员的原始分位（真实单位）逐分位平均后再过一次决策层；`reports/members.csv` 另报每个成员单独的分数，
@@ -109,7 +107,7 @@ bash eval_m8.sh --runs runs/m8/round2a/a1_hybrid_s0 --test datasets/test \
 与 `reports/summary.csv`（跨站均值、seen/unseen）：
 
 ```bash
-bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/m8/refit/e1_final_s2 \
+bash eval_m8.sh --runs runs/m8/refit/j1_final2_s0,runs/m8/refit/j1_final2_s1,runs/m8/refit/j1_final2_s2 \
      --test "datasets/test/*.parquet" --out runs/m8/refit/full_eval --full
 ```
 
@@ -133,7 +131,7 @@ cap_power_on 取值、NWP 未来列缺失率、历史功率缺失/全零率）�
 
 第二轮（2026-10-09，m8_v1 切分，三块验证 + 四个整站留出）的结论：所有架构变体（sLSTM、注意力、token 头、双流、大模型、
 recent_peak 归一、按站日采样）都在 a1 ±0.6 的种子噪声内；c8 调度略好无副作用；p* 决策高约 1 分（主要来自未见站）；
-站点嵌入对已见站 +0.5、对未见站 −0.7；未见站比已见站低 5–6 分且与嵌入无关。最终组合见 `config/variants/e1_final.yaml`。
+站点嵌入对已见站 +0.5、对未见站 −0.7；未见站比已见站低 5–6 分且与嵌入无关。当时的最终组合 e1_final 已并入 j1_final2（yaml 2026-10-19 删除）。
 
 第三轮（站点身份诊断，2 种子）：去掉全部身份输入（f1：坐标、log 容量、站点嵌入）已见站 −0.3、未见站 −1.0、nrmse +0.5，已见 / 未见差距没有收窄——差距来自留出站本身（冬季块、历史只有几周），不是按站记忆；只去坐标（f2）与 a1 逐位一致，坐标在静态向量里不起作用；f3 = f1 + c8 + p* 得 75.7，等于 d2 + c8 的预期，参数少 1M。e1_final 与 f3 谁做最终模型由测试集集成分数定。
 
@@ -155,6 +153,8 @@ p_clear 按水平面 GHI 算（1000 W/m² = 满容量），决策层再裁到 1.
 y / p_clear 的 quantile 分位，夹到 [lo, hi]，乘到 p_clear 上（通道 + 决策上限一起变；k_nwp 是辐照比不动；
 缺坐标的退化站恒 1）。按窗滚动，季节变化自然跟随，未见站也能用。评估结果表多一列 cs_ratio。
 
+当时的 h 系列（yaml 2026-10-19 删除，晴空出力比与包络都已在 j1_final2 里开着）：
+
 | 变体 | 改动 |
 |---|---|
 | h1_cs_ratio | e1_final + 晴空出力比 |
@@ -173,7 +173,7 @@ y / p_clear 的 quantile 分位，夹到 [lo, hi]，乘到 p_clear 上（通道 
 （整周阴天后的晴天不会被裁）。整周无出力（峰值 < peak_frac·cap）或有数据的天数 < min_days 的行回退钟表几何。有坐标的站逐位不变。
 评估结果表 ctx 里多一个 envelope_used 标志。
 
-跑 h4_envelope 看国能和煦单站；舰队其它站与 h1 应完全一致。
+当时跑 h4_envelope 看国能和煦单站；舰队其它站与 h1 完全一致（j1_final2 已开包络）。
 
 ## 训练协议开关（EMA / 平滑选点，2026-10-13）
 
@@ -205,8 +205,8 @@ M8 以前在决策层把夜间强制归零，等于比别的模型多了一道�
   只用容量钳位（`physics_clip(..., night_ceiling=False)`），夜间完全由模型给。
   **注意**：这一条是第二次提交才补上的；之前用 `night_zero: false` 评出来的分数夜间其实仍是 0。决策层没有可训练参数，
   拉代码后用同一批 checkpoint 重新 `eval_m8.sh` 即得真正对齐的数字，不用重训。
-- 想量化"夜间对齐"值多少分：`config/variants/e1_night_old.yaml`（= e1_final + night_weight 0 + night_zero true，
-  即旧口径）与 e1_final 同切分同种子各跑一遍，差值就是夜间强制归零的红利。
+- 想量化"夜间对齐"值多少分：给 j1_final2 加 `train.loss.night_weight: 0` + `decision.physics.night_zero: true`（旧口径），
+  同切分同种子各跑一遍，差值就是夜间强制归零的红利（当时的 e1_night_old.yaml 2026-10-19 已删）。
 - 决策层还剩一道对夜间有一点帮助的处理：负值截到 0（`physics.clip_negative`，默认 true）。略负的夜间输出截成 0 就是全对，
   M1–M7 不截。想严格裸对比在 decision yaml 里设 `clip_negative: false`，不用重训。
 - 想完全裸对比可在 decision yaml 里设 `physics: {capacity_cap: false, clear_sky_cap_ratio: 1.0e9, clip_negative: false}`、
@@ -230,7 +230,8 @@ bash train_m8_variants.sh --splits_dir <m8_v1> --variants j1_final2,k1_hint01,k2
      --seeds 0,1,2 --gpus 0,1,2,3,4,5,6,7 --batch_tag round7              # 21 个任务，8 张卡三波，约 3 小时
 ```
 
-**全量训练（训练 parquet 已经切好、不要任何切分）**：`--train_parquet` 直接吃文件夹 / 加引号的通配符 / 文件列表，
+**全量训练（训练 parquet 已经切好、不要任何切分）**：`--train_parquet` 直接吃文件夹（递归，`train/date=2026-06-01/data_0.parquet`
+这种按日期分区的目录也行）/ 加引号的通配符 / 文件列表，
 不走 time_splits、不切块、一行不剔除、没有验证集，固定 `--max_steps` 步后存 checkpoint（隐含 `--refit`）。
 站列是站名文本也行，按 station_meta 映射成站号。拼表与站号归一是 m8 自带的（`_parquet.py`），不依赖 `pipelines/time_splits.py`；
 训练只需要 m8 目录加 `pipelines/transformer_dataset.py`、`pipelines/nanwang_metric.py`、`interfaces/modeloutput.py` 三个外部文件。
@@ -243,6 +244,21 @@ bash train_m8_variants.sh --train_parquet "<训练文件夹>/*.parquet" \
 # checkpoint：runs/m8/full_r7/<变体>/model.safetensors（同目录 model_config.yaml 是推理用的完整配置）
 # 之后每个 checkpoint 用 eval_m8.sh --full 出 result_test.parquet 统一测评
 ```
+
+**全量训练的事后早停（`--save_every`，2026-10-19）**：全量训练没有验证集、不能早停，跑满 `--max_steps` 可能过拟合。
+加 `--save_every N` 每 N 个优化步存一份完整 checkpoint 到 `<run>/checkpoints/step_XXXXX/`（`model.safetensors` + `model_config.yaml`，
+开了 EMA 存 EMA 权重；最后一步也存；`model_config.yaml` 的 `run.out_dir` 指向该目录，原地即可加载）。训完用线上推理脚本
+（`nanwang_online/eval_scripts_template/m8/single_model_scene_infer_m8.py`）在**训练期之后**的时段上逐个推理评测，挑"变体 × 步数"最优：
+
+```bash
+bash train_m8_variants.sh --train_parquet "<训练文件夹>" --variants j1_final2,k3_resid,k4_lr2e4,k5_lr5e4,k6_regular \
+     --seeds 0,1,2 --max_steps 8000 --save_every 500 --batch_tag site
+# → runs/m8/site/<变体>_s<种子>/checkpoints/step_00500 … step_08000
+```
+
+- 评测时段必须在训练数据之后、不进训练；至少 2–4 周（三天的分数波动大于种子差 0.4 分，挑出来的是运气）。
+- 候选越多（变体 × 种子 × 步数），挑出来的最高分越乐观；能的话把评测时段再分前后两段：前段挑、后段确认。
+- 一个 checkpoint 约 6 MB（150 万参数），每 500 步一份足够；开 `train.ema_decay: 0.999` 让各步之间更平稳。
 
 决策层的参数不用重训，拿现有 checkpoint 直接扫（`config/decision/`，几分钟一个）：
 
@@ -287,9 +303,9 @@ m8_v1 切分为了量零样本，整站留出了 1006/1016/1022/泗洪，长站�
 python -m pipelines.time_splits --parquet "<训练文件夹>/*.parquet" --test-parquets "<测试文件夹>/*.parquet" \
     --split-yaml data/splits/m8_refit.yaml --out-dir data/splits/m8_refit
 # 2. 用选定的配方训 3 颗种子：--refit 不验证、不早停，固定 --max_steps 步后存最终权重（cosine 在这一步退火到 0）
-bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants e1_final --seeds 0,1,2 --refit --max_steps 5000 --batch_tag refit
+bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants j1_final2 --seeds 0,1,2 --refit --max_steps 6000 --batch_tag refit
 # 3. 测试集集成评估（唯一一次）
-bash eval_m8.sh --runs runs/m8/refit/e1_final_s0,runs/m8/refit/e1_final_s1,runs/m8/refit/e1_final_s2 --test "<测试文件夹>/*.parquet"
+bash eval_m8.sh --runs runs/m8/refit/j1_final2_s0,runs/m8/refit/j1_final2_s1,runs/m8/refit/j1_final2_s2 --test "<测试文件夹>/*.parquet"
 ```
 
 - 步数：取该配方在验证切分上各种子 `best_step` 的上限附近（c8 调度 2500–5500 → 5000）；三种子集成本身也抵消单一步数的运气。
@@ -325,6 +341,8 @@ features:
 
 不改 yaml 换名：`bash train_m8.sh ... --hint_col tfm_pred`（`train_m8_variants.sh` 原样透传；配置本身不用插值列时忽略）。
 推理读的是 run 目录 `model_config.yaml` 里记下的列名；线上列名不同时改那里的 `features.hint_col` 即可（权重不受影响）。
+2026-10-19 起不改也行：列名先精确匹配，再查 `features.col_aliases`（默认 `timesfm3 ← tsfm_predict`，线上 TimesFM 列的名字），
+最后大小写不敏感（`general_ghi` ↔ `general_GHI`）；训练开始时日志打印"配置列 → 训练数据列"核对表（✗ = 数据里没有、通道恒 0）。
 它等价于 `future_only` 末尾追加 `{col: <hint_col>, scale: target}`，通道顺序与旧写法相同，旧 run 目录照常加载。
 插值列不能同时写进 `future_only`，也不能与 NWP 协变量同名。
 

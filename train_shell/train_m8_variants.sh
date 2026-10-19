@@ -4,12 +4,14 @@
 #
 # 用法：
 #   bash train_m8_variants.sh --splits_dir /data/xxx/splits                      # 跑 config/variants/ 下全部变体，全部可见卡
-#   bash train_m8_variants.sh --splits_dir ... --gpus 0,1,2,3 --variants a1_hybrid,a2_slstm,a3_attention
+#   bash train_m8_variants.sh --splits_dir ... --gpus 0,1,2,3 --variants j1_final2,k3_resid
 #   bash train_m8_variants.sh --splits_dir ... --max_steps 50 --gpus 0 --batch_tag smoke        # 全部变体冒烟
-#   bash train_m8_variants.sh --splits_dir ... --variants a1_hybrid,c1_no_cpm --seeds 0,1,2      # 每个变体 3 颗种子（tag 带 _s<seed>）
-#   bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants e1_final --seeds 0,1,2 --refit --max_steps 5000 --batch_tag refit
+#   bash train_m8_variants.sh --splits_dir ... --variants j1_final2,k3_resid --seeds 0,1,2      # 每个变体 3 颗种子（tag 带 _s<seed>）
+#   bash train_m8_variants.sh --splits_dir data/splits/m8_refit --variants j1_final2 --seeds 0,1,2 --refit --max_steps 6000 --batch_tag refit
 #                                                                                   # 全量重训 3 颗种子（--refit 透传给 train_m8.sh）
 #   bash train_m8_variants.sh --train_parquet "/data/train/*.parquet" --variants j1_final2,k1_hint01,k3_resid --max_steps 6000 --batch_tag full
+#   bash train_m8_variants.sh --train_parquet "/data/train" --variants j1_final2,k3_resid,k4_lr2e4,k5_lr5e4,k6_regular --seeds 0,1,2 \
+#        --max_steps 8000 --save_every 500 --batch_tag site     # 全量 + 每 500 步存 checkpoint：训完逐个评测挑"变体 × 步数"最优
 #                                                                                   # 全量训练：现成的训练 parquet 直接吃，不切分、不剔行、无验证
 #   bash train_m8_variants.sh --train_parquet ... --variants k3_resid,j1_final2 --hint_col tfm_pred ...   # 插值列换名：其余参数原样透传给 train_m8.sh
 # 产物：runs/m8/<batch_tag>/<变体>/…，汇总 runs/m8/<batch_tag>/variants_summary.csv

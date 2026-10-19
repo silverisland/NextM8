@@ -65,7 +65,8 @@ DEFAULT_CFG: dict = {
         "pred_len": 192,
     },
     "features": {
-        # (历史列, 未来列) 对；两列都在 batch_dict 里才用，缺列只提示一次并跳过（该通道为 0）
+        # (历史列, 未来列) 对；两列都在 batch_dict 里才用，缺列只提示一次并跳过（该通道为 0）。
+        # 列名大小写不敏感（2026-10-19）：线上 / 新训练数据是大写 general_GHI / general_TEMP，这里写小写也能对上（见 col_aliases）
         "past_future": [
             ["general_ghi", "general_ghi_predict"],
             ["general_temp", "general_temp_predict"],
@@ -82,6 +83,11 @@ DEFAULT_CFG: dict = {
         #   它不是 NWP 协变量（不进 past_future、不随 cov_dropout 清零，走 hint_dropout），等价于 future_only 末尾追加 {col, scale: target}。
         #   训练数据里没有这一列直接报错；推理时缺列按 hint_missing 兜底。train_m8.sh --hint_col <列名> 可在不改 yaml 的情况下换名
         "hint_col": None,
+        # 列名别名 {配置列名: [数据里可能的叫法]}（2026-10-19）：精确名找不到时依次试别名，再大小写不敏感匹配。
+        #   timesfm3 ← tsfm_predict：训练数据的 TimesFM-3 列叫 timesfm3，线上推理脚本把 TimesFM 预测改名成 tsfm_predict
+        "col_aliases": {"timesfm3": ["tsfm_predict"]},
+        # 训练入口自动写入：训练数据里实际有的 past_future 对。推理时缺其中任何一对 → 全部 NWP 通道按 cov_dropout 兜底
+        "cov_present": None,
         "hint_residual": False,                            # true = 残差学习：输出 = 插值列（归一后）+ 网络输出（代替 residual_base_col）
         # 列名（小写）含某个键时按 [shift, scale] 归一：(x - shift) / scale；都不含用 default
         "scales": {"ghi": [0.0, 1000.0], "ssrd": [0.0, 1000.0], "temp": [15.0, 15.0], "t2m": [15.0, 15.0], "default": [0.0, 1.0]},
@@ -122,7 +128,9 @@ DEFAULT_CFG: dict = {
         "amp_mod": {"p": 0.3, "lo": 0.6, "hi": 1.0},
         "schedule": {"lr": 5.0e-4, "weight_decay": 0.05, "batch_size": 64, "max_steps": 20000, "epochs_max": 20,
                      "warmup_steps": 500, "grad_clip": 1.0, "precision": "fp32", "logging_steps": 50,
-                     "eval_every_steps": 500, "sampling": "random", "progress_bar": True, "num_workers": 0},
+                     "eval_every_steps": 500, "sampling": "random", "progress_bar": True, "num_workers": 0,
+                     # 每 N 个优化步存一份完整 checkpoint（checkpoints/step_XXXXX/）；0 / null = 不存。全量训练无验证集时用来事后挑最优步
+                     "save_every": None},
         # 损失：pinball（9 档分位）。night_weight：夜间步在损失里的权重。1 = 与白天同权（默认，模型自己学夜间为 0，
         #   与 M1–M7 不做夜间后处理的口径一致）；0 = 夜间不监督（2026-10-12 之前的旧行为，须配合 decision.physics.night_zero: true 用）
         "loss": {"night_weight": 1.0},
@@ -190,7 +198,7 @@ def future_only_cols(fe: dict) -> tuple[list[tuple[str, str]], str | None]:
         hint = str(hint)
         if hint in {c for c, _ in fo}:
             raise ValueError(f"features.hint_col={hint!r} 不要再写进 future_only（插值列单独声明即可）")
-        if hint in {c for pair in fe.get("past_future") or () for c in pair} | set(fe.get("past_only") or ()):
+        if hint.lower() in {c.lower() for pair in fe.get("past_future") or () for c in pair} | {c.lower() for c in fe.get("past_only") or ()}:
             raise ValueError(f"features.hint_col={hint!r} 与 NWP 协变量列同名：插值列须是单独的一列（如 TimesFM 预测）")
         fo.append((hint, "target"))
         if fe.get("hint_residual"):

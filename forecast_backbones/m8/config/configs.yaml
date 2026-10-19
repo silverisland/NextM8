@@ -18,7 +18,7 @@ dataset:
   pred_len: 192
 features:
   past_future:                         # (历史列, 未来列)；缺列只提示一次、通道置 0
-    - [general_ghi,   general_ghi_predict]
+    - [general_ghi,   general_ghi_predict]     # 大小写不敏感：数据里是 general_GHI / general_GHI_predict 也能对上
     - [general_temp,  general_temp_predict]
     - [GHI_solargis,  ghi_solargis_predict]
     - [temp_solargis, temp_solargis_predict]
@@ -28,10 +28,11 @@ features:
   residual_base_col: null            # 残差学习：输出 = 该列（归一后）+ 网络输出；须是 future_only 里 scale=target 的列
   # 插值列：TimesFM 之类每次起报生成的单变量预测（只有未来段），列名按你的数据写；null = 不用。与 NWP 协变量分开声明，
   # 训练数据缺这一列直接报错。train_m8.sh --hint_col <列名> 可不改 yaml 换名
-  hint_col: null
+  hint_col: timesfm3
   hint_residual: false               # true = 残差学习：输出 = 插值列（归一后）+ 网络输出
   scales: {ghi: [0.0, 1000.0], ssrd: [0.0, 1000.0], temp: [15.0, 15.0], t2m: [15.0, 15.0], default: [0.0, 1.0]}
   clear_sky_index_col: general_ghi_predict
+  col_aliases: {timesfm3: [tsfm_predict]}   # 配置列名 → 数据里的其它叫法（线上 TimesFM 列叫 tsfm_predict）
   target_scale: cap                    # cap | recent_peak
   derived: {solar: true, time_encoding: true, nwp_resid: true}
   # derived.clear_sky_ratio（h 系列）/ derived.history_envelope（缺坐标站用历史日形代替钟表几何）默认都关，键与默认值见 config.py

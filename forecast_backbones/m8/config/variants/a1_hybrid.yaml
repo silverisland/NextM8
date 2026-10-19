@@ -1,2 +1,0 @@
-# A1 基线：门控长卷积 + Gated DeltaNet 交替 ×4（Reverso 式），step_cov 头，CPM + 协变量 dropout
-run: {tag: a1_hybrid, out_dir: runs/m8/a1_hybrid}

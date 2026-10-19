@@ -6,7 +6,7 @@
   → <out>/metrics_ens/{站}-metrics.xlsx + {站}-summary.json；
   汇总 <out>/reports/station_metrics.csv（四个主指标逐站）与 summary.csv（跨站均值、seen/unseen）。
 
-  python -m forecast_backbones.m8.station_report --runs runs/m8/refit/e1_final_s0 [更多 run = 集成] \\
+  python -m forecast_backbones.m8.station_report --runs runs/m8/refit/j1_final2_s0 [更多 run = 集成] \\
          --test "datasets/test/*.parquet" --out runs/m8/refit/full_eval [--engine unified|native|auto]
 
 推理引擎 --engine（默认 unified）：
