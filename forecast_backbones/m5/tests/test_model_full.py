@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 import torch
-from pathlib import Path
 
 pytest.importorskip("timesfm3")
 from forecast_backbones.m5.transformer_models import TransformersAdaptedM5Model, save_weights
@@ -110,8 +109,10 @@ def test_predict_raw_matches_forward(tmp_path, tiny_ckpt_dir, batch):
         out = m(bd)
     np.testing.assert_allclose(q, out.aux["quantiles"].numpy(), atol=1e-6)
     assert np.array_equal(ctx.station_id, out.aux["station_id"])
-    point, *_ = m.decide(q, ctx.night[:, L:], ctx.p_clear[:, L:], ctx.cap)
+    assert ctx.night is None and ctx.p_clear is None                       # 默认配置不算太阳几何
+    point, *_ = m.decide(q, None, None, ctx.cap)
     np.testing.assert_allclose(point, out.logits.numpy(), atol=1e-5)
+    assert np.isnan(out.aux["elev_deg"]).all() and not out.aux["night"].any()  # 报表列照旧，几何列为 NaN
     assert set(out.aux) == {"quantiles", "quantiles_cal", "levels_cal", "p_star", "median", "night", "night_loss",
                             "elev_deg", "p_clear", "var_bin", "var_signal", "station_id", "cap", "degraded"}
 
@@ -244,9 +245,12 @@ def test_wise_also_blends_unfrozen_modules(tmp_path, tiny_ckpt_dir, batch):
 
 
 def test_combo_variant_feeds_four_nwp_plus_geometry_and_trains(tmp_path, tiny_ckpt_dir, batch):
-    """s3_cov_all_var 的形状：四路 NWP（第 3、4 路取自 Solargis 列）+ 两路几何 = 6 通道；var_attn + 残差块 LoRA 有梯度。"""
-    from forecast_backbones.m5.config import raw_override
-    over = raw_override(str(Path(__file__).resolve().parents[1] / "config" / "variants" / "s3_cov_all_var.yaml"))
+    """四路 NWP（第 3、4 路取自 Solargis 列）+ 两路几何 = 6 通道；var_attn + 残差块 LoRA 有梯度。"""
+    over = {"features": {"past_future": [["general_ghi", "general_ghi_predict"], ["general_temp", "general_temp_predict"],
+                                         ["GHI_solargis", "ghi_solargis_predict"], ["temp_solargis", "temp_solargis_predict"]],
+                         "derived": {"solar_elevation": True, "clear_sky_power": True}},
+            "finetune": {"lora": {"target_modules": [r"re:.*\.var_attn\.(query|key|value|out)_proj",
+                                                     "hidden_layer", "output_layer", "residual_layer"]}}}
     bd, labels = dict(batch["batch_dict"]), batch["labels"]
     bd["GHI_solargis"], bd["ghi_solargis_predict"] = bd["general_ghi"] * 0.9, bd["general_ghi_predict"] * 0.9
     bd["temp_solargis"], bd["temp_solargis_predict"] = bd["general_temp"] + 1.0, bd["general_temp_predict"] + 1.0

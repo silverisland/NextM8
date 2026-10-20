@@ -2,24 +2,26 @@
 #
 # train_m5_variants.sh —— 批量训练 M5 的多个变体：自动检测 GPU、按任务数把卡平分给任务；跑完汇总成一张表（collect_runs）。
 #
-# 用法（基线，一条命令：z0 1 个 + l1 3 个种子 = 4 个任务；8 张卡时每个任务 2 张卡、4 个同时跑）：
-#   bash train_m5_variants.sh --splits_dir data/splits/m8_v1 --variants z0_zeroshot,l1_lora_r8 --seeds 0,1,2 --batch_tag m5_base
-#   冒烟：... --variants z0_zeroshot,l1_lora_r8 --max_steps 20 --eval_every 10 --batch_tag m5_smoke
+# 用法（f 系列 5 个变体 × 3 个种子 = 15 个任务；8 张卡时每个任务 1 张卡排队）：
+#   bash train_m5_variants.sh --splits_dir data/splits/m8_v1 --station_meta forecast_backbones/m5/station_meta.csv \
+#        --variants f1_final,f2_lr5e5,f3_lr2e4,f4_drop01,f5_wd01 --seeds 0,1,2 --batch_tag m5_f
+#   冒烟：... --variants z0_zeroshot,f1_final --max_steps 20 --eval_every 10 --batch_tag m5_smoke
+#   f 系列 yaml 的站表是线上 info.csv（南网站号）：家里切分要 --station_meta 换回 station_meta.csv（透传给 train_m5.sh）
 #   先看计划不跑：加 --dry_run
 # 分卡规则（--gpus_per_job auto）：每个任务 k = floor(卡数 / 任务数) 张卡（至少 1），再往下取到能整除全局 batch 的数；
 #   卡按 k 张一组分成若干槽，任务轮流进槽，同一槽内顺序执行。1 个任务 → 全部卡；任务比卡多 → 每任务 1 张卡排队。
 #   全局 batch（--batch_size，默认配置里的 16）不随卡数变：每卡 = 全局 / k，所以不同卡数跑出的结果可比。
 # 零样本变体（finetune.enabled: false）与种子无关：给了 --seeds 也只跑一次，目录名不带 _s<seed>。
-# 只动决策层的变体（yaml 里只有 decision: 段，如 d2 / g2）自动跳过：它们不用训，评估时用 eval_m5.sh --decision_yaml。
+# 只动决策层的变体（yaml 里只有 decision: 段，放在 config/decision/ 下）自动跳过：它们不用训，评估时用 eval_m5.sh --decision_yaml。
 # 一次调用默认占满所有卡；同时开两个调用会抢卡，要并发请用 --gpus 把卡分开。
-# d2_pstar_point / g2_cs_ceiling 只动决策层，不用训：对已训好的 run 用 eval_m5.sh --decision_yaml
+# config/decision/d2_pstar_point.yaml 只动决策层，不用训：对已训好的 run 用 eval_m5.sh --decision_yaml
 # 产物：runs/m5/<batch_tag>/<变体>[_s<seed>]/…，汇总 runs/m5/<batch_tag>/variants_summary.csv
 set -u
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "$_HERE/forecast_backbones" ]; then BASE_DIR="$_HERE"; else BASE_DIR="$(cd "$_HERE/.." && pwd)"; fi
 SPLITS_DIR="${BASE_DIR}/data/splits/m8_v1"
 TRAIN_PARQUET=""       # 给了就是全量训练（透传 --train_parquet，不用 --splits_dir）
-VARIANT_DIR="${BASE_DIR}/forecast_backbones/m5/config/variants"
+VARIANT_DIR="${BASE_DIR}/forecast_backbones/m5/config"   # 变体直接放在 config/ 下（不含 config/decision/ 与线上零样本 configs.yaml）
 VARIANTS=""            # 逗号分隔的变体名（不带 .yaml）；留空 = 目录下全部
 GPUS="auto"
 GPUS_PER_JOB="auto"
@@ -56,7 +58,7 @@ fi
 IFS=',' read -r -a GPU_LIST <<< "$GPUS"
 G=${#GPU_LIST[@]}
 if [ -z "$VARIANTS" ]; then
-  FILES=( $(ls "$VARIANT_DIR"/*.yaml | sort) )
+  FILES=( $(ls "$VARIANT_DIR"/*.yaml | grep -v '/configs\.yaml$' | sort) )
 else
   FILES=(); IFS=',' read -r -a NAMES <<< "$VARIANTS"
   for n in "${NAMES[@]}"; do f="$VARIANT_DIR/${n%.yaml}.yaml"; [ -f "$f" ] || { echo "❌ 变体不存在: $f" >&2; exit 1; }; FILES+=("$f"); done

@@ -1,5 +1,0 @@
-# 第 7 阶段·协议（lr 上探）：冻结 head + lr 1e-3、预算 8000 步（找 lr 曲线的拐点；发散 / 早停很早说明上沿在 3e-4 附近）
-finetune:
-  unfreeze_output_head: false
-train:
-  schedule: {lr: 1.0e-3, max_steps: 8000}

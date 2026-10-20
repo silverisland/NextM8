@@ -1,3 +1,0 @@
-# 第 2 阶段·定位对照（W3b）：LoRA 同 l1，但 output_head 冻结；≥ l1 则以后不再解冻 head（少过拟合）
-finetune:
-  unfreeze_output_head: false

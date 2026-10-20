@@ -1,3 +1,0 @@
-# 几何协变量（不进本轮基线）：太阳高度角、晴空出力作为两个 past_future 通道喂 TimesFM；需要站表经纬度，需重训
-features:
-  derived: {solar_elevation: true, clear_sky_power: true}

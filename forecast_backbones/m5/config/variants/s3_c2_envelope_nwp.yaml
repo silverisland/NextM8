@@ -1,6 +1,0 @@
-# 第 3 阶段·输入侧 C2：C1 包络 + "包络 × clip(GHI_nwp / GHI 历史包络, 0, 1.2)"（输入端的功率侧 MOS，非仿射、RevIN 抹不掉），冻结 head。
-# 判定：相对 s3_c1_envelope 的增量单独过噪声带
-features:
-  derived: {history_envelope: true, envelope_nwp: true}
-finetune:
-  unfreeze_output_head: false

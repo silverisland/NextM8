@@ -37,13 +37,15 @@ def test_evaluate_matches_training_eval_for_lora_and_zero_shot(runs, tmp_path):
 def test_ensemble_and_decision_override(runs, tmp_path):
     from forecast_backbones.m5.evaluate import evaluate
     tmp, splits = runs
+    cs = tmp_path / "cs_ceiling.yaml"
+    cs.write_text("decision:\n  physics: {clear_sky_cap_ratio: 1.05}\n", encoding="utf-8")
     e = evaluate([tmp / "l1", tmp / "z0"], [str(splits / "valid.parquet")], out_dir=tmp_path / "ens",
-                 decision_yaml=str(M5 / "config" / "variants" / "g2_cs_ceiling.yaml"), progress=False)
+                 decision_yaml=str(cs), progress=False)
     assert e["summary"]["n_members"] == 2 and len(e["members"]) == 3 and np.isfinite(e["summary"]["nanwang_short_D+1"])
     dec = json.loads((tmp_path / "ens" / "reports" / "decision.json").read_text(encoding="utf-8"))
     assert dec["physics"]["clear_sky_cap_ratio"] == 1.05
     p = evaluate([tmp / "l1"], [str(splits / "valid.parquet")], out_dir=tmp_path / "p",
-                 decision_yaml=str(M5 / "config" / "variants" / "d2_pstar_point.yaml"), progress=False)
+                 decision_yaml=str(M5 / "config" / "decision" / "d2_pstar_point.yaml"), progress=False)
     assert p["summary"]["point_rule"] == "p_star"
 
 

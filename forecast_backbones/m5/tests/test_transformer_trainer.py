@@ -46,7 +46,7 @@ def _model():
 
 def test_registry_discovers_m5_model_and_evaluator():
     assert import_model_class("m5") is TransformersAdaptedM5Model
-    assert TransformersAdaptedTimesFM3Model is TransformersAdaptedM5Model          # 旧名仍可用
+    assert issubclass(TransformersAdaptedTimesFM3Model, TransformersAdaptedM5Model)   # 旧名仍可用（同行为子类，列名不变）
     assert build_evaluator("m5") is evaluate_model
 
 

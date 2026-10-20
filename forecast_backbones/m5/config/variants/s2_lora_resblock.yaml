@@ -1,3 +1,0 @@
-# 第 2 阶段·扩靶（W3c）：l1 的四个注意力投影 + 输入残差块三个层（读 NWP 64 步前瞻的唯一入口，原先冻结）
-finetune:
-  lora: {target_modules: [query_proj, key_proj, value_proj, out_proj, hidden_layer, output_layer, residual_layer]}

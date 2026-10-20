@@ -4,7 +4,7 @@
   legacy（没有 dataset.station_meta：线上 nanwang_online、eval_pretrain、experiments/nwp_covariate 的零样本配置）
       行为与重构前逐位相同，下面"零样本封装"的契约原样有效；tests/legacy_m5_forward.py 冻结了旧代码作对照。
   full（给了 dataset.station_meta：forecast_backbones/m5/train.py / evaluate.py / station_report.py 用）
-      配置走 config.load_config（默认值见 config.py / config/finetune.yaml）；站表只取每站固定容量 cap_mw 与站号；
+      配置走 config.load_config（默认值见 config.py 的 DEFAULT_CFG，配方在 config/*.yaml）；站表只取每站固定容量 cap_mw 与站号；
       协变量 = features.past_future（默认与线上相同：ghi、温度）+ 可选几何通道（features.derived，默认关）；
       底座：finetune.enabled → torch 可微路径挂 LoRA（并解冻 output_head）；否则零样本（finetune.inference_path：torch | evaluator）；
       决策层与 M8 相同（单调化 → 钳位 → median / p*），默认无晴空上限；labels 给定时 .loss = 9 档 pinball（默认容量归一）；
@@ -125,16 +125,16 @@ def _full_mode(model_config) -> bool:
 
 
 def load_station_meta(path, cols: dict | None = None):
-    """dataset.station_meta（任意路径）+ dataset.station_meta_cols（列名映射）。路径不存在直接报错；
-    只有仓库内默认相对路径（forecast_backbones/...）在别的工作目录下解析失败时才回退到 m5 自带那份。"""
+    """dataset.station_meta（任意路径）+ dataset.station_meta_cols（列名映射；info.csv 表头自动识别）。
+    相对路径先按当前工作目录、再按仓库根目录解析（2026-10-20，同 M8：南网训练入口在 train_scripts/ 下跑，
+    forecast_backbones/m5/info.csv 要对到仓库里那份，而不是回退成别的站表）；都不存在直接报错。"""
     StationMeta = _dep("solar").StationMeta
     p = Path(path)
     if not p.exists():
-        fallback = Path(__file__).parent / "station_meta.csv"
-        if not p.is_absolute() and p.parts[:1] == ("forecast_backbones",) and fallback.exists():
-            warnings.warn(f"station_meta {p} 不存在（相对当前工作目录解析失败）：回退到 {fallback}")
-            return StationMeta.from_csv(fallback, cols)
-        raise FileNotFoundError(f"station_meta {p} 不存在（dataset.station_meta；相对路径按当前工作目录解析）")
+        repo = Path(__file__).resolve().parents[2] / p
+        if not p.is_absolute() and repo.exists():
+            return StationMeta.from_csv(repo, cols)
+        raise FileNotFoundError(f"station_meta {p} 不存在（dataset.station_meta；相对路径按当前工作目录、再按仓库根目录解析）")
     return StationMeta.from_csv(p, cols)
 
 
@@ -200,7 +200,7 @@ def _merge(base: dict, override: dict) -> dict:
 
 class TransformersAdaptedM5Model(nn.Module):
     """把 TimesFM-3 包成 pipeline 标准 nn.Module（推理侧，零样本/无 loss）。
-    必须是本文件第一个 nn.Module 子类（registry 自动发现）；旧名 TransformersAdaptedTimesFM3Model 在文件末尾保留为别名。"""
+    必须是本文件第一个 nn.Module 子类（registry 自动发现）；旧名 TransformersAdaptedTimesFM3Model 在文件末尾保留为同行为子类（输出列名不变）。"""
 
     def __init__(self, model_config: Optional[dict] = None, **kwargs):
         super().__init__()
@@ -362,6 +362,13 @@ class TransformersAdaptedM5Model(nn.Module):
         self.past_future_cols = [tuple(p) for p in fe["past_future"]]
         self.past_only_cols = list(fe["past_only"])
         self._warned_pairs = set()
+        # 列名解析（2026-10-20，同 M8）：配置列名 → 数据列名。先精确匹配，再查 features.col_aliases，最后大小写不敏感
+        # （配置写 general_ghi，线上 / 南网训练数据是 general_GHI）；同一列有两个大小写变体时报错，不猜
+        self.col_aliases = {str(k): [str(a) for a in (v if isinstance(v, (list, tuple)) else [v])]
+                            for k, v in (fe.get("col_aliases") or {}).items()}
+        # 训练数据里实际有的 past_future 对（训练入口写进 model_config.yaml）：不在里面的对推理时有列也不喂（训练时就没有这个通道）
+        cp = fe.get("cov_present")
+        self.cov_present = None if cp is None else {tuple(p) for p in cp}
         self.station_meta = load_station_meta(ds["station_meta"], ds.get("station_meta_cols"))
         self.ctx_builder = _dep("rowctx").RowContextBuilder(self.cfg, self.station_meta)
         self.levels = tuple(float(q) for q in _dep("decision").MODEL_LEVELS)
@@ -375,6 +382,18 @@ class TransformersAdaptedM5Model(nn.Module):
             self._ensure_backbone(self._resolve_device())
 
     @property
+    def context_length(self) -> int:                      # pipelines/rolling_wrapper_inference 读这两个名字（两种模式都有）
+        return self.context_len
+
+    @property
+    def prediction_length(self) -> int:
+        return self.pred_len
+
+    @staticmethod
+    def compute_metrics(eval_pred) -> dict:               # pipelines.transformer_trainer.train_model 构造 Trainer 时要
+        return {}
+
+    @property
     def config(self) -> dict:
         """full 模式：train.py 把合并后的 cfg 落成 model_config.yaml。legacy 模式没有这个属性（与重构前一致）。"""
         if self.mode != "full":
@@ -386,6 +405,24 @@ class TransformersAdaptedM5Model(nn.Module):
         ids = sorted({int(s) for s in station_ids})
         self.cfg["dataset"]["known_stations"] = ids
         return ids
+
+    def save_trainable_only(self) -> None:
+        """之后 state_dict() 只返回适配器 + 可训整块参数（键名相对 backbone.model，与 save_weights 同格式），不带 3.3 亿参数的底座。
+        南网训练入口（train_shell/m5_train_cli.py）调用：pipelines.train_model 里的 HF Trainer 存 checkpoint-N / model_result 时
+        取的是 model.state_dict()，不开这个每份 checkpoint 约 1.3 GB，而且键名对不上 load_weights。只影响 state_dict()，不影响训练。"""
+        lora = _dep("lora")
+        if getattr(self, "backbone", None) is None:
+            raise RuntimeError("save_trainable_only 需要 torch 路径（full 模式且 finetune.enabled）")
+
+        def _hook(module, state_dict, prefix, local_metadata):
+            if prefix:                                    # 本模型被包在别的模块里：保持原样
+                return None
+            sd = lora.lora_state_dict(module.backbone.model)
+            state_dict.clear()
+            state_dict.update(sd)
+            return state_dict
+
+        self._register_state_dict_hook(_hook)
 
     def reseed(self, seed: int) -> None:
         """train.py 契约；M5 没有随机增强，空操作。"""
@@ -450,18 +487,81 @@ class TransformersAdaptedM5Model(nn.Module):
                 params[n].copy_(alpha * ft_val + (1.0 - alpha) * self._dense_pre[n].to(ft_val.device))
         self.wise_alpha = alpha
 
+    # ================================================================== full 模式：列名解析 / 输入核对
+    def resolve_col(self, keys, col: str) -> str | None:
+        """配置列名 col → keys（数据列名 / batch_dict 键）里实际用的那一个；找不到返回 None。"""
+        keys = list(keys)
+        if col in keys:
+            return col
+        for a in self.col_aliases.get(col, ()):
+            if a in keys:
+                return a
+        for c in [col] + self.col_aliases.get(col, []):
+            hits = [k for k in keys if isinstance(k, str) and k.lower() == c.lower()]
+            if len(hits) > 1:
+                raise ValueError(f"列 {c!r} 在数据里有多个大小写变体 {hits}，无法确定用哪个；请删掉多余的列")
+            if hits:
+                return hits[0]
+        return None
+
+    def _key(self, batch_dict: dict, col: str) -> str | None:
+        """resolve_col + 非精确匹配时提示一次（训练 / 线上日志里能看到配置列名实际对上了哪一列）。"""
+        k = self.resolve_col(batch_dict.keys(), col)
+        if k is not None and k != col and (col, k) not in self._warned_pairs:
+            warnings.warn(f"配置列 {col!r} 用数据里的 {k!r}（别名 / 大小写不敏感匹配）")
+            self._warned_pairs.add((col, k))
+        return k
+
+    def _fcol(self, batch_dict: dict, col: str) -> np.ndarray:
+        """按配置列名取列（经 resolve_col）；找不到时 _col 报 KeyError。"""
+        return self._col(batch_dict, self._key(batch_dict, col) or col)
+
+    def input_report(self, columns) -> tuple[list[str], dict]:
+        """数据列名 → (可读的逐行说明, {配置列: 数据列或 None})。训练开始与线上推理前各打一次，核对协变量设置。"""
+        cols = [str(c) for c in columns]
+        res: dict = {}
+
+        def show(c):
+            k = self.resolve_col(cols, c); res[c] = k
+            return f"{c} ✓" if k == c else (f"{c} → 数据列 {k} ✓" if k else f"{c} ✗ 数据里没有")
+
+        sid_col = self.cfg["dataset"]["station_id_col"]
+        sid = sid_col if sid_col in cols else ("station" if "station" in cols else None)
+        lines = [f"站点列: {sid or '✗ 没有 station_id / station'}" + ("（站名，按 station_meta 映射成站号）" if sid == "station" else ""),
+                 f"目标列（历史功率）: {show(self.target_col)}"]
+        if self.label_col in cols:
+            lines.append(f"标签列: {self.label_col} ✓")
+        lines.append(f"NWP 协变量 past_future（{len(self.past_future_cols)} 对，缺列的对不喂给 TimesFM）:")
+        for h, f in self.past_future_cols:
+            used = "" if self.cov_present is None or (h, f) in self.cov_present else "（训练数据里没有，不喂）"
+            lines.append(f"  - 历史 {show(h)} | 未来 {show(f)}{used}")
+        if self.past_only_cols:
+            lines.append("past_only: " + "，".join(show(c) for c in self.past_only_cols))
+        d = self.cfg["features"]["derived"]
+        lines.append("派生通道: " + ("，".join(k for k, v in d.items() if v) or "无"))
+        if d.get("history_envelope") or d.get("envelope_nwp"):
+            g = self.cfg["features"]["envelope"]["ghi"]
+            lines.append(f"包络用的 GHI 列对: {show(g[0])} | {show(g[1])}")
+        return lines, res
+
     # ================================================================== full 模式：推理 / 决策 / 损失
     def _covariates(self, batch_dict: dict, ctx):
         """→ (past_future [B,C,L+H] | None, past_only [B,C,L] | None)。缺列的协变量对只提示一次并跳过（与 legacy 同）。"""
         L, H = self.context_len, self.pred_len
         pf = []
         for hist_c, fut_c in self.past_future_cols:
-            if hist_c not in batch_dict or fut_c not in batch_dict:
+            if self.cov_present is not None and (hist_c, fut_c) not in self.cov_present:
+                continue                                  # 训练数据里没有的对：训练时就没有这个通道，推理时有列也不喂
+            hk, fk = self._key(batch_dict, hist_c), self._key(batch_dict, fut_c)
+            if hk is None or fk is None:
                 if (hist_c, fut_c) not in self._warned_pairs:
-                    print(f"[timesfm3] 协变量对 {(hist_c, fut_c)} 在 batch 里缺列，本次推理跳过（只提示一次）")
+                    msg = f"协变量对 {(hist_c, fut_c)} 在 batch 里缺列，本次推理跳过（只提示一次）"
+                    if self.cov_present is not None:      # 训练时用过的对这次缺了：TimesFM 少一个协变量，结果会偏
+                        warnings.warn(msg + "；这一对训练时有")
+                    print(f"[timesfm3] {msg}")
                     self._warned_pairs.add((hist_c, fut_c))
                 continue
-            pf.append(np.concatenate([self._col(batch_dict, hist_c)[:, -L:], self._col(batch_dict, fut_c)[:, :H]], axis=1))
+            pf.append(np.concatenate([self._col(batch_dict, hk)[:, -L:], self._col(batch_dict, fk)[:, :H]], axis=1))
         d = self.cfg["features"]["derived"]
         if d.get("solar_elevation"):
             pf.append(ctx.elev_deg.astype(np.float32))
@@ -472,7 +572,7 @@ class TransformersAdaptedM5Model(nn.Module):
         if d.get("envelope_nwp"):
             e = self._envelopes(batch_dict, ctx)
             pf.append((e["power_env"] * e["ratio"]).astype(np.float32))
-        po = [self._col(batch_dict, c)[:, -L:] for c in self.past_only_cols]
+        po = [self._fcol(batch_dict, c)[:, -L:] for c in self.past_only_cols]
         return (np.stack(pf, axis=1).astype(np.float32) if pf else None,
                 np.stack(po, axis=1).astype(np.float32) if po else None)
 
@@ -488,13 +588,13 @@ class TransformersAdaptedM5Model(nn.Module):
         n_day = 1440 // int(self.cfg["dataset"]["step_min"])
         q, sm = float(en["quantile"]), int(en["smooth"])
         hist_c, fut_c = en["ghi"]
-        missing = [c for c in (hist_c, fut_c) if c not in batch_dict]
+        missing = [c for c in (hist_c, fut_c) if self.resolve_col(batch_dict.keys(), c) is None]
         if missing:
             raise KeyError(f"features.envelope.ghi 的列 {missing} 不在数据里：历史包络 × NWP（envelope_nwp）与门控 / 路由 LoRA 的形势特征要用它，"
                            f"改 features.envelope.ghi 成数据里的 GHI 列对")
-        y = np.asarray(self._col(batch_dict, self.target_col)[:, -L:], float)
-        ghi_h = np.asarray(self._col(batch_dict, hist_c)[:, -L:], float)
-        ghi = np.concatenate([ghi_h, np.asarray(self._col(batch_dict, fut_c)[:, :H], float)], axis=1)
+        y = np.asarray(self._fcol(batch_dict, self.target_col)[:, -L:], float)
+        ghi_h = np.asarray(self._fcol(batch_dict, hist_c)[:, -L:], float)
+        ghi = np.concatenate([ghi_h, np.asarray(self._fcol(batch_dict, fut_c)[:, :H], float)], axis=1)
         power_env = ev.envelope_rows(y, ctx.slot, n_day, q, sm)
         ghi_env = ev.envelope_rows(ghi_h, ctx.slot, n_day, q, sm)
         floor = float(en["ghi_floor"])
@@ -546,25 +646,35 @@ class TransformersAdaptedM5Model(nn.Module):
             qs.append(q[0] if q.ndim == 3 else q)
         return torch.as_tensor(np.stack(qs), dtype=torch.float32, device=torch.device(self._backbone_device or "cpu"))
 
-    def _raw(self, batch_dict: dict):
+    def geometry_needed(self, decision: dict | None = None) -> bool:
+        """太阳几何（高度角 / 晴空功率 / 夜间）有没有用处：决策层夜间归零或晴空上限、几何协变量、夜间损失权重≠1。
+        都没开（M5 默认）时 rowctx 不算几何，结果逐位不变。decision 缺省用 cfg['decision']（评估时可换规则）。"""
+        ph = (decision if decision is not None else self.cfg["decision"])["physics"]
+        d = self.cfg["features"]["derived"]
+        return (bool(ph["night_zero"]) or ph.get("clear_sky_cap_ratio") is not None
+                or bool(d.get("solar_elevation")) or bool(d.get("clear_sky_power"))
+                or float(self.cfg["train"]["loss"].get("night_weight", 1.0)) != 1.0)
+
+    def _raw(self, batch_dict: dict, decision: dict | None = None):
         if self._backbone is None:
             raise RuntimeError("backbone 未加载：timesfm3.eager_init=False 时需先 _ensure_backbone(device)")
-        tgt = self._col(batch_dict, self.target_col)[:, -self.context_len:]
-        ctx = self.ctx_builder.build(batch_dict)
+        tgt = self._fcol(batch_dict, self.target_col)[:, -self.context_len:]
+        ctx = self.ctx_builder.build(batch_dict, geometry=self.geometry_needed(decision))
         pf, po = self._covariates(batch_dict, ctx)
         if self._cond is not None:
             self._set_cond(batch_dict, ctx)
         return self._quantiles(tgt, pf, po), ctx
 
     @torch.no_grad()
-    def predict_raw(self, batch_dict: dict):
-        """推理态：→ (q [B,H,9] 真实单位 numpy, ctx)。不过决策层，供 evaluate.py 集成先平均分位再统一决策。"""
+    def predict_raw(self, batch_dict: dict, decision: dict | None = None):
+        """推理态：→ (q [B,H,9] 真实单位 numpy, ctx)。不过决策层，供 evaluate.py 集成先平均分位再统一决策。
+        decision = 之后 decide 要用的规则（缺省 cfg['decision']）：按它决定 ctx 里算不算几何。"""
         if self.mode != "full":
             raise RuntimeError("predict_raw 只在 full 模式可用（配置里给 dataset.station_meta）")
         was = {m: m.training for m in self.modules()}      # 逐模块快照：主干在 eval、整体 training=True 的新建模型也要原样还原
         self.eval()
         try:
-            q, ctx = self._raw(batch_dict)
+            q, ctx = self._raw(batch_dict, decision)
             return q.detach().float().cpu().numpy().astype(float), ctx
         finally:
             for m, t in was.items():
@@ -572,14 +682,20 @@ class TransformersAdaptedM5Model(nn.Module):
 
     def decide(self, q_raw: np.ndarray, night_fut: np.ndarray, p_clear_fut: np.ndarray, cap: np.ndarray, decision: dict | None = None):
         """决策层（numpy，没有可训参数，评估时可换规则不用重训）。decision 缺省用 cfg['decision']。
-        → (point [B,H], q_cal, median, pstar, night_physics)。clear_sky_cap_ratio=None（默认）时无晴空上限。"""
+        → (point [B,H], q_cal, median, pstar, night_physics)。clear_sky_cap_ratio=None（默认）时无晴空上限。
+        night_fut / p_clear_fut 可为 None（ctx 没算几何）：只有 night_zero / clear_sky_cap_ratio 要用，开了却没给直接报错。"""
         dm = _dep("decision")
         dec = decision if decision is not None else self.cfg["decision"]
         ph, pt = dec["physics"], dec["point"]
         tail = str(pt.get("tail") or "flat")
         nz, cn = bool(ph["night_zero"]), bool(ph.get("clip_negative", True))
-        night_physics = night_fut if nz else np.zeros_like(night_fut)
         ratio = ph.get("clear_sky_cap_ratio")
+        if (nz and night_fut is None) or (ratio is not None and p_clear_fut is None):
+            raise ValueError("decision.physics 开了 night_zero / clear_sky_cap_ratio，但 ctx 没算太阳几何：predict_raw 要传同一个 decision")
+        shape = q_raw.shape[:2]
+        night_physics = np.asarray(night_fut, bool) if nz else np.zeros(shape, bool)
+        if p_clear_fut is None:
+            p_clear_fut = np.full(shape, np.nan)             # 无晴空上限时 physics_clip 只取它的形状
         q_mono = dm.scale_spread(dm.enforce_monotone(q_raw), self.levels, pt.get("spread_lo"), pt.get("spread_hi"))
         q_cal = dm.physics_clip(q_mono, night_physics, p_clear_fut, cap[:, None],
                                 None if ratio is None else float(ratio), bool(ph["capacity_cap"]),
@@ -595,7 +711,7 @@ class TransformersAdaptedM5Model(nn.Module):
         L = self.context_len
         q_t, ctx = self._raw(batch_dict)                                          # [B,H,9]；torch 路径训练时带梯度
         dev = q_t.device
-        night_fut, p_clear_fut = ctx.night[:, L:], ctx.p_clear[:, L:]
+        night_fut, p_clear_fut, elev_fut = ctx_future_geometry(ctx, L, self.pred_len)
         point, q_cal, median, pstar, night_physics = self.decide(
             q_t.detach().float().cpu().numpy().astype(float), night_fut, p_clear_fut, ctx.cap)
         logits = torch.as_tensor(point, dtype=torch.float32, device=dev)
@@ -606,7 +722,7 @@ class TransformersAdaptedM5Model(nn.Module):
             "p_star": torch.as_tensor(pstar, dtype=torch.float32, device=dev),
             "median": torch.as_tensor(median, dtype=torch.float32, device=dev),
             "night": night_physics, "night_loss": night_fut,
-            "elev_deg": ctx.elev_deg[:, L:], "p_clear": p_clear_fut,
+            "elev_deg": elev_fut, "p_clear": p_clear_fut if p_clear_fut is not None else np.full_like(elev_fut, np.nan),
             "var_bin": np.zeros(len(ctx.cap), int), "var_signal": ctx.var_signal, "station_id": ctx.station_id,
             "cap": ctx.cap, "degraded": ctx.degraded,
         }
@@ -720,4 +836,14 @@ class TransformersAdaptedM5Model(nn.Module):
 
 
 # 兼容旧名：历史代码/配置按这个名字引用
-TransformersAdaptedTimesFM3Model = TransformersAdaptedM5Model
+def ctx_future_geometry(ctx, L: int, H: int):
+    """ctx → 未来窗的 (night [B,H] | None, p_clear [B,H] | None, elev_deg [B,H])；没算几何时前两个 None、elev_deg 全 NaN（报表列照旧）。"""
+    if ctx.night is None:
+        return None, None, np.full((len(ctx.cap), H), np.nan)
+    return ctx.night[:, L:], ctx.p_clear[:, L:], ctx.elev_deg[:, L:]
+
+
+class TransformersAdaptedTimesFM3Model(TransformersAdaptedM5Model):
+    """旧名（线上 multi_infer.py、M8 模板的 TSFM 预推理按这个名字构造）。做成子类而不是别名：unified_inference /
+    rolling_inference 的预测列名 = type(model).__name__，线上脚本按 'TransformersAdaptedTimesFM3Model' 取列，
+    别名会让列名变成 TransformersAdaptedM5Model、取列 KeyError。行为与 TransformersAdaptedM5Model 完全相同。"""

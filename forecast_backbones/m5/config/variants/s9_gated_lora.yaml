@@ -1,7 +1,0 @@
-# 第 9 阶段·Gated-LoRA：按 D+1 天气形势（未来晴空指数的均值 / 波动 / 逐步变化 + has_coords）逐样本调每个 LoRA 模块的强度，
-# 门 = 2·sigmoid(Wz+b)，初值 1（= 普通 LoRA）；冻结 head。同设置文献 MAE −3%（证据偏弱）；对照 WiSE（全局单一强度无增益）
-finetune:
-  unfreeze_output_head: false
-  lora: {gate: true}
-train:
-  optim: {adapter_lr: 1.0e-3}    # 门控 / 路由网络用 1e-3（主 lr 1e-4 下 4000 步只挪 ~0.4 个 logit，路由近乎冻结在初值）

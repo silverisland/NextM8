@@ -1,5 +1,0 @@
-# 第 2 阶段·协议（W1）：lr 1e-5 + EMA 0.998 + smooth_k 3（更保守的学习率，看 l1 是否过拟合）；其余 = l1
-train:
-  schedule: {lr: 1.0e-5}
-  ema_decay: 0.998
-  early_stop: {smooth_k: 3}

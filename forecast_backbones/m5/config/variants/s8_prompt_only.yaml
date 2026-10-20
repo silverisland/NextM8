@@ -1,7 +1,0 @@
-# 第 8 阶段·纯 prompt tuning：不挂 LoRA，只训 8 个全局虚拟变量（约 1 万参数），冻结 head；prompt 的常用 lr 较大（1e-3）
-finetune:
-  lora: {target_modules: []}
-  unfreeze_output_head: false
-  prompt: {n_tokens: 8}
-train:
-  schedule: {lr: 1.0e-3}

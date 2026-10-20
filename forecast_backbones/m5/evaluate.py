@@ -4,7 +4,7 @@
 
   python -m forecast_backbones.m5.evaluate --runs runs/m5/final/e1_s0 --test "datasets/test/*.parquet"
   python -m forecast_backbones.m5.evaluate --runs runs/m5/final/e1_s0 runs/m5/final/e1_s1 runs/m5/final/e1_s2 \\
-         --test datasets/test --out runs/m5/final/ens_eval --decision-yaml forecast_backbones/m5/config/variants/d2_pstar_point.yaml
+         --test datasets/test --out runs/m5/final/ens_eval --decision-yaml forecast_backbones/m5/config/decision/d2_pstar_point.yaml
 
 多个 run 目录 = 集成：各成员的原始分位（真实单位）逐分位平均后再过一次决策层；reports/members.csv 另报每个成员单独的分数。
 决策规则可在评估时覆盖（--point / --decision-yaml），不用重训：决策层没有可训练参数。
@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 
 try:
     from .config import deep_merge, raw_override
-    from .transformer_models import TransformersAdaptedM5Model
+    from .transformer_models import TransformersAdaptedM5Model, ctx_future_geometry
     from .train import score_nanwang, seen_unseen_scores, nrmse_pct, ultra_proxy_pct, WEIGHTS_FILE, CONFIG_FILE
     from .data import _dataset_with_station_id
     from .rows import scored_row_index, issue_grid_row_index
@@ -38,7 +38,7 @@ try:
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m5.config import deep_merge, raw_override
-    from forecast_backbones.m5.transformer_models import TransformersAdaptedM5Model
+    from forecast_backbones.m5.transformer_models import TransformersAdaptedM5Model, ctx_future_geometry
     from forecast_backbones.m5.train import score_nanwang, seen_unseen_scores, nrmse_pct, ultra_proxy_pct, WEIGHTS_FILE, CONFIG_FILE
     from forecast_backbones.m5.data import _dataset_with_station_id
     from forecast_backbones.m5.rows import scored_row_index, issue_grid_row_index
@@ -133,10 +133,10 @@ def run_inference(members, ds, idx, collate, decision: dict, batch_size: int, sh
             truth = _np(labels[label_col]) if labels is not None and label_col in labels else None
             qs, ctx = [], None
             for m in members:
-                q, c = m.predict_raw(bd); qs.append(q)
+                q, c = m.predict_raw(bd, decision); qs.append(q)               # 按这次的决策规则决定算不算几何
                 ctx = ctx if ctx is not None else c
             q_mean = np.mean(qs, axis=0)
-            night_fut, p_clear_fut = ctx.night[:, L:], ctx.p_clear[:, L:]
+            night_fut, p_clear_fut, elev_fut = ctx_future_geometry(ctx, L, H)
             point, q_cal, median, pstar, night_physics = m0.decide(q_mean, night_fut, p_clear_fut, ctx.cap, decision)
             member_points = [m0.decide(q, night_fut, p_clear_fut, ctx.cap, decision)[0] for q in qs] if len(members) > 1 else []
             ts = _np(bd[ts_col]).astype(np.int64).reshape(-1)
@@ -148,8 +148,8 @@ def run_inference(members, ds, idx, collate, decision: dict, batch_size: int, sh
                     "observe_power_predict": point[i].astype(np.float32),
                     "observe_power_future": (truth[i][:H].astype(np.float32) if truth is not None else np.full(H, np.nan, np.float32)),
                     "p_star": pstar[i].astype(np.float32), "median": median[i].astype(np.float32),
-                    "night": night_physics[i].astype(bool), "elev_deg": ctx.elev_deg[i, L:].astype(np.float32),
-                    "p_clear": p_clear_fut[i].astype(np.float32),
+                    "night": night_physics[i].astype(bool), "elev_deg": elev_fut[i].astype(np.float32),
+                    "p_clear": (p_clear_fut[i] if p_clear_fut is not None else np.full(H, np.nan)).astype(np.float32),
                     "var_bin": 0, "var_signal": float(ctx.var_signal[i]), "degraded": bool(ctx.degraded[i]),
                     "cs_ratio": float(ctx.cs_ratio[i]) if ctx.cs_ratio is not None else 1.0,
                 }
@@ -225,7 +225,7 @@ def main(argv=None):
     ap.add_argument("--test", nargs="+", required=True, help="测试 parquet：目录 / 文件 / 通配符")
     ap.add_argument("--out", default=None, help="输出目录（默认 单成员 <run>/eval_test，多成员 <runs 的父目录>/ensemble_eval）")
     ap.add_argument("--point", default=None, help="覆盖 decision.point.default（median / p_star / p_star_l1），并清空 by_step")
-    ap.add_argument("--decision-yaml", default=None, help="合并该 yaml 的 decision 段（如 config/variants/d2_pstar_point.yaml）")
+    ap.add_argument("--decision-yaml", default=None, help="合并该 yaml 的 decision 段（如 config/decision/d2_pstar_point.yaml）")
     ap.add_argument("--set", dest="sets", action="append", default=None,
                     help="覆盖决策段的单个键：段.键=值，可多次（如 --set point.tail=linear --set point.spread_lo=1.25）")
     ap.add_argument("--wise-alpha", type=float, default=None, help="WiSE-FT：LoRA 增量与 head 按 alpha∈[0,1] 向预训练插值（0 = 零样本）")

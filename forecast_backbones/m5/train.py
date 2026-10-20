@@ -380,14 +380,32 @@ def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir, reuse: bool 
     return ds_train, ds_val, man
 
 
+def report_inputs(model, columns, verbose: bool = True) -> list[list[str]]:
+    """训练开始前核对"配置要的列 ↔ 训练数据里的列"并打进日志（同 M8）。返回训练数据里实际有的 past_future 对
+    （写进 model_config.yaml 的 features.cov_present：推理时不在里面的对不喂，在里面却缺列会提示）。"""
+    lines, res = model.input_report(columns)
+    if verbose:
+        print("[m5] ======== 输入列核对（配置列 → 训练数据列；✗ = 数据里没有）========")
+        for ln in lines:
+            print(f"[m5]   {ln}")
+    present = [[h, f] for h, f in model.past_future_cols if res.get(h) and res.get(f)]
+    if verbose:
+        absent = [[h, f] for h, f in model.past_future_cols if [h, f] not in present]
+        print(f"[m5]   → 实际使用的 NWP 协变量对 {len(present)}/{len(model.past_future_cols)}：{present}"
+              + (f"；缺列、不喂：{absent}" if absent else ""))
+        if not present and model.past_future_cols:
+            print("[m5]   ⚠️ 一对 NWP 协变量都没对上：模型等于不看天气预报，请检查 features.past_future 的列名", flush=True)
+    return present
+
+
 def expand_parquets(items) -> list[str]:
-    """目录 → 其下全部 *.parquet；通配符 → 展开；文件 → 原样。按路径排序，去重。"""
+    """目录 → 其下全部 *.parquet（递归）；通配符 → 展开；文件 → 原样。按路径排序，去重。"""
     import glob
     out: list[str] = []
     for it in items or ():
         p = Path(str(it))
-        if p.is_dir():
-            out += sorted(str(f) for f in p.glob("*.parquet"))
+        if p.is_dir():                              # 递归：train/date=2026-06-01/data_0.parquet 这种分区目录也行（同 M8）
+            out += sorted(str(f) for f in p.rglob("*.parquet") if not any(part.startswith(".") for part in f.relative_to(p).parts))
         else:
             hits = sorted(glob.glob(str(it)))
             if not hits:
@@ -568,10 +586,12 @@ def train_m5(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
     ds_train, ds_val, man = loaded
     known = model.set_known_stations(row_stations(ds_train, station_col).tolist())
     train_cfg["dataset"]["known_stations"] = known
+    cov_present = report_inputs(model, list(ds_train.column_names) + [str(cfg["dataset"]["label_col"])], verbose=main)
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     eval_every = sch.get("eval_every_steps")
     if main:
-        dump_config(deep_merge(deep_merge(DEFAULT_CFG, raw_override(config_path)), {"dataset": {"known_stations": known}}), out / CONFIG_FILE)
+        dump_config(deep_merge(deep_merge(DEFAULT_CFG, raw_override(config_path)),
+                               {"dataset": {"known_stations": known}, "features": {"cov_present": cov_present}}), out / CONFIG_FILE)
         (out / "split_manifest.json").write_text(json.dumps({"generated_by": "forecast_backbones.m5.train",
             "splits_dir": None if splits_dir is None else str(Path(splits_dir).resolve()),
             "train_parquet": man.get("train_parquet"), "plan": man.get("plan"), "refit": bool(refit),
@@ -642,7 +662,7 @@ def train_m5(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="M5 TimesFM-3 + LoRA 微调（finetune.enabled=false 时只做零样本打分）")
-    ap.add_argument("--config", default="forecast_backbones/m5/config/finetune.yaml")
+    ap.add_argument("--config", default="forecast_backbones/m5/config/f1_final.yaml")
     ap.add_argument("--splits-dir", default=None, help="pipelines.time_splits 落好的目录（train/valid.parquet + split_manifest.json）")
     ap.add_argument("--train-parquet", nargs="+", default=None,
                     help="现成的训练 parquet：文件夹 / 通配符 / 文件列表，全量训练、不切块、不剔除行、无验证集（等于 --refit）。与 --splits-dir 二选一")

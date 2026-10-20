@@ -1,0 +1,21 @@
+# F2 = f1_final + lr 1e-4 → 5e-5（向下探：全量数据行数比家里切分多，看小 lr 在后段步数是否更稳）
+run: {tag: f2_lr5e5, out_dir: runs/m5/f2_lr5e5}
+dataset:                             # 南网训练（m5_train_cli.py）：数据位置、列名、站表都在这里，命令行只给 --config / --ckpt-dir
+  src_dir: /home/wangding_hw/datasets/cleaned_processed_dataset_rulev3_with_tsfm   # 读其下 train/date=*/data_0.parquet
+  ts_col: timestamp_win
+  pv_col: observe_power
+  label_col: observe_power_future
+  station_meta: forecast_backbones/m5/info.csv      # 线上站表；相对路径按仓库根目录解析。数据 station 列（plant_guangfu1358）对 plant_pointname
+  station_meta_cols: {station_id: plantid, station: plant_pointname, lat: LATITUDE, lon: LONGITUDE, alt_m: null, cap_mw: GCCAPACITY}
+timesfm3:
+  checkpoint: /data/tangqingang/timesfm-3.0-pytorch  # ⚠️ TimesFM-3 底座权重目录：南网服务器上改成那边的路径（线上模板从线上零样本配置取，不读这里）
+features:
+  past_future:                       # 训练数据列名（小写；大写 general_GHI 也能对上）。南网数据没有 Solargis，不要加
+    - [general_ghi, general_ghi_predict]
+    - [general_temp, general_temp_predict]
+finetune:
+  unfreeze_output_head: false        # head 冻结（s2_frozen_head 起的结论：解冻 head 不加分）
+train:
+  schedule: {lr: 5.0e-5, lr_scheduler: constant, max_steps: 6000, save_every: 500}   # 常数 lr：checkpoint-N 与 N 步就停的 run 相同；save_every 每 500 步存一份，全量训练事后挑步
+decision: {point: {default: p_star}}  # p*（s7_fh_const_s0 valid D+1 76.3）
+

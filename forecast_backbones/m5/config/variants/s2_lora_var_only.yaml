@@ -1,4 +1,0 @@
-# 第 2 阶段·诊断（W4 L-v）：LoRA 只挂 var_attn 的四个投影（+ head）
-finetune:
-  lora:
-    target_modules: ['re:.*\.var_attn\.(query|key|value|out)_proj']

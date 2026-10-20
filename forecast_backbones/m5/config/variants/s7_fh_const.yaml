@@ -1,6 +1,0 @@
-# 第 7 阶段·协议：只把 cosine 换成常数 lr（其余 = s2_frozen_head：lr 1e-4、4000 步、无 EMA），与 s2_frozen_head 成对；
-# refit 固定步数时 cosine 的终点敏感，常数更稳。打平 → refit 改用常数（EMA 的作用看 s2_lr1e4_ema）
-finetune:
-  unfreeze_output_head: false
-train:
-  schedule: {lr_scheduler: constant}

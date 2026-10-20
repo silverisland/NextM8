@@ -7,9 +7,13 @@ M5 = Path(__file__).resolve().parents[1]
 ROOT = M5.parents[1]
 
 
-def test_finetune_yaml_is_default_cfg_on_disk():
+def test_nanwang_keys_default_off():
+    """2026-10-20 新键（同 M8）：默认全关，家里的旧配置行为不变。"""
     from forecast_backbones.m5.config import load_config
-    assert load_config(str(M5 / "config" / "finetune.yaml")) == load_config(None)
+    c = load_config(None)
+    assert c["dataset"]["src_dir"] is None and c["features"]["col_aliases"] == {} and c["features"]["cov_present"] is None
+    assert c["train"]["schedule"]["save_every"] is None
+    assert not (M5 / "config" / "finetune.yaml").exists() and not (M5 / "config" / "variants").exists()   # 配置平铺在 config/ 下
 
 
 def test_defaults_match_spec():
@@ -75,81 +79,54 @@ def test_validation_errors():
         load_config({"dataset": {"station_meta": None}})
 
 
+F_SERIES = ["f1_final", "f2_lr5e5", "f3_lr2e4", "f4_drop01", "f5_wd01"]
+
+
 @pytest.mark.parametrize("name,check", [
     ("z0_zeroshot", lambda c: c["finetune"]["enabled"] is False and c["finetune"]["inference_path"] == "torch"),
-    ("l1_lora_r8", lambda c: c["finetune"]["enabled"] is True and c["finetune"]["lora"]["rank"] == 8),
-    ("d2_pstar_point", lambda c: c["decision"]["point"]["default"] == "p_star"),
-    ("g1_solar_cov", lambda c: c["features"]["derived"] == {"solar_elevation": True, "clear_sky_power": True,
-                                                         "history_envelope": False, "envelope_nwp": False}),
-    ("g2_cs_ceiling", lambda c: c["decision"]["physics"]["clear_sky_cap_ratio"] == 1.05),
-    # 第 2 阶段：训练协议 + 收益定位（与 l1 同协议，只差一处）
-    ("s2_lr3e5_ema", lambda c: c["train"]["schedule"]["lr"] == 3e-5 and c["train"]["ema_decay"] == 0.998
-                               and c["train"]["early_stop"]["smooth_k"] == 3),
-    ("s2_lr1e4_ema", lambda c: c["train"]["schedule"]["lr"] == 1e-4 and c["train"]["ema_decay"] == 0.998
-                               and c["train"]["early_stop"]["smooth_k"] == 3),
-    ("s2_head_only", lambda c: c["finetune"]["lora"]["target_modules"] == [] and c["finetune"]["unfreeze_output_head"]),
-    ("s2_frozen_head", lambda c: c["finetune"]["unfreeze_output_head"] is False
-                                 and c["finetune"]["lora"]["target_modules"] == ["query_proj", "key_proj", "value_proj", "out_proj"]),
-    ("s2_lora_resblock", lambda c: c["finetune"]["lora"]["target_modules"][4:] == ["hidden_layer", "output_layer", "residual_layer"]),
-    ("s2_probe_resblock", lambda c: c["finetune"]["lora"]["target_modules"] == []
-                                    and c["finetune"]["unfreeze_modules"] == ["pre_transformer_resblock"]),
-    ("s2_lora_var_resblock", lambda c: c["finetune"]["lora"]["target_modules"][0].startswith("re:")
-                                       and "var_attn" in c["finetune"]["lora"]["target_modules"][0]),
-    ("s2_lora_var_only", lambda c: c["finetune"]["lora"]["target_modules"] == [r"re:.*\.var_attn\.(query|key|value|out)_proj"]),
-    ("s2_lora_seq_only", lambda c: c["finetune"]["lora"]["target_modules"] == [r"re:.*\.seq_attn\.(query|key|value|out)_proj"]),
-    ("s2_lr1e5_ema", lambda c: c["train"]["schedule"]["lr"] == 1e-5 and c["train"]["ema_decay"] == 0.998),
-    ("s6_all_linear", lambda c: {"ff0", "ff1", "hidden_layer"} <= set(c["finetune"]["lora"]["target_modules"])),
-    ("s6_lora_vo_only", lambda c: c["finetune"]["lora"]["target_modules"] == ["value_proj", "out_proj"]),
-    ("s6_full_ft_lr1e6", lambda c: c["finetune"]["lora"]["target_modules"] == [] and c["train"]["schedule"]["lr"] == 1e-6
-                                   and c["finetune"]["unfreeze_modules"] == ["pre_transformer_resblock", "transformer_stack"]),
-    ("s6_full_ft_lr1e5", lambda c: c["train"]["schedule"]["lr"] == 1e-5 and "transformer_stack" in c["finetune"]["unfreeze_modules"]),
-    ("s6_partial_ends", lambda c: "transformer_stack.layers.19" in c["finetune"]["unfreeze_modules"]
-                                  and "transformer_stack" not in c["finetune"]["unfreeze_modules"]),
-    ("s3_solargis_cov", lambda c: c["features"]["past_future"][2:] == [["GHI_solargis", "ghi_solargis_predict"],
-                                                                        ["temp_solargis", "temp_solargis_predict"]]
-                                  and c["finetune"]["lora"]["target_modules"] == ["query_proj", "key_proj", "value_proj", "out_proj"]),
-    ("s3_cov_all_var", lambda c: len(c["features"]["past_future"]) == 4 and c["features"]["derived"]["clear_sky_power"]
-                                 and c["finetune"]["lora"]["target_modules"][0].startswith("re:")),
-    # rsLoRA 口径：alpha/√rank 与 r8·α16 相同（≈5.66），冻结 head
-    ("s5_rank4", lambda c: c["finetune"]["lora"]["rank"] == 4 and c["finetune"]["lora"]["alpha"] / 4 ** 0.5 == pytest.approx(16 / 8 ** 0.5, rel=1e-3)
-                           and c["finetune"]["unfreeze_output_head"] is False),
-    ("s5_rank16", lambda c: c["finetune"]["lora"]["rank"] == 16 and c["finetune"]["lora"]["alpha"] / 16 ** 0.5 == pytest.approx(16 / 8 ** 0.5, rel=1e-3)
-                            and c["finetune"]["unfreeze_output_head"] is False),
-    ("s5_rank32", lambda c: c["finetune"]["lora"]["rank"] == 32 and c["finetune"]["lora"]["alpha"] / 32 ** 0.5 == pytest.approx(16 / 8 ** 0.5, rel=1e-3)
-                            and c["finetune"]["unfreeze_output_head"] is False),
-    # 第 7 阶段：协议 / 优化器 / PEFT 对照（都冻结 head，s7_head_lr_split / s7_lpft 除外）
-    ("s7_fh_lr3e4", lambda c: c["train"]["schedule"]["lr"] == 3e-4 and c["train"]["schedule"]["max_steps"] == 8000
-                              and c["finetune"]["unfreeze_output_head"] is False),
-    ("s7_fh_lr1e3", lambda c: c["train"]["schedule"]["lr"] == 1e-3 and c["train"]["schedule"]["max_steps"] == 8000),
-    ("s7_fh_const", lambda c: c["train"]["schedule"]["lr_scheduler"] == "constant" and c["train"]["ema_decay"] is None
-                              and c["train"]["schedule"]["max_steps"] == 4000),
-    ("s7_lora_plus", lambda c: c["train"]["optim"]["lora_plus_ratio"] == 16 and c["finetune"]["unfreeze_output_head"] is False),
-    ("s7_head_lr_split", lambda c: c["train"]["optim"]["head_lr"] == 1e-5 and c["train"]["schedule"]["lr"] == 3e-4
-                                   and c["finetune"]["unfreeze_output_head"] is True),
-    ("s7_lpft", lambda c: "{seed}" in c["finetune"]["init_from"] and "s2_head_only" in c["finetune"]["init_from"]),
-    ("s7_ia3", lambda c: c["finetune"]["lora"]["target_modules"] == [] and c["finetune"]["ia3"]["target_modules"] == ["key_proj", "value_proj", "ff0"]),
-    ("s7_rb_adapter", lambda c: c["finetune"]["resblock_adapter"]["rank"] == 32 and c["finetune"]["lora"]["target_modules"]),
-    # 第 8 阶段：soft prompt / 静态站点信息
-    ("s8_prompt4", lambda c: c["finetune"]["prompt"]["n_tokens"] == 4 and not c["finetune"]["prompt"]["per_station"]),
-    ("s8_prompt4_station", lambda c: c["finetune"]["prompt"]["per_station"] and c["finetune"]["prompt"]["station_dropout"] == 0.25),
-    ("s8_prompt_only", lambda c: c["finetune"]["lora"]["target_modules"] == [] and c["finetune"]["prompt"]["n_tokens"] == 8),
-    ("s8_static_embed", lambda c: c["finetune"]["static_embed"]["enabled"] and c["finetune"]["lora"]["target_modules"]),
-    # 第 9 阶段：条件 LoRA
-    ("s9_gated_lora", lambda c: c["finetune"]["lora"]["gate"] is True and c["finetune"]["lora"]["experts"] == 1
-                                and c["train"]["optim"]["adapter_lr"] == 1e-3),
-    ("s9_hydra_k3", lambda c: c["finetune"]["lora"]["experts"] == 3 and c["finetune"]["lora"]["gate"] is False
-                              and c["train"]["optim"]["adapter_lr"] == 1e-3),
-    # 第 3 阶段：历史日形包络（C1 / C2），训练版冻结 head，零样本版不训
+    # f 系列：s7_fh_const（冻结 head + 常数 lr）+ p*，每个只差一处超参
+    ("f1_final", lambda c: c["finetune"]["unfreeze_output_head"] is False and c["train"]["schedule"]["lr_scheduler"] == "constant"
+                           and c["train"]["schedule"]["lr"] == 1e-4 and c["train"]["ema_decay"] is None
+                           and c["decision"]["point"]["default"] == "p_star"
+                           and c["finetune"]["lora"]["target_modules"] == ["query_proj", "key_proj", "value_proj", "out_proj"]),
+    ("f2_lr5e5", lambda c: c["train"]["schedule"]["lr"] == 5e-5),
+    ("f3_lr2e4", lambda c: c["train"]["schedule"]["lr"] == 2e-4),
+    ("f4_drop01", lambda c: c["finetune"]["lora"]["dropout"] == 0.1),
+    ("f5_wd01", lambda c: c["train"]["schedule"]["weight_decay"] == 0.1),
     ("s3_c1_envelope", lambda c: c["features"]["derived"]["history_envelope"] and not c["features"]["derived"]["envelope_nwp"]
-                                 and c["finetune"]["enabled"]),
-    ("s3_c2_envelope_nwp", lambda c: c["features"]["derived"]["history_envelope"] and c["features"]["derived"]["envelope_nwp"]),
+                                 and c["finetune"]["enabled"] and c["train"]["schedule"]["lr_scheduler"] == "constant"),
     ("s3_c1_envelope_zs", lambda c: c["features"]["derived"]["history_envelope"] and c["finetune"]["enabled"] is False),
-    ("s3_c2_envelope_nwp_zs", lambda c: c["features"]["derived"]["envelope_nwp"] and c["finetune"]["enabled"] is False),
 ])
 
 def test_variants_load(name, check):
     from forecast_backbones.m5.config import load_config
-    assert check(load_config(str(M5 / "config" / "variants" / f"{name}.yaml")))
+    assert check(load_config(str(M5 / "config" / f"{name}.yaml")))
+
+
+def _diff(a, b, path=()):
+    out = []
+    for k in sorted(set(a) | set(b)):
+        x, y = a.get(k), b.get(k)
+        if isinstance(x, dict) and isinstance(y, dict):
+            out += _diff(x, y, path + (k,))
+        elif x != y:
+            out.append(".".join(path + (k,)))
+    return out
+
+
+@pytest.mark.parametrize("name,changed", [("f2_lr5e5", ["train.schedule.lr"]), ("f3_lr2e4", ["train.schedule.lr"]),
+                                          ("f4_drop01", ["finetune.lora.dropout"]), ("f5_wd01", ["train.schedule.weight_decay"])])
+def test_f_series_is_same_model_one_hyperparam_apart(name, changed):
+    """f2–f5 与 f1_final 是同一个模型：除 run 段外只差一处超参。"""
+    from forecast_backbones.m5.config import load_config
+    a, b = load_config(str(M5 / "config" / "f1_final.yaml")), load_config(str(M5 / "config" / f"{name}.yaml"))
+    assert [d for d in _diff(a, b) if not d.startswith(("run.", "eval.", "train.weights_path"))] == changed
+
+
+def test_decision_yaml_only_touches_decision():
+    from forecast_backbones.m5.config import load_config
+    raw = yaml.safe_load((M5 / "config" / "decision" / "d2_pstar_point.yaml").read_text(encoding="utf-8"))
+    assert list(raw) == ["decision"] and load_config(raw)["decision"]["point"]["default"] == "p_star"
 
 
 def test_configs_yaml_stays_zero_shot():
@@ -158,13 +135,6 @@ def test_configs_yaml_stays_zero_shot():
 
 
 def test_every_variant_yaml_is_covered_by_a_test():
-    names = {p.stem for p in (M5 / "config" / "variants").glob("*.yaml")}
-    covered = {"z0_zeroshot", "l1_lora_r8", "d2_pstar_point", "g1_solar_cov", "g2_cs_ceiling", "s2_lr3e5_ema", "s2_lr1e4_ema",
-               "s2_lr1e5_ema", "s2_head_only", "s2_frozen_head", "s2_lora_resblock", "s2_probe_resblock", "s2_lora_var_resblock",
-               "s2_lora_var_only", "s2_lora_seq_only", "s6_all_linear", "s6_lora_vo_only",
-               "s6_full_ft_lr1e6", "s6_full_ft_lr1e5", "s6_partial_ends",
-               "s3_solargis_cov", "s3_cov_all_var", "s5_rank4", "s5_rank16", "s5_rank32",
-               "s7_fh_lr3e4", "s7_fh_lr1e3", "s7_fh_const", "s7_lora_plus", "s7_head_lr_split", "s7_lpft", "s7_ia3", "s7_rb_adapter",
-               "s8_prompt4", "s8_prompt4_station", "s8_prompt_only", "s8_static_embed", "s9_gated_lora", "s9_hydra_k3",
-               "s3_c1_envelope", "s3_c2_envelope_nwp", "s3_c1_envelope_zs", "s3_c2_envelope_nwp_zs"}
+    names = {p.stem for p in (M5 / "config").glob("*.yaml")} - {"configs"}       # configs.yaml = 线上零样本（legacy）配置
+    covered = {"z0_zeroshot", *F_SERIES, "s3_c1_envelope", "s3_c1_envelope_zs"}
     assert names == covered, names ^ covered

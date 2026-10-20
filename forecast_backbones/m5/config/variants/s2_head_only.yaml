@@ -1,4 +1,0 @@
-# 第 2 阶段·定位对照（W3a）：不挂 LoRA，只训 output_head（0.74M）；≈ l1 说明收益主要是输出再校准
-finetune:
-  lora: {target_modules: []}
-  unfreeze_output_head: true

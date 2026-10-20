@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 # forecast_backbones/m5/rowctx.py
-"""每批的站点上下文：站号 → 固定容量（站表 cap_mw）；窗口时间戳 → 太阳高度角 / 晴空 GHI / 晴空功率 / 夜间。
-M5 默认（D8）只用 cap 与 station_id；几何量只进 aux 供报表，features.derived 或 decision.physics.clear_sky_cap_ratio 打开时
-才影响预测。SolarCache 自 M8 复制（pvlib 按 (站, 日) 缓存 96 步）；RowCtx 字段与 M8 同名，evaluate.run_inference 原样可用。"""
+"""每批的站点上下文：站号 → 固定容量（站表 cap_mw）；窗口时间戳 → 一天内时刻槽号；按需再算太阳高度角 / 晴空 GHI / 晴空功率 / 夜间。
+M5 默认（D8）只用 cap 与 station_id，不算几何（build(geometry=False)：elev_deg / ghi_clear / p_clear / night 为 None，不出缺坐标
+warning）。几何只在 decision.physics.night_zero / clear_sky_cap_ratio、features.derived.solar_elevation / clear_sky_power、
+train.loss.night_weight≠1 时有用，由 TransformersAdaptedM5Model.geometry_needed 判断（2026-10-20）。
+SolarCache 自 M8 复制（pvlib 按 (站, 日) 缓存 96 步）；RowCtx 字段与 M8 同名。"""
 from __future__ import annotations
 
 import sys
@@ -13,10 +15,10 @@ from pathlib import Path
 import numpy as np
 
 try:
-    from .solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
+    from .solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw, norm_station_name
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from forecast_backbones.m5.solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw
+    from forecast_backbones.m5.solar import window_timestamps, solar_geometry, clock_pseudo_geometry, StationMeta, station_cap_mw, norm_station_name
 
 _DEGRADED_WARNED: set = set()
 
@@ -67,13 +69,13 @@ class SolarCache:
 class RowCtx:
     station_id: np.ndarray      # [B] int
     cap: np.ndarray             # [B]
-    elev_deg: np.ndarray        # [B, T]
-    ghi_clear: np.ndarray       # [B, T]
-    p_clear: np.ndarray         # [B, T]
-    night: np.ndarray           # [B, T] bool（elev <= 0）
+    elev_deg: np.ndarray | None  # [B, T]；没算几何时 None（下同）
+    ghi_clear: np.ndarray | None # [B, T]
+    p_clear: np.ndarray | None   # [B, T]
+    night: np.ndarray | None     # [B, T] bool（elev <= 0）
     k_steps: np.ndarray         # [B, H]，M5 恒 0（M8 的 NWP 晴空指数，这里不算）
     var_signal: np.ndarray      # [B]，M5 恒 0
-    degraded: np.ndarray        # [B] bool：站表缺坐标，走钟表几何
+    degraded: np.ndarray        # [B] bool：站表缺坐标（算几何时走钟表几何）
     cs_ratio: np.ndarray = None # [B]，M5 恒 1
     envelope_used: np.ndarray = None   # [B]，M5 恒 False
     slot: np.ndarray = None     # [B, T] int：每步的一天内时刻槽号（0..n_day-1，本地墙钟），历史包络按它对齐
@@ -95,14 +97,34 @@ class RowContextBuilder:
                 self._cap_cache[int(s)] = station_cap_mw(self.meta, int(s))
         return np.array([self._cap_cache[int(s)] for s in sid], float)
 
-    def build(self, batch_dict: dict) -> RowCtx:
-        if self.sid_col not in batch_dict:
-            raise ValueError(f"batch_dict 缺 {self.sid_col!r} 列：M5 full 模式按站查 station_meta 取容量，必须带数值 station_id")
+    def station_ids(self, batch_dict: dict) -> np.ndarray:
+        """[B] 整数站号：有 station_id 列直接用；只有 station 站名列（线上 / 南网训练数据的 plant_guangfu1358）时按 station_meta 映射。"""
+        if self.sid_col in batch_dict:
+            return _to_np(batch_dict[self.sid_col]).astype(int).reshape(-1)
+        if "station" in batch_dict:
+            v = batch_dict["station"]
+            names = list(np.asarray(_to_np(v) if hasattr(v, "detach") else v, dtype=object).reshape(-1))
+            mapping, unknown, conflicts = self.meta.resolve(names)
+            if conflicts or unknown:
+                raise ValueError(f"站名映射失败：station_meta 里找不到 {unknown[:10]} {'；'.join(conflicts)}"
+                                 f"（station_meta 的 station 列要写数据里的站名）")
+            return np.array([mapping[norm_station_name(n)] for n in names], dtype=int)
+        raise ValueError(f"batch_dict 缺 {self.sid_col!r} 列（也没有 station 站名列）：M5 full 模式按站查 station_meta 取容量")
+
+    def build(self, batch_dict: dict, geometry: bool = True) -> RowCtx:
+        """geometry=False：不算太阳几何（pvlib），elev_deg / ghi_clear / p_clear / night 留 None。"""
         ts_epoch = _to_np(batch_dict[self.ts_col]).astype(np.int64).reshape(-1)
-        sid = _to_np(batch_dict[self.sid_col]).astype(int).reshape(-1)
+        sid = self.station_ids(batch_dict)
         B, T = len(sid), self.L + self.H
         cap = self.station_caps(sid)
         ts = window_timestamps(ts_epoch, self.L, self.H, self.step_min)
+        tsm = ts.astype("datetime64[m]")
+        slot = ((tsm - tsm.astype("datetime64[D]")).astype(np.int64) // self.step_min).astype(np.int64)
+        if not geometry:
+            degraded = np.array([not self.meta.has_coords(int(s)) for s in sid], bool)
+            return RowCtx(station_id=sid, cap=cap, elev_deg=None, ghi_clear=None, p_clear=None, night=None,
+                          k_steps=np.zeros((B, self.H)), var_signal=np.zeros(B), degraded=degraded,
+                          cs_ratio=np.ones(B), envelope_used=np.zeros(B, bool), slot=slot)
         elev = np.empty((B, T)); ghi = np.empty((B, T)); degraded = np.zeros(B, bool)
         for s in np.unique(sid):
             rows = np.flatnonzero(sid == s)
@@ -112,11 +134,9 @@ class RowContextBuilder:
             new = [int(s) for s in np.unique(sid[degraded]) if int(s) not in _DEGRADED_WARNED]
             if new:
                 warnings.warn(f"station_meta 缺坐标，几何退化为钟表几何（p_clear = 装机容量, elev = ±10）：station_id={new}"
-                              f"（M5 默认不用几何，只影响 aux 与 g1 / g2 变体）")
+                              f"（影响夜间归零 / 晴空上限 / 几何协变量）")
                 _DEGRADED_WARNED.update(new)
         p_clear = np.where(degraded[:, None], np.where(ghi > 0, cap[:, None], 0.0), ghi / 1000.0 * cap[:, None])
-        tsm = ts.astype("datetime64[m]")
-        slot = ((tsm - tsm.astype("datetime64[D]")).astype(np.int64) // self.step_min).astype(np.int64)
         return RowCtx(station_id=sid, cap=cap, elev_deg=elev, ghi_clear=ghi, p_clear=p_clear, night=elev <= 0.0,
                       k_steps=np.zeros((B, self.H)), var_signal=np.zeros(B), degraded=degraded,
                       cs_ratio=np.ones(B), envelope_used=np.zeros(B, bool), slot=slot)

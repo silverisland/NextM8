@@ -105,7 +105,8 @@ def test_legacy_attributes_used_by_callers():
 def test_registry_and_alias():
     from pipelines.model_registry import import_model_class
     assert import_model_class("m5") is TransformersAdaptedM5Model
-    assert TransformersAdaptedTimesFM3Model is TransformersAdaptedM5Model
+    assert issubclass(TransformersAdaptedTimesFM3Model, TransformersAdaptedM5Model)
+    assert TransformersAdaptedTimesFM3Model.__name__ == "TransformersAdaptedTimesFM3Model"   # 线上按这个名字取预测列
 
 
 def test_finetune_without_station_meta_raises():

@@ -7,12 +7,12 @@
 #          → metrics_ens/{站}-metrics.xlsx + {站}-summary.json + reports/station_metrics.csv
 #
 # 用法：
-#   bash eval_m5.sh --runs runs/m5/m5_base/l1_lora_r8_s0 --test data/splits/m8_v1/valid.parquet
-#   bash eval_m5.sh --runs runs/m5/m5_base/l1_lora_r8_s0 --test data/splits/m8_v1/valid.parquet \
-#        --decision_yaml forecast_backbones/m5/config/variants/d2_pstar_point.yaml          # p*，不重训
-#   bash eval_m5.sh --runs runs/m5/m5_base/l1_lora_r8_s0 --test data/splits/m8_v1/valid.parquet --point p_star \
+#   bash eval_m5.sh --runs runs/m5/m5_base/s2_frozen_head_s0 --test data/splits/m8_v1/valid.parquet
+#   bash eval_m5.sh --runs runs/m5/m5_base/s2_frozen_head_s0 --test data/splits/m8_v1/valid.parquet \
+#        --decision_yaml forecast_backbones/m5/config/decision/d2_pstar_point.yaml          # p*，不重训
+#   bash eval_m5.sh --runs runs/m5/m5_base/s2_frozen_head_s0 --test data/splits/m8_v1/valid.parquet --point p_star \
 #        --set point.tail=linear --set point.spread_lo=1.25 --wise_alpha 0.5          # O0 / T3 / W2，都不重训
-#   bash eval_m5.sh --runs runs/m5/m5_base/l1_lora_r8_s0,runs/m5/m5_base/l1_lora_r8_s1,runs/m5/m5_base/l1_lora_r8_s2 \
+#   bash eval_m5.sh --runs runs/m5/m5_base/s2_frozen_head_s0,runs/m5/m5_base/s2_frozen_head_s1,runs/m5/m5_base/s2_frozen_head_s2 \
 #        --test "datasets/test/*.parquet" --full
 set -u
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +41,7 @@ usage() {
   --test <path>            测试 parquet 的目录 / 文件 / 通配符（通配符加引号）
   --out <dir>              输出目录（默认 单成员 <run>/eval_test，多成员 <父目录>/ensemble_eval）
   --point <rule>           覆盖决策点规则：median / p_star / p_star_l1（清空 by_step）
-  --decision_yaml <yaml>   合并该 yaml 的 decision 段（如 config/variants/d2_pstar_point.yaml）
+  --decision_yaml <yaml>   合并该 yaml 的 decision 段（如 config/decision/d2_pstar_point.yaml）
   --set <段.键=值>         覆盖决策段的单个键，可多次（point.tail=linear / point.spread_lo=1.25 / point.default=p_star）
   --wise_alpha <a>         WiSE-FT：LoRA 增量与 head 按 a∈[0,1] 向预训练插值（0 = 零样本；零样本 run 忽略）
   --gpu <id>               用哪张卡（默认 0）

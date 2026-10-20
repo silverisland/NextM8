@@ -1,0 +1,5 @@
+# C1 零样本：不训练，只看加了包络通道的零样本分（与 z0_zeroshot 比）；零样本与种子无关，只跑一次
+features:
+  derived: {history_envelope: true}
+finetune:
+  enabled: false

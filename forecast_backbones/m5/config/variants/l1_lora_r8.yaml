@@ -1,4 +1,0 @@
-# LoRA 基线（= finetune.yaml 默认）：rank 8 / alpha 16 / dropout 0.05，attention 四个投影 + 解冻 output_head；输入只有 ghi、温度
-finetune:
-  enabled: true
-  lora: {rank: 8, alpha: 16}

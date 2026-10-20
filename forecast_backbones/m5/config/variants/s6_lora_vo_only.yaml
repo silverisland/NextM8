@@ -1,3 +1,0 @@
-# 第 6 阶段·容量（W8）：LoRA 只挂 value / out 投影（不改注意力分布，只改搬运的内容）
-finetune:
-  lora: {target_modules: [value_proj, out_proj]}

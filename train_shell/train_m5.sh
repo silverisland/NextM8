@@ -6,8 +6,9 @@
 # 卡数变了配方不变；显存不够就多给卡（每卡变小），或把 --batch_size 降到 8。
 #
 # 用法：
-#   bash train_m5.sh --splits_dir data/splits/m8_v1 --gpus 0                                              # 默认 = l1 LoRA 基线
-#   bash train_m5.sh --splits_dir data/splits/m8_v1 --config forecast_backbones/m5/config/variants/z0_zeroshot.yaml --gpus 0
+#   bash train_m5.sh --splits_dir data/splits/m8_v1 --station_meta forecast_backbones/m5/station_meta.csv --gpus 0   # 默认 f1_final
+#   bash train_m5.sh --splits_dir data/splits/m8_v1 --config forecast_backbones/m5/config/z0_zeroshot.yaml --gpus 0
+#   f 系列 yaml 的站表是线上 info.csv（南网站号 1780…）；家里切分的站号是 1001…，所以家里训练要 --station_meta 换回 station_meta.csv
 #   bash train_m5.sh --splits_dir data/splits/m8_v1 --gpus 0 --max_steps 20 --eval_every 10 --run_id smoke   # 冒烟
 #   批量跑变体 / 多种子见 train_m5_variants.sh
 set -u
@@ -16,7 +17,8 @@ if [ -d "$_HERE/forecast_backbones" ]; then BASE_DIR="$_HERE"; else BASE_DIR="$(
 
 SPLITS_DIR="${BASE_DIR}/data/splits/m8_v1"
 TRAIN_PARQUET=""                    # 给了就是全量训练：文件夹 / 通配符（加引号）/ 单个文件，不走切分目录，隐含 --refit
-CONFIG="${BASE_DIR}/forecast_backbones/m5/config/finetune.yaml"
+CONFIG="${BASE_DIR}/forecast_backbones/m5/config/f1_final.yaml"   # 默认 = 最终配方；未写的字段取 config.py 的 DEFAULT_CFG
+STATION_META=""                     # 站表路径：覆盖配置 dataset.station_meta（线上 info.csv 表头自动识别）
 RUNS_BASE="${BASE_DIR}/runs"
 RUN_ID=""                           # 留空 = 配置 run.tag（或 变体文件名）+ 时间戳
 GPUS="auto"
@@ -40,7 +42,10 @@ usage() {
   --splits_dir <dir>       pipelines.time_splits 落的切分目录（train/valid.parquet + split_manifest.json；不需要 cal.parquet）
   --train_parquet <path>   全量训练：现成的训练 parquet（文件夹 / 加引号的通配符 / 文件），不切分、不剔除任何行、无验证集，
                            固定 --max_steps 步后存 checkpoint（隐含 --refit）。与 --splits_dir 二选一
-  --config <yaml>          M5 训练配置或变体（默认 forecast_backbones/m5/config/finetune.yaml；变体在 config/variants/；config/configs.yaml 是线上零样本配置，不能拿来训练）
+  --config <yaml>          M5 配置（默认 forecast_backbones/m5/config/f1_final.yaml；各变体直接放在 config/ 下，只写与 config.py 的
+                           DEFAULT_CFG 不同的字段；config/configs.yaml 是线上零样本配置，不能拿来训练）
+  --station_meta <csv>     站表（覆盖 dataset.station_meta，列名映射随之清空、表头自动识别）。家里切分用
+                           forecast_backbones/m5/station_meta.csv；也可直接给线上的 info.csv
   --run_id <name>          产物目录名：<runs_base>/m5/<run_id>（默认 <tag>_<日期_时间>）
   --runs_base <dir>        产物根目录（默认 <仓库>/runs）
   --gpus <csv|auto>        用哪些卡（默认 auto = 全部可见卡）；每张卡一个进程
@@ -65,6 +70,7 @@ while [ $# -gt 0 ]; do
     --splits_dir)   SPLITS_DIR="$2";  shift 2 ;;
     --train_parquet) TRAIN_PARQUET="$2"; shift 2 ;;
     --config)       CONFIG="$2";      shift 2 ;;
+    --station_meta) STATION_META="$2"; shift 2 ;;
     --run_id)       RUN_ID="$2";      shift 2 ;;
     --runs_base)    RUNS_BASE="$2";   shift 2 ;;
     --gpus|--gpu)   GPUS="$2";        shift 2 ;;
@@ -89,7 +95,7 @@ done
 [ -f "$CONFIG" ]  || { echo "❌ 找不到配置: $CONFIG" >&2; exit 1; }
 if [ -n "$TRAIN_PARQUET" ]; then
   REFIT=1
-  if [ -d "$TRAIN_PARQUET" ]; then n=$(ls "$TRAIN_PARQUET"/*.parquet 2>/dev/null | wc -l); else n=$(compgen -G "$TRAIN_PARQUET" | wc -l); fi
+  if [ -d "$TRAIN_PARQUET" ]; then n=$(find "$TRAIN_PARQUET" -name "*.parquet" 2>/dev/null | wc -l); else n=$(compgen -G "$TRAIN_PARQUET" | wc -l); fi   # 目录递归（date=xxx 分区）
   [ "$n" -gt 0 ] || { echo "❌ --train_parquet 没有匹配到 parquet: $TRAIN_PARQUET" >&2; exit 1; }
   [ -n "$MAX_STEPS" ] || { echo "❌ 全量训练没有验证集、不能早停：请给 --max_steps（按验证切分上各种子 best_step 的上限给）" >&2; exit 1; }
 else
@@ -129,9 +135,9 @@ if [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
     echo "❌ 产物目录已存在且非空: ${RUN_DIR}（换 --run_id，或加 --overwrite）" >&2; exit 1; fi
 fi
 
-"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" "$NP" <<'PYEOF'
+"$VENV_PY" - "$CONFIG" "$TMP_CFG" "$PRECISION" "$BATCH_SIZE" "$EVAL_EVERY" "$TAG" "$SEED" "$NP" "$STATION_META" <<'PYEOF'
 import sys, yaml, os
-src, dst, precision, batch_size, eval_every, tag, seed, n_proc = sys.argv[1:9]
+src, dst, precision, batch_size, eval_every, tag, seed, n_proc, station_meta = sys.argv[1:10]
 cfg = yaml.safe_load(open(src, encoding="utf-8")) or {}
 sch = cfg.setdefault("train", {}).setdefault("schedule", {})
 sch["precision"] = precision
@@ -139,6 +145,9 @@ if batch_size: sch["batch_size"] = int(batch_size)
 if eval_every: sch["eval_every_steps"] = int(eval_every)
 cfg.setdefault("run", {})["tag"] = tag
 if seed != "": cfg["run"]["seeds"] = [int(seed)]
+if station_meta:
+    cfg.setdefault("dataset", {})["station_meta"] = os.path.abspath(station_meta)
+    cfg["dataset"]["station_meta_cols"] = None      # 换了站表，配置里的列名映射（info.csv 表头）不再适用：标准表头 / info.csv 表头都自动识别
 gb = int(sch.get("batch_size") or 16)                     # 变体没写就是默认 16（config.py DEFAULT_CFG）
 if gb % int(n_proc):
     print(f"❌ 全局 batch {gb} 不能被卡数 {n_proc} 整除：换 --gpus 的卡数，或换 --batch_size", file=sys.stderr); sys.exit(4)

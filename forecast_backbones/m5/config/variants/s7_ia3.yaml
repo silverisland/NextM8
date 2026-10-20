@@ -1,8 +1,0 @@
-# 第 7 阶段·PEFT 对照：(IA)³（key / value / ff0 输出逐通道缩放，约 7.7 万参数）代替 LoRA，冻结 head；
-# (IA)³ 的常用 lr 比 LoRA 大一个量级（3e-3）。≈ frozen_head 说明适配主要是"调强弱"而不是"转方向"
-finetune:
-  lora: {target_modules: []}
-  ia3: {target_modules: [key_proj, value_proj, ff0]}
-  unfreeze_output_head: false
-train:
-  schedule: {lr: 3.0e-3}

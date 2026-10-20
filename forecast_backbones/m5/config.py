@@ -2,7 +2,7 @@
 # forecast_backbones/m5/config.py
 """M5（TimesFM-3 + LoRA 微调）的训练 / 评估配置：yaml → dict，与 DEFAULT_CFG 深合并，解析 ${run.out_dir}。
 只服务 full 模式（必须有 dataset.station_meta）；线上零样本（legacy）配置由 transformer_models 里的 DEFAULT_CFG 合并，不经过这里。
-config/finetune.yaml 是 DEFAULT_CFG 的落盘（tests/test_config.py 守住两边一致）。"""
+config/*.yaml 是各配方（只写与 DEFAULT_CFG 不同的字段；2026-10-20 起同 M8 平铺在 config/ 下）。"""
 from __future__ import annotations
 
 import copy
@@ -67,9 +67,11 @@ DEFAULT_CFG: dict = {
         "label_col": "observe_power_future",
         "ts_col": "timestamp_win",
         "station_id_col": "station_id",
+        # 训练数据根目录（南网 m5_train_cli.py 读其下 train/**/*.parquet；--src-dir / --train-path 可覆盖）。家里走切分目录，不用它
+        "src_dir": None,
         # 只取每站固定容量 cap_mw（损失归一与两套指标的分母）与站号（seen / unseen 报表）；经纬度只在几何变体（g1 / g2）里用
         "station_meta": "forecast_backbones/m5/station_meta.csv",
-        "station_meta_cols": None,          # 站表列名映射 {内部名: 你表里的列名}，同 M8
+        "station_meta_cols": None,          # 站表列名映射 {内部名: 你表里的列名}，同 M8；null 时线上 info.csv 表头自动识别
         "tz": "Asia/Shanghai",
         "step_min": 15,
         "known_stations": None,             # 训练入口自动写入训练集站号（只用于报表）
@@ -89,6 +91,10 @@ DEFAULT_CFG: dict = {
     "features": {
         "past_future": [["general_ghi", "general_ghi_predict"], ["general_temp", "general_temp_predict"]],
         "past_only": [],
+        # 列名别名 {配置列名: 数据列名或列表}（2026-10-20，同 M8）；没写的列先精确、再大小写不敏感匹配（general_ghi ↔ general_GHI）
+        "col_aliases": {},
+        # 训练数据里实际有的 past_future 对：训练入口自动写入 model_config.yaml，推理时不在里面的对有列也不喂（null = 全喂）
+        "cov_present": None,
         # D8：几何协变量默认关，输入与线上 M5 相同；g1 变体打开（太阳高度角 / 晴空出力各一个 past_future 通道）
         # history_envelope（C1）：功率历史日形包络一条通道；envelope_nwp（C2）：包络 × clip(GHI_nwp / GHI 历史包络)；都不需要坐标
         "derived": {"solar_elevation": False, "clear_sky_power": False, "history_envelope": False, "envelope_nwp": False},
@@ -117,7 +123,10 @@ DEFAULT_CFG: dict = {
         "schedule": {"lr": 1.0e-4, "weight_decay": 0.01, "batch_size": 16, "max_steps": 4000, "epochs_max": 10,
                      "warmup_steps": 0, "grad_clip": 1.0, "precision": "fp32", "logging_steps": 20,
                      "eval_every_steps": 250, "sampling": "random", "progress_bar": True, "num_workers": 0,
-                     "lr_scheduler": "cosine"},     # cosine | constant | constant_with_warmup | linear（HF lr_scheduler_type）
+                     "lr_scheduler": "cosine",      # cosine | constant | constant_with_warmup | linear（HF lr_scheduler_type）
+                     # 南网 m5_train_cli.py：每 N 步存一份 checkpoint（hf_trainer_output/checkpoint-N/，带 model_config.yaml），
+                     # 全量训练没有验证集，事后用线上脚本在训练期之后的时段上挑步；0 / null = 不存
+                     "save_every": None},
         # 优化器参数分组（全 null = HF 默认单组）：lora_plus_ratio = LoRA+（lora_B 的 lr = lr × 该值）；
         # head_lr / adapter_lr = output_head / 其余可训参数（解冻块、(IA)³、prompt 等）单独的 lr
         "optim": {"lora_plus_ratio": None, "head_lr": None, "adapter_lr": None},

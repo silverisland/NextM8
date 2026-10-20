@@ -10,11 +10,11 @@ import numpy as np
 import pandas as pd
 
 try:
-    from .solar import attach_station_id
+    from .solar import attach_station_id, norm_station_name
     from ._parquet import station_keys, concat_parquets, _arrow_kind
 except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-    from forecast_backbones.m5.solar import attach_station_id
+    from forecast_backbones.m5.solar import attach_station_id, norm_station_name
     from forecast_backbones.m5._parquet import station_keys, concat_parquets, _arrow_kind
 try:
     from ...pipelines.transformer_dataset import UnifiedDataset
@@ -57,6 +57,35 @@ def _dataset_with_station_id(paths, cfg: dict, station_meta, scratch_dir, reuse:
     return UnifiedDataset(paths if len(paths) > 1 else paths[0], timestamp_cols=[ds_cfg["ts_col"]], entity_cols=[],
                           label_cols=[ds_cfg["label_col"]], timestamp_output="epoch_s", epoch_unit="s",
                           for_hf_trainer=True)
+
+
+def unified_feature_cols(model, columns) -> list[str]:
+    """南网训练入口（train_shell/m5_train_cli.py）建 UnifiedDataset 用的 feature_cols：配置要的列（历史功率、past_future 对、
+    past_only、包络开时的 GHI 列对）按 model.resolve_col（精确 → col_aliases → 大小写不敏感）对到数据里的列名，数据里没有的跳过
+    （NWP 对缺列 = 不喂这一对）。历史功率列缺了直接报错。"""
+    columns = [str(c) for c in columns]
+    if model.resolve_col(columns, model.target_col) is None:
+        raise KeyError(f"数据里没有历史功率列 {model.target_col!r}（dataset.pv_col）；数据列 {sorted(columns)}")
+    fe = model.cfg["features"]
+    want = [model.target_col] + [c for pair in model.past_future_cols for c in pair] + list(model.past_only_cols)
+    if fe["derived"].get("history_envelope") or fe["derived"].get("envelope_nwp"):
+        want += list(fe["envelope"]["ghi"])
+    out: list[str] = []
+    for c in want:
+        k = model.resolve_col(columns, c)
+        if k is not None and k not in out:
+            out.append(k)
+    return out
+
+
+def station_ids_from_names(station_meta, names) -> list[int]:
+    """数据 station 列（站名）→ 训练集里出现过的整数站号（升序）；站表里找不到或有冲突直接报错（与 rowctx 同一映射）。"""
+    names = [n for n in dict.fromkeys(names) if norm_station_name(n) is not None]
+    mapping, unknown, conflicts = station_meta.resolve(names)
+    if unknown or conflicts:
+        raise ValueError(f"站名映射失败：station_meta 里找不到 {unknown[:10]} {'；'.join(conflicts)}"
+                         f"（station_meta 的 station 列要写数据里的站名，或换站表）")
+    return sorted({int(mapping[norm_station_name(n)]) for n in names})
 
 
 def _check_presplit_dir(splits_dir, need_cal: bool = False) -> Path:

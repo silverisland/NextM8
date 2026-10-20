@@ -1,7 +1,0 @@
-# 第 7 阶段·优化器分组：head 解冻但用小 lr 1e-5，LoRA 用 3e-4（原来 head 与 LoRA 共用一个 lr，head 容易先过拟合）；
-# 对照 s2_frozen_head（head 不动）与 l1（head 与 LoRA 同 lr 1e-4）
-finetune:
-  unfreeze_output_head: true
-train:
-  schedule: {lr: 3.0e-4, max_steps: 8000}
-  optim: {head_lr: 1.0e-5}

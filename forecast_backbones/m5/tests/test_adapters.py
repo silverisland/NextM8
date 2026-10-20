@@ -286,15 +286,13 @@ def test_train_run_with_adapters_lpft_groups_and_constant_lr(tmp_path, tiny_ckpt
     assert len(log["history"]) >= 2
 
 
-@pytest.mark.parametrize("name", ["s5_rank16", "s7_fh_lr3e4", "s7_fh_const", "s7_lora_plus", "s7_head_lr_split", "s7_ia3",
-                                  "s7_rb_adapter", "s8_prompt4", "s8_prompt4_station", "s8_prompt_only", "s8_static_embed",
-                                  "s9_gated_lora", "s9_hydra_k3", "s3_c1_envelope", "s3_c2_envelope_nwp",
-                                  "s3_c1_envelope_zs", "s3_c2_envelope_nwp_zs"])
+@pytest.mark.parametrize("name", ["f1_final", "f4_drop01", "s3_c1_envelope", "s3_c1_envelope_zs"])
 def test_new_variant_yamls_build_forward_and_backward(tmp_path, tiny_ckpt_dir, batch, name):
-    """新变体 yaml 叠在最小配置上：能构造、前向有限；可训的变体反向有梯度（s7_lpft 依赖 head_only 产物，另测 warm_start）。"""
+    """变体 yaml 叠在最小配置上：能构造、前向有限；可训的变体反向有梯度。"""
     from pathlib import Path
     from forecast_backbones.m5.config import raw_override, deep_merge
-    over = raw_override(str(Path(__file__).resolve().parents[1] / "config" / "variants" / f"{name}.yaml"))
+    over = raw_override(str(Path(__file__).resolve().parents[1] / "config" / f"{name}.yaml"))
+    over = {k: v for k, v in over.items() if k not in ("run", "dataset", "timesfm3")}   # 站表 / 底座用测试的小模型与两站表
     m = TransformersAdaptedM5Model(deep_merge(full_cfg(tmp_path, tiny_ckpt_dir), over))
     m.set_known_stations([1001])
     one, lab = _single_station(batch)

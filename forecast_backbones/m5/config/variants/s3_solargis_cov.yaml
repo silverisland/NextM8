@@ -1,8 +1,0 @@
-# 第 3 阶段·输入：协变量从 2 路扩到 4 路，加 Solargis 的 GHI / 温度（与 M8 j1 同四路）；LoRA 同 l1
-# ⚠️ 测试集 / 线上 parquet 也必须有这两对列：缺列时该对被跳过（只提示一次），模型会在少两路输入下推理
-features:
-  past_future:
-    - [general_ghi, general_ghi_predict]
-    - [general_temp, general_temp_predict]
-    - [GHI_solargis, ghi_solargis_predict]
-    - [temp_solargis, temp_solargis_predict]

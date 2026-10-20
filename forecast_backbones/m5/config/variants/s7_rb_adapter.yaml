@@ -1,5 +1,0 @@
-# 第 7 阶段·输入侧适配器：LoRA 同 l1 + 残差块输出上的非线性适配器（rank 32，零初始化），冻结 head；
-# s2 里 probe_resblock / lora_resblock 与 frozen_head 打平，这条看"非线性"改输入 token 是否比线性 LoRA 多拿
-finetune:
-  unfreeze_output_head: false
-  resblock_adapter: {rank: 32}

@@ -1,5 +1,0 @@
-# 第 8 阶段·逐站 soft prompt：全局 4 个虚拟变量 + 逐站增量（零初始化；训练集外的站、station_dropout 0.25 命中的行只用全局）。
-# 判定：已见站涨而未见站（summary 的 nanwang_unseen）不跌才算数；只有已见站涨 = 记住了站
-finetune:
-  unfreeze_output_head: false
-  prompt: {n_tokens: 4, per_station: true, station_dropout: 0.25}

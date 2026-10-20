@@ -1,4 +1,0 @@
-# 第 2 阶段·协议（W1）：lr 1e-4（= l1）+ EMA 0.998 + smooth_k 3；与 l1 只差 EMA / 选点平滑
-train:
-  ema_decay: 0.998
-  early_stop: {smooth_k: 3}

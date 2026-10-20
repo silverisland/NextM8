@@ -1,3 +1,0 @@
-# 晴空上限（不进本轮基线）：决策层截到 min(1.05·p_clear, cap)，与 M8 同口径；只动决策层，可 --decision-yaml 覆盖已训好的 run
-decision:
-  physics: {clear_sky_cap_ratio: 1.05}

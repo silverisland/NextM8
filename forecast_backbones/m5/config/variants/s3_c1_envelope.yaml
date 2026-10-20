@@ -1,6 +1,0 @@
-# 第 3 阶段·输入侧 C1：协变量追加一条"功率历史日形包络"（上下文 7 天同一时刻槽的 0.9 分位，按时刻槽铺到未来），冻结 head。
-# 不需要坐标：缺坐标 / 坐标错 / 跟踪支架站的日形直接来自数据（M8 h4 在无坐标站有效）
-features:
-  derived: {history_envelope: true}
-finetune:
-  unfreeze_output_head: false

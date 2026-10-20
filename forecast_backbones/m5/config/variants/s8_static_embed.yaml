@@ -1,5 +1,0 @@
-# 第 8 阶段·静态站点信息：LoRA 同 l1 + 零初始化加性嵌入（经纬度 / 海拔 / log 容量 / has_coords → 目标变量 token），冻结 head。
-# 静态量直接当协变量会被 RevIN 归零，只能在 RevIN 之后的隐空间加；元数据整行 dropout 0.25。判定同逐站 prompt：看未见站
-finetune:
-  unfreeze_output_head: false
-  static_embed: {enabled: true, dropout: 0.25}

@@ -1,3 +1,0 @@
-# 第 6 阶段·容量（W8）：LoRA 挂全部线性层 = 注意力四投影 + FFN（ff0 / ff1）+ 输入残差块
-finetune:
-  lora: {target_modules: [query_proj, key_proj, value_proj, out_proj, ff0, ff1, hidden_layer, output_layer, residual_layer]}
