@@ -3,6 +3,16 @@ run:
 model: {}
 dataset:
   pv_col: observe_power
+  # 站表：只在 decision.point 非 null 时读（容量 cap_mw / 站名映射）；与 eval_pretrain 计分容量同一张表
+  # 南网线上改成 forecast_backbones/m5/info.csv（表头自动识别）
+  station_meta: forecast_backbones/m6/station_meta.csv
+# 决策层（m7/decision.py）：null = 旧行为，logits 直接取模型 0.5 档；消融见 config/decision/*.yaml + eval_shell/eval_m7_decision.sh
+decision:
+  point: null        # null | median | mean | p_star | p_star_l1 | quantile:<τ>
+  levels: model      # model = 模型全部 21 档 | output = 下面 timestral.quantile_levels 的 9 档（M5 口径）
+  grid: 200          # 等概率网格点数（M5 p* 的 step 0.005 = 200）
+  tail: flat         # flat | linear
+  floor_ratio: 0.2
 timestral:
   # 服务器本地权重目录（离线）：huggingface-cli download mistralai/Timestral-209M --local-dir <下行路径>
   checkpoint: /data/tangqingang/Timestral-209M

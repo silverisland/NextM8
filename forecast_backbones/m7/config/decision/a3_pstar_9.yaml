@@ -1,0 +1,7 @@
+# p*，只用 9 档 0.1~0.9（与 M5 的 d2_pstar_point 同口径：9 档 → 200 点网格，档外平延）
+decision:
+  point: p_star
+  levels: output
+  grid: 200
+  tail: flat
+  floor_ratio: 0.2

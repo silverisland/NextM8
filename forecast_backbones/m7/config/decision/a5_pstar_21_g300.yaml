@@ -1,0 +1,7 @@
+# p*，21 档 → 300 点网格（与 a4 只差网格密度）
+decision:
+  point: p_star
+  levels: model
+  grid: 300
+  tail: flat
+  floor_ratio: 0.2

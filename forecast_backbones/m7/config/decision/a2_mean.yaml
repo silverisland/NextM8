@@ -1,0 +1,5 @@
+# 分布均值（网格 200 点）
+decision:
+  point: mean
+  levels: model
+  grid: 200

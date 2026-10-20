@@ -1,0 +1,7 @@
+# p*，模型全部 21 档 0.01~0.99 → 200 点网格
+decision:
+  point: p_star
+  levels: model
+  grid: 200
+  tail: flat
+  floor_ratio: 0.2

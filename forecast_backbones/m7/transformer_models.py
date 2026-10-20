@@ -39,6 +39,20 @@
     timestral.symmetric_averaging   -> ±context 对称平均（timestral 默认开，同 M5 的 use_symmetric_averaging）
     timestral.eager_init            -> 构造时即加载权重（默认 true；测试里设 false 换替身）
 
+决策层（2026-10-20，m7/decision.py，M7 自带不引用 M5；默认关 = 上面的旧行为逐位不变）：
+    decision.point                  -> null（默认：logits = 模型 0.5 档 / predict_quantile 档，不钳 cap）
+                                       | median | mean | p_star | p_star_l1 | quantile:<τ>
+                                       非 null 时：分位排序 → 钳到 [0, 站表 cap] → 按规则取上报点写进 logits
+    decision.levels                 -> model（模型全部 21 档，默认）| output（只用 timestral.quantile_levels 那几档，=M5 的 9 档口径）
+    decision.grid                   -> 等概率网格点数（默认 200 = M5 p* 的 step 0.005）
+    decision.tail                   -> flat（默认，档外平延）| linear（沿最外两档外推后钳回 [0, cap]）
+    decision.floor_ratio            -> p* 权重分母下限 floor·cap（默认 0.2，南网口径）
+    dataset.station_meta            -> 站表（容量 cap_mw / 站名映射；默认 forecast_backbones/m6/station_meta.csv，
+                                       与 eval_pretrain 的计分容量同一张表；南网用 forecast_backbones/m5/info.csv）
+    dataset.station_meta_cols       -> 站表列名映射（info.csv 表头自动识别，一般不用写）
+    只在 decision.point 非 null 时读站表；batch 里有数值 station_id 列就按它查，否则按 station 站名查，查不到直接报错。
+    aux["quantiles"] 始终是未钳位的原始分位（timestral.quantile_levels 档）。
+
 安装（目标机）：
   pip install timestral                     # 或 pip install git+https://github.com/mistralai/timestral
   （timestral 声明 torch>=2.4、python>=3.10；环境 torch 较老时用 --no-deps 装，避免 pip 升级 torch）
@@ -70,9 +84,22 @@ except ImportError:  # 独立运行 __main__ / 顶层 sys.path 方式
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from interfaces.modeloutput import TransformersAdaptedModelOutput
 
+try:
+    from . import decision
+except ImportError:
+    from forecast_backbones.m7 import decision
+
 
 DEFAULT_CFG = {
-    "dataset": {"pv_col": "observe_power"},
+    "dataset": {"pv_col": "observe_power", "station_meta": "forecast_backbones/m6/station_meta.csv",
+                "station_meta_cols": None},
+    "decision": {
+        "point": None,              # None=旧行为（模型 0.5 档直出）；median | mean | p_star | p_star_l1 | quantile:<τ>
+        "levels": "model",          # model=模型 21 档 | output=timestral.quantile_levels
+        "grid": 200,
+        "tail": "flat",
+        "floor_ratio": 0.2,
+    },
     "timestral": {
         "checkpoint": "mistralai/Timestral-209M",
         "context_len": 672,
@@ -112,7 +139,7 @@ class TransformersAdaptedM7Model(nn.Module):
         super().__init__()
 
         mc = model_config or {}
-        override = {k: mc[k] for k in ("dataset", "timestral") if isinstance(mc.get(k), dict)}
+        override = {k: mc[k] for k in ("dataset", "decision", "timestral") if isinstance(mc.get(k), dict)}
         cfg = _merge(DEFAULT_CFG, override)
         self.target_col = cfg["dataset"].get("pv_col", DEFAULT_CFG["dataset"]["pv_col"])
         t = cfg["timestral"]
@@ -133,6 +160,19 @@ class TransformersAdaptedM7Model(nn.Module):
         self.symmetric_averaging = bool(t["symmetric_averaging"])
         # 构造期就校验 predict_quantile，配置写错尽早报错。
         self._child_idx = self._quantile_index(self.predict_quantile, self.quantile_levels)
+        d = cfg["decision"]
+        self.decision_point = d.get("point")
+        self.decision_levels = d.get("levels", "model")
+        self.decision_grid = int(d.get("grid", 200))
+        self.decision_tail = d.get("tail", "flat")
+        self.decision_floor = float(d.get("floor_ratio", 0.2))
+        self.station_meta_path = cfg["dataset"].get("station_meta")
+        self.station_meta_cols = cfg["dataset"].get("station_meta_cols")
+        self._station_meta = None
+        self._cap_cache = {}            # station_id -> cap_mw
+        self._sid_cache = {}            # 站名 -> station_id
+        if self.decision_point is not None:
+            self._check_decision()
         self._backbone = None
         self._backbone_device = None
         self._q_idx = None              # quantile_levels 在模型 21 档里的索引，加载 backbone 时解析
@@ -172,12 +212,87 @@ class TransformersAdaptedM7Model(nn.Module):
         设备只由 timestral.device 决定。
         """
         levels = list(backbone.quantile_levels)
+        self._model_levels = [float(x) for x in levels]
         self._q_idx = self._resolve_quantile_indices(self.quantile_levels, levels)
         self._median_idx = self._resolve_quantile_indices([0.5], levels)[0]
         if self.past_future_cols and not backbone.supports_known_covariates:
             raise ValueError("该 Timestral checkpoint 不支持未来已知协变量，请清空 timestral.past_future_cols")
         self.__dict__["_backbone"] = backbone
         self._backbone_device = device
+
+    # ------------------------------------------------------------------ 决策层
+    def _check_decision(self):
+        """构造期校验决策配置（写错尽早报错）并加载站表。"""
+        pt = self.decision_point
+        if not isinstance(pt, str) or not (pt in decision.POINTS or pt.startswith("quantile:")):
+            raise ValueError(f"decision.point 非法: {pt!r}（可选 null / {decision.POINTS} / quantile:<τ>）")
+        if pt.startswith("quantile:"):
+            float(pt.split(":", 1)[1])
+        if self.decision_levels not in ("model", "output"):
+            raise ValueError(f"decision.levels 只能是 model / output（得到 {self.decision_levels!r}）")
+        if self.decision_tail not in decision.TAILS:
+            raise ValueError(f"decision.tail 只能是 {decision.TAILS}（得到 {self.decision_tail!r}）")
+        decision.taus(self.decision_grid)
+        if self._child_idx is not None:
+            raise ValueError("decision.point 与 timestral.predict_quantile 不能同时设：上报点只由决策层决定")
+        self._station_meta = self._load_station_meta(self.station_meta_path, self.station_meta_cols)
+
+    @staticmethod
+    def _load_station_meta(path, cols=None):
+        """相对路径先按当前工作目录、再按仓库根目录解析（同 M5）；都不存在直接报错。"""
+        from forecast_backbones.m5.solar import StationMeta
+        if not path:
+            raise ValueError("decision.point 非 null 需要 dataset.station_meta（站表，取 cap_mw）")
+        p = Path(path)
+        if not p.exists():
+            repo = Path(__file__).resolve().parents[2] / p
+            if p.is_absolute() or not repo.exists():
+                raise FileNotFoundError(f"station_meta {p} 不存在（dataset.station_meta；相对路径按当前工作目录、再按仓库根目录解析）")
+            p = repo
+        return StationMeta.from_csv(p, cols)
+
+    def _station_caps(self, batch_dict: dict) -> np.ndarray:
+        """[B] 每行该站固定容量（站表 cap_mw）：有数值 station_id 列直接用，否则按 station 站名映射。"""
+        from forecast_backbones.m5.solar import norm_station_name, station_cap_mw
+        meta = self._station_meta
+        sids = None
+        v = batch_dict.get("station_id")
+        if v is not None:
+            arr = v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else np.asarray(v)
+            try:
+                sids = arr.astype(np.float64).astype(np.int64).reshape(-1)
+            except (TypeError, ValueError):
+                sids = None
+        if sids is None:
+            if "station" not in batch_dict:
+                raise ValueError("batch_dict 既没有数值 station_id 列也没有 station 站名列：决策层拿不到容量")
+            s = batch_dict["station"]
+            names = list(np.asarray(s.detach().cpu().numpy() if isinstance(s, torch.Tensor) else s, dtype=object).reshape(-1))
+            out = []
+            for n in names:
+                key = norm_station_name(n)
+                if key not in self._sid_cache:
+                    sid = meta.id_of(key)
+                    if sid is None:
+                        raise ValueError(f"站 {n!r} 不在 station_meta（{self.station_meta_path}）里，拿不到容量")
+                    self._sid_cache[key] = int(sid)
+                out.append(self._sid_cache[key])
+            sids = np.asarray(out, np.int64)
+        for sid in np.unique(sids):
+            if int(sid) not in self._cap_cache:
+                self._cap_cache[int(sid)] = station_cap_mw(meta, int(sid))
+        return np.array([self._cap_cache[int(x)] for x in sids], np.float64)
+
+    def _decide(self, batch_dict: dict, full: torch.Tensor) -> torch.Tensor:
+        """full [B,H,21]（模型全部档位）→ logits [B,H]。"""
+        cap = self._station_caps(batch_dict)[:, None]                               # [B,1] → 广播到 [B,H]
+        if self.decision_levels == "model":
+            q, levels = full, self._model_levels
+        else:
+            q, levels = full[:, :, self._q_idx], self.quantile_levels
+        pt = decision.point(q.detach().cpu().double().numpy(), levels, cap, self.decision_point,
+                            self.decision_grid, self.decision_tail, self.decision_floor)
+        return torch.as_tensor(pt, dtype=full.dtype, device=full.device)
 
     @staticmethod
     def _resolve_quantile_indices(wanted: List[float], available: List[float]) -> List[int]:
@@ -319,7 +434,9 @@ class TransformersAdaptedM7Model(nn.Module):
             full = full.clamp_min(0.0)
         quantiles = full[:, :, self._q_idx].contiguous()                          # [B, H, Q]
 
-        if self._child_idx is not None:
+        if self.decision_point is not None:
+            logits = self._decide(batch_dict, full)
+        elif self._child_idx is not None:
             logits = quantiles[:, :, self._child_idx]
         else:
             logits = full[:, :, self._median_idx]

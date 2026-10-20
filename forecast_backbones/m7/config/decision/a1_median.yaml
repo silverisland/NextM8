@@ -1,0 +1,4 @@
+# 消融基线：中位数，同样先排序 + 钳到 [0, cap]（与旧行为只差 cap 钳位）
+decision:
+  point: median
+  levels: model
