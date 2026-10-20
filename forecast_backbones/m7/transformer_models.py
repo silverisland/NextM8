@@ -47,8 +47,8 @@
     decision.grid                   -> 等概率网格点数（默认 200 = M5 p* 的 step 0.005）
     decision.tail                   -> flat（默认，档外平延）| linear（沿最外两档外推后钳回 [0, cap]）
     decision.floor_ratio            -> p* 权重分母下限 floor·cap（默认 0.2，南网口径）
-    dataset.station_meta            -> 站表（容量 cap_mw / 站名映射；默认 forecast_backbones/m6/station_meta.csv，
-                                       与 eval_pretrain 的计分容量同一张表；南网用 forecast_backbones/m5/info.csv）
+    dataset.station_meta            -> 站表（容量 cap_mw / 站名映射；默认 forecast_backbones/m7/station_meta.csv，
+                                       与 eval_pretrain 计分用的 m6/station_meta.csv 内容相同；南网用 forecast_backbones/m7/info.csv）
     dataset.station_meta_cols       -> 站表列名映射（info.csv 表头自动识别，一般不用写）
     只在 decision.point 非 null 时读站表；batch 里有数值 station_id 列就按它查，否则按 station 站名查，查不到直接报错。
     aux["quantiles"] 始终是未钳位的原始分位（timestral.quantile_levels 档）。
@@ -86,12 +86,14 @@ except ImportError:  # 独立运行 __main__ / 顶层 sys.path 方式
 
 try:
     from . import decision
+    from .stations import StationMeta, norm_station_name, station_cap_mw
 except ImportError:
     from forecast_backbones.m7 import decision
+    from forecast_backbones.m7.stations import StationMeta, norm_station_name, station_cap_mw
 
 
 DEFAULT_CFG = {
-    "dataset": {"pv_col": "observe_power", "station_meta": "forecast_backbones/m6/station_meta.csv",
+    "dataset": {"pv_col": "observe_power", "station_meta": "forecast_backbones/m7/station_meta.csv",
                 "station_meta_cols": None},
     "decision": {
         "point": None,              # None=旧行为（模型 0.5 档直出）；median | mean | p_star | p_star_l1 | quantile:<τ>
@@ -240,7 +242,6 @@ class TransformersAdaptedM7Model(nn.Module):
     @staticmethod
     def _load_station_meta(path, cols=None):
         """相对路径先按当前工作目录、再按仓库根目录解析（同 M5）；都不存在直接报错。"""
-        from forecast_backbones.m5.solar import StationMeta
         if not path:
             raise ValueError("decision.point 非 null 需要 dataset.station_meta（站表，取 cap_mw）")
         p = Path(path)
@@ -251,9 +252,18 @@ class TransformersAdaptedM7Model(nn.Module):
             p = repo
         return StationMeta.from_csv(p, cols)
 
+    def station_cap(self, station) -> float:
+        """站名或数值站号 → 该站固定容量（站表 cap_mw）。eval_pretrain 计分用它（有此方法就不再读 m6 站表）。
+        decision.point 为 null 时站表没在构造期加载，这里按 dataset.station_meta 懒加载。"""
+        if self._station_meta is None:
+            self._station_meta = self._load_station_meta(self.station_meta_path, self.station_meta_cols)
+        sid = self._station_meta.id_of(norm_station_name(station))
+        if sid is None:
+            raise ValueError(f"站 {station!r} 不在 station_meta（{self.station_meta_path}）里，拿不到容量：容量只来自站表")
+        return station_cap_mw(self._station_meta, sid)
+
     def _station_caps(self, batch_dict: dict) -> np.ndarray:
         """[B] 每行该站固定容量（站表 cap_mw）：有数值 station_id 列直接用，否则按 station 站名映射。"""
-        from forecast_backbones.m5.solar import norm_station_name, station_cap_mw
         meta = self._station_meta
         sids = None
         v = batch_dict.get("station_id")

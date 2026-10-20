@@ -17,17 +17,49 @@ def _rand_q(levels, B=7, T=5, cap=100.0, seed=0):
     return q
 
 
-@pytest.mark.parametrize("tail", decision.TAILS)
-@pytest.mark.parametrize("method", ["median", "p_star", "p_star_l1"])
-def test_matches_m5_on_9_levels(method, tail):
-    """9 档 / 200 点 / 同 tail 下与 M5 决策层（sort → clip [0,cap] → 点）数值一致：M7 是重写，不是引用。"""
-    from forecast_backbones.m5 import decision as m5d
-    q, cap = _rand_q(LEVELS9), 100.0
-    q5 = m5d.physics_clip(m5d.enforce_monotone(q), np.zeros(q.shape[:2], bool), np.full(q.shape[:2], np.nan), cap,
-                          clear_sky_cap_ratio=None)
-    ref = m5d.select_point(q5, LEVELS9, np.full(q.shape[0], cap), method, tail=tail)
-    got = decision.point(q, LEVELS9, cap, method, n_grid=200, tail=tail)
-    np.testing.assert_allclose(got, ref, rtol=1e-10, atol=1e-10)
+def _ref_point(q, levels, cap, method, n_grid=200):
+    """逐行独立参照实现（np.interp 档外自然平延）：排序 → 钳 [0, cap] → 网格 → 点。"""
+    tau = (np.arange(n_grid) + 0.5) / n_grid
+    out = np.empty(q.shape[:-1])
+    for idx in np.ndindex(*q.shape[:-1]):
+        row = np.clip(np.sort(q[idx]), 0.0, cap)
+        if method == "median":
+            out[idx] = np.interp(0.5, levels, row); continue
+        y = np.interp(tau, levels, row)
+        d = np.maximum(y, 0.2 * cap)
+        if method == "p_star":
+            out[idx] = np.sum(y / d ** 2) / np.sum(1.0 / d ** 2)
+        elif method == "p_star_l1":
+            cw = np.cumsum(1.0 / d)
+            out[idx] = y[np.argmax(cw >= 0.5 * cw[-1])]
+        else:
+            out[idx] = y.mean()
+    return out
+
+
+@pytest.mark.parametrize("levels", [LEVELS9, LEVELS21])
+@pytest.mark.parametrize("method", ["median", "mean", "p_star", "p_star_l1"])
+def test_matches_reference(method, levels):
+    q, cap = _rand_q(levels), 100.0
+    np.testing.assert_allclose(decision.point(q, levels, cap, method, n_grid=200), _ref_point(q, levels, cap, method),
+                               rtol=1e-10, atol=1e-10)
+
+
+def test_tail_flat_vs_linear_analytic():
+    """档位 (0.1, 0.5) 上 q = (10, 50)：linear 外推 Q(τ)=100τ → 均值 50；flat → 0.1·10 + ∫_{0.1}^{0.5}100τ + 0.5·50 = 38。"""
+    q = np.array([[[10.0, 50.0]]])
+    assert decision.point(q, (0.1, 0.5), 100.0, "mean", n_grid=2000, tail="linear")[0, 0] == pytest.approx(50.0, abs=1e-6)
+    assert decision.point(q, (0.1, 0.5), 100.0, "mean", n_grid=2000, tail="flat")[0, 0] == pytest.approx(38.0, abs=1e-3)
+
+
+def test_no_cross_model_imports():
+    """M7 不依赖其它模型包（m5 / m6 / m8 …）：包内源码（含测试）不 import 它们。"""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    pat = re.compile(r"^\s*(from|import)\s+(forecast_backbones\.m(?!7\b)\w+|\.\.m\w+)", re.M)
+    hits = [f"{f.relative_to(root)}: {m.group(0).strip()}" for f in root.rglob("*.py") for m in pat.finditer(f.read_text())]
+    assert not hits, hits
 
 
 def test_grid_density_barely_matters():
@@ -87,8 +119,8 @@ def _batch(stations=(1001, 1002), names=False):
     bd = {c: torch.as_tensor(np.stack(df[c].to_numpy())) for c in
           ("observe_power", "general_ghi", "general_ghi_predict", "general_temp", "general_temp_predict")}
     if names:
-        from forecast_backbones.m5.solar import StationMeta
-        meta = StationMeta.from_csv("forecast_backbones/m6/station_meta.csv")
+        from forecast_backbones.m7.stations import StationMeta
+        meta = StationMeta.from_csv("forecast_backbones/m7/station_meta.csv")
         bd["station"] = [meta.get(int(s))["station"] for s in df["station_id"]]
     else:
         bd["station_id"] = torch.as_tensor(df["station_id"].to_numpy())
@@ -169,3 +201,14 @@ def test_shipped_decision_yamls_build():
         m = TransformersAdaptedM7Model({"timestral": {**base["timestral"], "eager_init": False},
                                         "dataset": base["dataset"], "decision": {**base["decision"], **dec}})
         assert m.decision_point == dec["point"]
+
+
+def test_station_cap_lazy_and_by_name_or_id():
+    """eval_pretrain 计分用 model.station_cap：decision 关时也能用（懒加载 M7 自带站表），站名 / 站号同一个容量。"""
+    from forecast_backbones.m7.stations import StationMeta
+    m = _model()
+    assert m._station_meta is None
+    name = StationMeta.from_csv("forecast_backbones/m7/station_meta.csv").get(1002)["station"]
+    assert m.station_cap(1002) == m.station_cap(name) == m.station_cap("1002.0") == 500.0
+    with pytest.raises(ValueError):
+        m.station_cap("不存在的站")

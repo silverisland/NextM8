@@ -3,9 +3,9 @@ run:
 model: {}
 dataset:
   pv_col: observe_power
-  # 站表：只在 decision.point 非 null 时读（容量 cap_mw / 站名映射）；与 eval_pretrain 计分容量同一张表
-  # 南网线上改成 forecast_backbones/m5/info.csv（表头自动识别）
-  station_meta: forecast_backbones/m6/station_meta.csv
+  # 站表：只在 decision.point 非 null 时读（容量 cap_mw / 站名映射）；M7 自带一份，内容与 eval_pretrain 计分用的 m6/station_meta.csv 相同
+  # 南网线上改成 forecast_backbones/m7/info.csv（表头自动识别）
+  station_meta: forecast_backbones/m7/station_meta.csv
 # 决策层（m7/decision.py）：null = 旧行为，logits 直接取模型 0.5 档；消融见 config/decision/*.yaml + eval_shell/eval_m7_decision.sh
 decision:
   point: null        # null | median | mean | p_star | p_star_l1 | quantile:<τ>

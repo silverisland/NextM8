@@ -132,9 +132,17 @@ def scale_observe_power_tail(station_df, tail_len=4, factor=None):
 STATION_META_DEFAULT = REPO_ROOT / "forecast_backbones" / "m6" / "station_meta.csv"
 
 
-def station_table_cap(station_df, st, station_meta=None) -> float:
-    """该站的固定容量：只取站表 cap_mw。数据有数值 station_id 列就按它查，否则按站名查；查不到直接报错。"""
+def station_table_cap(station_df, st, station_meta=None, model=None) -> float:
+    """该站的固定容量：只取站表 cap_mw。数据有数值 station_id 列就按它查，否则按站名查；查不到直接报错。
+    model 自带 station_cap(站名或站号)（M7，2026-10-20）时用模型自己的站表，不读 m6，决策层与计分用同一个容量。"""
     import pandas as pd
+    if model is not None and callable(getattr(model, "station_cap", None)):
+        key = st
+        if "station_id" in station_df.columns:
+            v = pd.to_numeric(station_df["station_id"], errors="coerce")
+            if v.notna().all() and v.nunique() == 1:
+                key = int(v.iloc[0])
+        return float(model.station_cap(key))
     from forecast_backbones.m6.features import StationMeta, norm_station_name, station_cap_mw
     meta = station_meta if station_meta is not None else StationMeta.from_csv(STATION_META_DEFAULT)
     sid = None
@@ -220,7 +228,7 @@ def infer_station_pretrain(model_name, checkpoint_dir, station_path, cap_power,
 
     # 站名 + 该站固定容量（站表 cap_mw；cap_power 参数不再使用）
     st = str(result_df["station"].iloc[0])
-    cap = station_table_cap(station_df, st)
+    cap = station_table_cap(station_df, st, model=model)
     print(f"[station] {st}  cap_power={cap}（站表 cap_mw）  行数={len(result_df)}")
     return st, cap, result_df
 
