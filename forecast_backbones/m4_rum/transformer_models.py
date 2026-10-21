@@ -13,6 +13,7 @@ from pipelines.forecasting.stations import load_station_meta
 
 from . import model as architecture
 from .config import load_config
+from .decision import decide
 from .features import FeatureBuilder
 
 
@@ -27,6 +28,7 @@ class TransformersAdaptedM4RumModel(nn.Module):
         )
         self.fe = FeatureBuilder(self.cfg, self.station_meta)
         self.core = architecture.Rum(self.cfg)
+        self.levels = tuple(self.cfg["model"]["quantiles"])
         self.weights_loaded = False
         weights = self.cfg["train"]["weights_path"]
         if weights and Path(weights).is_file():
@@ -76,19 +78,42 @@ class TransformersAdaptedM4RumModel(nn.Module):
             rows = valid.any(dim=1)
             if not rows.any():
                 raise ValueError("Batch contains no finite future labels")
-            error = prediction - torch.where(valid, target, 0)
-            error = (
-                error.square() if self.cfg["train"]["loss"] == "mse" else error.abs()
-            )
+            target = torch.where(valid, target, 0)
+            if self.core.is_quantile:
+                # Train raw quantiles; sorting and p_star belong only to reporting.
+                error = target.unsqueeze(-1) - prediction
+                levels = prediction.new_tensor(self.levels)
+                error = torch.maximum(levels * error, (levels - 1) * error).mean(-1)
+            else:
+                error = prediction - target
+                error = (
+                    error.square()
+                    if self.cfg["train"]["loss"] == "mse"
+                    else error.abs()
+                )
             loss = ((error * valid).sum(1) / valid.sum(1).clamp_min(1))[rows].mean()
+        aux = {
+            "cap": features.capacity[:, 0],
+            "station_id": features.station_id,
+            "history_unavailable": ~features.history_mask[:, :, 0].any(1),
+            "hint_unavailable": ~features.hint_mask.any(1),
+            "future_weather_unavailable": ~features.future_mask.flatten(1).any(1),
+        }
+        if self.core.is_quantile:
+            quantiles = prediction * features.capacity.unsqueeze(-1)
+            with torch.no_grad():
+                selected = decide(
+                    quantiles,
+                    self.levels,
+                    features.capacity,
+                    self.cfg["decision"]["point"],
+                )
+            logits = selected.pop("point")
+            aux.update(selected, quantiles=quantiles, levels_cal=list(self.levels))
+        else:
+            logits = prediction * features.capacity
         return TransformersAdaptedModelOutput(
             loss=loss,
-            logits=prediction * features.capacity,
-            aux={
-                "cap": features.capacity[:, 0],
-                "station_id": features.station_id,
-                "history_unavailable": ~features.history_mask[:, :, 0].any(1),
-                "hint_unavailable": ~features.hint_mask.any(1),
-                "future_weather_unavailable": ~features.future_mask.flatten(1).any(1),
-            },
+            logits=logits,
+            aux=aux,
         )

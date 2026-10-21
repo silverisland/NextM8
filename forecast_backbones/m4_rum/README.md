@@ -1,7 +1,8 @@
 # M4-Rum
 
 面向短期光伏功率预测的 M4 变体。历史上下文、未来气象与基模预测按时刻拼接，
-共享 MLP 直接输出 192 点功率。**没有基模残差相加、门控混合、站点 embedding 或分位决策层。**
+共享 MLP 输出 192 点功率，或输出逐时刻分位并通过独立选点层得到功率。
+**没有基模残差相加、门控混合或站点 embedding。**
 
 ## 时间与评估口径
 
@@ -16,8 +17,8 @@ NWP、基模预测和标签必须使用相同起点；不能传入从次日零�
 - NRMSE：默认整点起报，全部 192 点、含夜间，使用固定容量归一。
 - `--full`：全部起报行推理，使用公共层逐站工作簿生成函数，输出相同六张 sheet。
   完整超短期指标仍需要每十五分钟起报的数据，ODS 短期需要相应 09:00 起报行。
-- 模型输出为原始点预测，不截负值、不做容量/晴空钳位、不夜间归零。
-  因此数据/指标口径与 M8 相同，但不复制 M8 的分位选点和后处理。
+- 模型不截负值、不做容量/晴空钳位、不夜间归零。Pinball 模式的分位插值和 `p_star`
+  数学口径与 M8 相同，使用 Rum 自己的实现，不带 M8 的太阳几何或物理后处理。
 
 ## 网络
 
@@ -32,12 +33,14 @@ NWP、基模预测和标签必须使用相同起点；不能传入从次日零�
 
 [气象表示, 原始气象/时间特征, 历史上下文, 历史覆盖率/可用标记,
  基模预测/固定容量, 基模有效值掩码]
-  → 共享 MLP(128 → 64 → 1) → 192点归一化功率 → 乘固定容量
+  → 共享 MLP(128 → 64 → 1或K) → 192点归一化功率/分位 → 乘固定容量
+  → Pinball模式：分位排序 → median或p_star选点
 ```
 
-默认两种气象变量时，历史含 126 个 Patch Token 和 1 个 CTX Token，模型 310,529 个参数。
+默认两种气象变量时，历史含 126 个 Patch Token 和 1 个 CTX Token，点预测模型 310,529 个参数。
 各时刻共享回归头，无未来自注意力、无自回归。损失为容量归一 MSE（可设 MAE），
 先对每行有限标签平均，再对有标签的行平均；全无标签批次明确报错。
+Pinball 模式只将末层从 1 维改为 K 个分位（默认 9 个），原历史编码器和气象融合方式保持不变。
 历史上下文整行 dropout 默认 0.2，基模整行 dropout 默认 0.3，仅在训练态启用。
 有限值掩码不代表观测可靠性，当前没有自动识别未标记填补值的能力，也未加入填补污染增强。
 
@@ -77,6 +80,15 @@ pandas / pyarrow / safetensors / PyYAML；完整报表使用 xlsxwriter。Rum �
 测试验证环境为 Python 3.12、torch 2.5.1、transformers 4.40.1、accelerate 0.30.1。
 
 ```bash
+# 独立训练集、验证集路径：无需 split_manifest.json，双卡训练并验证选优
+bash train_shell/train_m4_rum.sh \
+  --gpus 0,1 \
+  --config forecast_backbones/m4_rum/config/configs.yaml \
+  --train_parquet /path/to/train \
+  --valid_parquet /path/to/valid \
+  --out runs/m4_rum/rum_train_valid \
+  --max_steps 6000 --save_every 500
+
 # 与 M8 使用同一份 train.parquet、valid.parquet、split_manifest.json
 python -m forecast_backbones.m4_rum.train \
   --splits-dir data/splits/m8_v1 --out runs/m4_rum/rum_s0
@@ -128,8 +140,12 @@ GPU 选择由启动脚本控制，训练超参数仍由 YAML 的 `train.schedule
 如需保持单卡时的全局 batch，应相应减小此值。`precision` 可设 `fp32`、`fp16` 或 `bf16`，
 BF16 需要硬件支持。启动逻辑已通过模拟可见卡测试，尚未进行真实 GPU/DDP 实测。
 
-`--train-parquet` 支持递归目录、带引号的通配符、文件列表；不自动切分或丢弃行，
-不验证、不早停，必须给正的步数预算。`--splits-dir ... --refit` 合并 train 与 valid。
+`--train-parquet` 与 `--valid-parquet` 都支持递归目录、带引号的通配符和文件列表，
+不自动切分或丢弃行。同时提供两者时按验证集指标选优、早停，无需预先生成切分清单；
+会记录实际文件路径与行数，并拒绝训练/验证使用同一个文件。不同文件之间的样本重叠需上游保证。
+验证路径不能与 `--splits-dir` 或 `--refit` 混用。
+只给 `--train-parquet` 时仍为全量训练，不验证、不早停，必须给正的步数预算。
+`--splits-dir ... --refit` 合并 train 与 valid。
 切分和基模样本外预测由上游负责，Rum 不修复已有数据泄漏。
 
 产物与 M8 布局一致：`model.safetensors`、`model_config.yaml`、`train_log.json`、
@@ -140,6 +156,54 @@ BF16 需要硬件支持。启动逻辑已通过模拟可见卡测试，尚未进
 
 训练入口始终从随机初始化开始；不要用相同输出目录混合不同实验。
 权重、训练实际使用的天气对、已见站名单及配置覆盖都会保存。
+
+## Pinball loss 与 p_star
+
+旧配置仍默认 `train.loss: mse`，也支持 `mae`。使用下面的独立配方启用分位训练：
+
+```bash
+bash train_shell/train_m4_rum.sh \
+  --gpus 0,1 \
+  --config forecast_backbones/m4_rum/config/pinball.yaml \
+  --train_parquet /path/to/train --valid_parquet /path/to/valid \
+  --out runs/m4_rum/rum_pinball --max_steps 6000 --save_every 500
+```
+
+关键配置：
+
+```yaml
+model:
+  quantiles: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+train:
+  loss: pinball
+decision:
+  point: {default: p_star, floor_ratio: 0.2, tau_grid_step: 0.005, tail: flat}
+```
+
+训练在容量归一尺度上计算 `max(τ·(y−q), (τ−1)·(y−q))`，先对分位平均，
+再对每行的有效标签时间步平均，最后对有标签的行平均，保持 Rum 的逐样本等权口径。
+损失使用原始分位；排序和选点不参与训练损失。旧 MSE/MAE 权重继续可用，
+但不能直接变成分位模型，切换到 Pinball 需要重新训练新的 K 维输出头。
+
+推理先将分位排序，按等概率中点网格线性插值、两端平延；默认步长 0.005，共 200 点。
+随后计算 `p_star = Σ(y·w) / Σw`，其中 `w = 1 / max(y, 0.2·容量)²`，
+与 M8 短期 `p_star` 公式一致。这里只对齐选点公式，完整输出仍受两模型的分位预测和物理后处理差异影响。
+`floor_ratio` 可配置正有限值，网格步长支持 `[0.0001, 1]`，只支持平延尾部。
+该模式的验证和早停使用所配置的选点结果，默认配方为 `p_star`。
+
+同一个 Pinball checkpoint 可在推理时切换选点，无需重训：
+
+```bash
+python -m forecast_backbones.m4_rum.evaluate \
+  --runs runs/m4_rum/rum_pinball --test /path/to/test \
+  --point p_star --out runs/m4_rum/eval_pstar
+# 改为 --point median 可对比中位数；省略 --point 使用 checkpoint 保存的规则。
+```
+
+`load_member(run, point="p_star")` 也支持覆盖，普通 forward/统一推理按 `model_config.yaml` 中的规则选点。
+点预测 checkpoint 不支持 `--point`。`.logits` 始终为 `[B,192]` 原功率单位；
+Pinball 的 `.aux` 另含 `quantiles`（原始）、`quantiles_cal`（仅排序）、`levels_cal`、`median`、`p_star`。
+结果 Parquet 保存 `q_0.1` 等原始分位列、`median`、`p_star`；评估目录额外记录 `reports/decision.json`。
 
 ## 推理与评估
 
@@ -152,7 +216,9 @@ bash eval_shell/eval_m4_rum.sh \
   --test '/path/to/test/*.parquet' --out runs/m4_rum/full_eval --full
 ```
 
-多成员直接平均点预测，核对行序、站点容量、标签一致后才集成。
+点预测多成员直接平均点预测；Pinball 多成员先平均原始分位，再统一排序和选点。
+集成核对行序、站点容量、标签一致；Pinball 成员还必须有相同分位水平和决策配置。
+不混合点预测与 Pinball checkpoint。
 产出 `result_test.parquet`、`reports/summary.csv`、`reports/station_table.csv`、
 `reports/members.csv`。`--full` 额外产出 `metrics_ens/{站}-metrics.xlsx`、
 `{站}-summary.json`、`reports/station_metrics.csv`。

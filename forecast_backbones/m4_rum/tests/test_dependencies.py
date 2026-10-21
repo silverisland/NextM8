@@ -16,8 +16,7 @@ PUBLIC = ROOT / "pipelines" / "forecasting"
 def test_no_private_model_dependencies():
     for directory in (RUM, PUBLIC):
         for path in directory.rglob("*.py"):
-            if "tests" in path.relative_to(directory).parts:
-                continue
+            is_test = "tests" in path.relative_to(directory).parts
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
@@ -27,7 +26,13 @@ def test_no_private_model_dependencies():
                     assert node.level <= 1, f"{path}:{node.lineno}"
                 else:
                     continue
-                assert not any(n.startswith("forecast_backbones") for n in names), (
+                forbidden = [
+                    name
+                    for name in names
+                    if name.startswith("forecast_backbones")
+                    and not (is_test and name.startswith("forecast_backbones.m4_rum"))
+                ]
+                assert not forbidden, (
                     f"{path}:{node.lineno} imports a model implementation: {names}"
                 )
 
@@ -65,7 +70,8 @@ model = TransformersAdaptedM4RumModel()
 assert model.n_params() == 310529
 import pytest
 result = pytest.main([
-    "forecast_backbones/m4_rum/tests/test_workflow.py", "-q", "--disable-warnings",
+    "forecast_backbones/m4_rum/tests/test_workflow.py",
+    "forecast_backbones/m4_rum/tests/test_pinball.py", "-q", "--disable-warnings",
 ])
 assert not any(n.startswith("forecast_backbones.m8") for n in sys.modules)
 raise SystemExit(result)

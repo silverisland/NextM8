@@ -15,6 +15,7 @@ class Rum(nn.Module):
         self.patch = m["patch_len"]
         self.history_dropout = cfg["train"]["history_dropout"]
         self.hint_dropout = cfg["train"]["hint_dropout"]
+        self.is_quantile = cfg["train"]["loss"] == "pinball"
         weather = len(cfg["features"]["past_future"])
         channels, width = weather + 1, m["d_model"]
         self.patch_projection = nn.Linear(2 * self.patch, width)
@@ -53,7 +54,7 @@ class Rum(nn.Module):
             nn.Dropout(m["dropout"]),
             nn.Linear(m["head_hidden"], m["head_dim"]),
             nn.GELU(),
-            nn.Linear(m["head_dim"], 1),
+            nn.Linear(m["head_dim"], len(m["quantiles"]) if self.is_quantile else 1),
         )
 
     def forward(self, f):
@@ -123,4 +124,5 @@ class Rum(nn.Module):
             ],
             -1,
         )
-        return self.head(inputs).squeeze(-1)
+        output = self.head(inputs)
+        return output if self.is_quantile else output.squeeze(-1)

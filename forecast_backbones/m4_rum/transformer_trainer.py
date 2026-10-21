@@ -17,6 +17,7 @@ from pipelines.forecasting.rows import issue_grid_row_index, scored_row_index
 from pipelines.forecasting.training import build_training_args
 
 from .config import load_config
+from .decision import quantile_cols
 from .features import as_numpy
 
 
@@ -53,6 +54,18 @@ def evaluate_model(model, test_dataset, HF_collate_fn, config):
             ):
                 raise ValueError("Evaluation labels must cover 192 steps")
             timestamps = as_numpy(bd[ds["ts_col"]]).reshape(-1)
+            diagnostics = {}
+            if "quantiles" in out.aux:
+                q = as_numpy(out.aux["quantiles"])
+                diagnostics = {
+                    name: as_numpy(out.aux[name]) for name in ("median", "p_star")
+                }
+                diagnostics.update(
+                    {
+                        name: q[..., j]
+                        for j, name in enumerate(quantile_cols(model.levels))
+                    }
+                )
             for i, sid in enumerate(out.aux["station_id"]):
                 row = {
                     "timestamp_win": pd.Timestamp(int(timestamps[i]), unit="s"),
@@ -72,6 +85,12 @@ def evaluate_model(model, test_dataset, HF_collate_fn, config):
                     "future_weather_unavailable",
                 ):
                     row[key] = bool(out.aux[key][i])
+                row.update(
+                    {
+                        key: value[i].astype(np.float32)
+                        for key, value in diagnostics.items()
+                    }
+                )
                 rows.append(row)
     finally:
         model.train(was_training)

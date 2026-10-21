@@ -136,7 +136,7 @@ def expand_parquets(items) -> list[str]:
         else:
             hits = sorted(glob.glob(str(it)))
             if not hits:
-                raise FileNotFoundError(f"--train-parquet {it!r} 没有匹配到文件")
+                raise FileNotFoundError(f"Parquet 路径 {it!r} 没有匹配到文件")
             out += hits
     return sorted(dict.fromkeys(out))
 
@@ -160,6 +160,40 @@ def load_full(train_parquet, cfg: dict, station_meta, scratch_dir, reuse: bool =
         "train_parquet": files,
     }
     return ds, None, man
+
+
+def load_train_valid(
+    train_parquet, valid_parquet, cfg: dict, station_meta, scratch_dir, reuse=False
+):
+    """Read separately supplied training/validation paths without splitting rows."""
+    import pyarrow.parquet as pq
+
+    files = {
+        name: sorted({str(Path(p).resolve()) for p in expand_parquets(paths)})
+        for name, paths in (("train", train_parquet), ("valid", valid_parquet))
+    }
+    for name, paths in files.items():
+        if not paths:
+            raise ValueError(f"--{name}-parquet did not match any Parquet files")
+    overlap = set(files["train"]) & set(files["valid"])
+    if overlap:
+        raise ValueError(f"Training and validation files overlap: {sorted(overlap)}")
+    datasets = {}
+    for name, paths in files.items():
+        nonempty = [p for p in paths if pq.read_metadata(p).num_rows > 0]
+        if not nonempty:
+            raise ValueError(f"--{name}-parquet contains no rows")
+        # Both inputs may contain data.parquet; keep station-ID caches separate.
+        datasets[name] = dataset_with_station_id(
+            nonempty, cfg, station_meta, Path(scratch_dir) / name, reuse
+        )
+    manifest = {
+        "generated_by": "pipelines.forecasting.data --train-parquet --valid-parquet",
+        "plan": None,
+        "train_parquet": files["train"],
+        "valid_parquet": files["valid"],
+    }
+    return datasets["train"], datasets["valid"], manifest
 
 
 def _refit_rows(d: Path, scratch_dir, reuse: bool) -> Path:

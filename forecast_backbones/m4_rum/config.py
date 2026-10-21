@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from pipelines.forecasting.config import deep_merge, interpolate, raw_override
 
 DEFAULT_CFG = {
@@ -47,6 +49,7 @@ DEFAULT_CFG = {
         "head_hidden": 128,
         "head_dim": 64,
         "dropout": 0.1,
+        "quantiles": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
     },
     "train": {
         "history_dropout": 0.2,
@@ -75,6 +78,14 @@ DEFAULT_CFG = {
             "patience": 8,
             "nrmse_issue_every_min": 60,
             "smooth_k": 1,
+        },
+    },
+    "decision": {
+        "point": {
+            "default": "median",
+            "floor_ratio": 0.2,
+            "tau_grid_step": 0.005,
+            "tail": "flat",
         },
     },
     "eval": {"batch_size": 128},
@@ -150,8 +161,42 @@ def load_config(config=None):
             raise ValueError(f"train.{key} must be in [0, 1]")
     if not 0 <= model["dropout"] < 1:
         raise ValueError("model.dropout must be in [0, 1)")
-    if train["loss"] not in ("mse", "mae"):
-        raise ValueError("train.loss must be mse or mae")
+    if train["loss"] not in ("mse", "mae", "pinball"):
+        raise ValueError("train.loss must be mse, mae or pinball")
+    levels = model["quantiles"]
+    if (
+        not isinstance(levels, (list, tuple))
+        or len(levels) < 2
+        or any(
+            isinstance(q, bool) or not isinstance(q, (int, float)) or not 0 < q < 1
+            for q in levels
+        )
+        or any(a >= b for a, b in zip(levels, levels[1:]))
+    ):
+        raise ValueError("model.quantiles must be strictly increasing in (0,1), K >= 2")
+    levels_fp32 = np.asarray(levels, dtype=np.float32)
+    if (
+        np.any(levels_fp32 <= 0)
+        or np.any(levels_fp32 >= 1)
+        or np.any(np.diff(levels_fp32) <= 0)
+    ):
+        raise ValueError("model.quantiles must remain distinct and in (0,1) in float32")
+    point = cfg["decision"]["point"]
+    if point["default"] not in ("median", "p_star") or point["tail"] != "flat":
+        raise ValueError("decision.point supports median/p_star with flat tails")
+    for key in ("floor_ratio", "tau_grid_step"):
+        value = point[key]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"decision.point.{key} must be finite and positive")
+    if not 1e-4 <= point["tau_grid_step"] <= 1:
+        raise ValueError("decision.point.tau_grid_step must be in [0.0001, 1]")
+    if point["default"] == "p_star" and train["loss"] != "pinball":
+        raise ValueError("p_star requires train.loss=pinball and a quantile head")
     if train["early_stop"]["metric"] not in ("nanwang_short_D+1", "nrmse"):
         raise ValueError("early_stop.metric must be nanwang_short_D+1 or nrmse")
     if train["early_stop"]["patience"] < 1:

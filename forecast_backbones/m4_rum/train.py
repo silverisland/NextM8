@@ -14,7 +14,7 @@ from transformers import set_seed
 from pipelines.forecasting import distributed as _dist
 from pipelines.forecasting.checkpoints import load_weights, save_weights
 from pipelines.forecasting.config import deep_merge, dump_config, raw_override
-from pipelines.forecasting.data import load_full, load_presplit
+from pipelines.forecasting.data import load_full, load_presplit, load_train_valid
 from pipelines.forecasting.rows import row_stations
 from pipelines.forecasting.training import (
     CheckpointCallback,
@@ -55,9 +55,12 @@ def train_m4_rum(
     refit=False,
     train_parquet=None,
     save_every=None,
+    valid_parquet=None,
 ):
     if (splits_dir is None) == (train_parquet is None):
         raise ValueError("Choose exactly one of --splits-dir and --train-parquet")
+    if valid_parquet is not None and (train_parquet is None or refit):
+        raise ValueError("--valid-parquet requires --train-parquet and forbids --refit")
     override = raw_override(config)
     if out_dir is not None:
         override = deep_merge(override, {"run": {"out_dir": str(out_dir)}})
@@ -72,7 +75,7 @@ def train_m4_rum(
         cfg["train"]["schedule"]["max_steps"] = max_steps
     if tag is not None:
         cfg["run"]["tag"] = tag
-    refit = refit or train_parquet is not None
+    refit = refit or (train_parquet is not None and valid_parquet is None)
     args = build_training_args(cfg, out)
     if refit and args.max_steps <= 0:
         raise ValueError("Refit requires positive max_steps")
@@ -90,6 +93,15 @@ def train_m4_rum(
     ).to(args.device)
 
     def load(reuse):
+        if valid_parquet is not None:
+            return load_train_valid(
+                train_parquet,
+                valid_parquet,
+                cfg,
+                model.station_meta,
+                out / ".data",
+                reuse,
+            )
         if train_parquet is not None:
             return load_full(
                 train_parquet, cfg, model.station_meta, out / ".data", reuse
@@ -237,6 +249,11 @@ def main(argv=None):
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--splits-dir")
     inputs.add_argument("--train-parquet", nargs="+")
+    parser.add_argument(
+        "--valid-parquet",
+        nargs="+",
+        help="Validation files/directories/globs; requires --train-parquet",
+    )
     parser.add_argument("--out")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--save-every", type=int)
@@ -264,6 +281,7 @@ def main(argv=None):
         a.refit,
         a.train_parquet,
         a.save_every,
+        a.valid_parquet,
     )
 
 

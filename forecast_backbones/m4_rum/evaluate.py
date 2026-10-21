@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,11 +15,12 @@ from pipelines.forecasting.config import deep_merge, raw_override
 from pipelines.forecasting.data import dataset_with_station_id, expand_parquets
 from pipelines.transformer_dataset import UnifiedDataset
 
+from .decision import decide, quantile_cols
 from .transformer_models import TransformersAdaptedM4RumModel
 from .transformer_trainer import score_result, validate
 
 
-def load_member(run, device="cpu"):
+def load_member(run, device="cpu", point=None):
     run = Path(run)
     config, weights = run / "model_config.yaml", run / "model.safetensors"
     if not config.is_file() or not weights.is_file():
@@ -26,6 +28,10 @@ def load_member(run, device="cpu"):
             f"{run} must contain model_config.yaml and model.safetensors"
         )
     cfg = deep_merge(raw_override(config), {"train": {"weights_path": str(weights)}})
+    if point is not None:
+        if cfg.get("train", {}).get("loss", "mse") != "pinball":
+            raise ValueError("--point requires a checkpoint trained with pinball loss")
+        cfg = deep_merge(cfg, {"decision": {"point": {"default": point}}})
     model = TransformersAdaptedM4RumModel(cfg).to(device)
     if not model.weights_loaded:
         raise RuntimeError(f"Failed to load {weights}")
@@ -40,6 +46,7 @@ def evaluate(
     batch_size=None,
     device=None,
     progress=True,
+    point=None,
 ):
     if not runs:
         raise ValueError("At least one run is required")
@@ -53,8 +60,22 @@ def evaluate(
         raise ValueError("No test parquet files")
     collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
     result, first, member_rows, predictions = None, None, [], []
+    quantile_sum = None
     for run in runs:
-        model = load_member(run, device)
+        model = load_member(run, device, point)
+        if first is not None:
+            if first.core.is_quantile != model.core.is_quantile:
+                raise ValueError(
+                    "Cannot ensemble point and pinball checkpoints together"
+                )
+            if model.core.is_quantile and (
+                first.levels != model.levels
+                or first.cfg["decision"] != model.cfg["decision"]
+            ):
+                raise ValueError(
+                    "Pinball ensemble members must share quantiles "
+                    "and decision settings"
+                )
         model.cfg["train"]["schedule"]["progress_bar"] = progress
         if batch_size is not None:
             model.cfg["eval"]["batch_size"] = batch_size
@@ -79,17 +100,51 @@ def evaluate(
                 )
         prediction = np.stack(frame.observe_power_predict)
         predictions.append(prediction)
+        if model.core.is_quantile:
+            q = np.stack(
+                [np.stack(frame[name]) for name in quantile_cols(model.levels)], axis=-1
+            )
+            quantile_sum = q.copy() if quantile_sum is None else quantile_sum + q
         if len(runs) > 1:
             result[f"predict_m{len(predictions) - 1}"] = list(prediction)
-    result["observe_power_predict"] = list(
-        np.mean(predictions, axis=0).astype(np.float32)
-    )
+    if quantile_sum is not None:
+        # Average raw quantiles, then decide; p_star(mean(q)) != mean(p_star(q)).
+        q_mean = quantile_sum / len(runs)
+        selected = {key: [] for key in ("point", "median", "p_star")}
+        size = first.cfg["eval"]["batch_size"]
+        for start in range(0, len(result), size):
+            selection = decide(
+                torch.from_numpy(q_mean[start : start + size]),
+                first.levels,
+                torch.tensor(
+                    result.cap.to_numpy()[start : start + size], dtype=torch.float32
+                ),
+                first.cfg["decision"]["point"],
+            )
+            for key in selected:
+                selected[key].append(selection[key].numpy())
+        for key, values in selected.items():
+            column = "observe_power_predict" if key == "point" else key
+            result[column] = list(np.concatenate(values).astype(np.float32))
+        for j, name in enumerate(quantile_cols(first.levels)):
+            result[name] = list(q_mean[..., j])
+        (reports / "decision.json").write_text(
+            json.dumps({"quantiles": first.levels, **first.cfg["decision"]}, indent=2),
+            encoding="utf-8",
+        )
+    else:
+        result["observe_power_predict"] = list(
+            np.mean(predictions, axis=0).astype(np.float32)
+        )
     scores, table = score_result(first, result)
     summary = {
         **scores,
         "n_members": len(runs),
         "n_scored_rows": len(result),
         "full": full,
+        "point_method": first.cfg["decision"]["point"]["default"]
+        if first.core.is_quantile
+        else "direct",
     }
     result.to_parquet(out / "result_test.parquet", index=False)
     table.to_csv(reports / "station_table.csv", index=False)
@@ -154,8 +209,22 @@ def main(argv=None):
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--device")
     parser.add_argument("--no-progress", action="store_true")
+    parser.add_argument(
+        "--point",
+        choices=("median", "p_star"),
+        help="Override pinball checkpoint point selection",
+    )
     a = parser.parse_args(argv)
-    evaluate(a.runs, a.test, a.out, a.full, a.batch_size, a.device, not a.no_progress)
+    evaluate(
+        a.runs,
+        a.test,
+        a.out,
+        a.full,
+        a.batch_size,
+        a.device,
+        not a.no_progress,
+        a.point,
+    )
 
 
 if __name__ == "__main__":

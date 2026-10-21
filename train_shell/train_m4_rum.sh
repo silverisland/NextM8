@@ -23,8 +23,10 @@ usage() {
   --allow-cpu             auto 未检测到 GPU 时允许 CPU 训练
 训练选项原样传给 forecast_backbones.m4_rum.train，例如：
   --config <yaml> --splits-dir <dir> --out <dir>
-  --train-parquet <path...> --max-steps <n> --save-every <n>
-同时兼容 M8 的 --splits_dir、--train_parquet、--max_steps 等下划线写法。
+  --train-parquet <path...> --valid-parquet <path...> --out <dir>
+  --max-steps <n> --save-every <n>
+训练/验证路径支持目录、文件或加引号的通配符；只给训练路径时全量训练、不验证。
+同时兼容 --splits_dir、--train_parquet、--valid_parquet、--max_steps 等下划线写法。
 batch_size、precision、lr 等训练超参数在 YAML 的 train.schedule 下配置。
 PRE_CUDA_LD 可覆盖默认 CUDA 库路径前缀；设为空字符串可禁用前缀。
 USAGE
@@ -45,7 +47,7 @@ while [ $# -gt 0 ]; do
       shift 2 ;;
     --allow-cpu) ALLOW_CPU=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    --splits_dir|--train_parquet|--max_steps|--save_every|--hint_col|--station_meta)
+    --splits_dir|--train_parquet|--valid_parquet|--max_steps|--save_every|--hint_col|--station_meta)
       ARGS+=("${1//_/-}"); shift ;;
     *) ARGS+=("$1"); shift ;;
   esac

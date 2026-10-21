@@ -39,7 +39,14 @@ def launch(tmp_path):
     nproc.write_text("#!/bin/sh\necho 16\n")
     nproc.chmod(0o755)
 
-    def run(*options, count=2, exit_code=0, env_overrides=None, cli_python=True):
+    def run(
+        *options,
+        count=2,
+        exit_code=0,
+        env_overrides=None,
+        cli_python=True,
+        data_options=None,
+    ):
         env = dict(
             os.environ,
             PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
@@ -63,8 +70,7 @@ def launch(tmp_path):
                 str(SCRIPT),
                 *(["--venv-python", str(python)] if cli_python else []),
                 *options,
-                "--splits_dir",
-                "/data/path with spaces",
+                *(data_options or ["--splits_dir", "/data/path with spaces"]),
                 "--config",
                 "recipe.yaml",
                 "--max_steps",
@@ -100,6 +106,31 @@ def test_multigpu_launch_and_argument_forwarding(launch, gpus, visible):
         "--max-steps",
         "20",
     ]
+
+
+def test_separate_training_validation_paths_forwarded(launch):
+    result, recorded = launch(
+        "--gpus",
+        "0,1",
+        data_options=[
+            "--train_parquet",
+            "/data/train files",
+            "--valid_parquet",
+            "/data/validation files/*.parquet",
+            "/data/extra validation.parquet",
+        ],
+    )
+    assert result.returncode == 0, result.stderr
+    args = recorded["args"]
+    start = args.index("--train-parquet")
+    assert args[start : start + 5] == [
+        "--train-parquet",
+        "/data/train files",
+        "--valid-parquet",
+        "/data/validation files/*.parquet",
+        "/data/extra validation.parquet",
+    ]
+    assert "--splits-dir" not in args
 
 
 @pytest.mark.parametrize("options,count", [(["--gpu", "0"], 1), (["--allow-cpu"], 0)])
