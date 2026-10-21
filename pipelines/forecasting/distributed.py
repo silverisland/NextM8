@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import torch
 import torch.distributed as dist
 
 
@@ -22,7 +23,13 @@ def is_main() -> bool:
 
 
 def barrier() -> None:
-    if _on():
+    if not _on():
+        return
+    if dist.get_backend() == "nccl":
+        # NCCL may not know the bound device before its first collective.
+        # current_device is a logical index after CUDA_VISIBLE_DEVICES remapping.
+        dist.barrier(device_ids=[torch.cuda.current_device()])
+    else:
         dist.barrier()
 
 

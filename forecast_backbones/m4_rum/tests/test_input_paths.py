@@ -3,6 +3,7 @@
 import inspect
 import json
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,7 @@ from forecast_backbones.m4_rum.config import load_config
 from forecast_backbones.m4_rum.train import main, train_m4_rum
 from pipelines.forecasting.data import load_train_valid
 from pipelines.forecasting.rows import row_stations
-from pipelines.forecasting.stations import StationMeta
+from pipelines.forecasting.stations import StationMeta, load_station_meta
 
 
 def test_train_separate_file_and_validation_directory(cfg, splits, tmp_path):
@@ -156,3 +157,28 @@ def test_cli_accepts_multiple_validation_paths(monkeypatch):
         "/data/validation files/*.parquet",
         "/data/extra validation.parquet",
     ]
+
+
+@pytest.mark.parametrize("recipe", ["configs.yaml", "pinball.yaml"])
+def test_cli_station_meta_replaces_online_column_mapping(cfg, monkeypatch, recipe):
+    captured = {}
+
+    def capture(config, *args, **kwargs):
+        captured.update(load_config(config)["dataset"])
+
+    monkeypatch.setattr("forecast_backbones.m4_rum.train.train_m4_rum", capture)
+    main(
+        [
+            "--config",
+            str(Path(__file__).resolve().parents[1] / "config" / recipe),
+            "--train-parquet",
+            "/data/train",
+            "--station-meta",
+            cfg["dataset"]["station_meta"],
+        ]
+    )
+    assert captured["station_meta"] == cfg["dataset"]["station_meta"]
+    assert captured["station_meta_cols"] is None
+    meta = load_station_meta(captured["station_meta"], captured["station_meta_cols"])
+    assert meta.id_of(" A ") == 1
+    assert meta.get(1)["cap_mw"] == 100

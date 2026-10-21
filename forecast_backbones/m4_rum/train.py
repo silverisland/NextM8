@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import os
 import time
 from pathlib import Path
 
@@ -79,18 +80,24 @@ def train_m4_rum(
     args = build_training_args(cfg, out)
     if refit and args.max_steps <= 0:
         raise ValueError("Refit requires positive max_steps")
-    _ = args.device
+    device = args.device
     if args.n_gpu > 1:
         raise ValueError(
             "Use torchrun / accelerate for multiple GPUs; DataParallel is unsupported"
         )
     main = _dist.is_main()
+    print(
+        f"[m4_rum] rank={_dist.rank()} local_rank={args.local_rank} "
+        f"world_size={_dist.world_size()} device={device} "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}",
+        flush=True,
+    )
     out.mkdir(parents=True, exist_ok=True)
     # Never accidentally resume an existing run; seed before parameter construction.
     set_seed(args.seed)
     model = TransformersAdaptedM4RumModel(
         deep_merge(cfg, {"train": {"weights_path": None}})
-    ).to(args.device)
+    ).to(device)
 
     def load(reuse):
         if valid_parquet is not None:
@@ -111,10 +118,19 @@ def train_m4_rum(
         )
 
     if main:
+        print(
+            "[m4_rum] Loading datasets and preparing shared data cache...", flush=True
+        )
         loaded = load(False)
+        print("[m4_rum] Data cache ready; synchronizing ranks...", flush=True)
+    else:
+        print(
+            f"[m4_rum] rank={_dist.rank()} waiting for rank 0 data cache...", flush=True
+        )
     _dist.barrier()
     if not main:
         loaded = load(True)
+    print(f"[m4_rum] rank={_dist.rank()} datasets loaded", flush=True)
     ds_train, ds_val, manifest = loaded
     cfg["features"]["cov_present"] = model.fe.check_columns(ds_train.column_names)
     known = sorted(
@@ -260,7 +276,11 @@ def main(argv=None):
     parser.add_argument("--tag")
     parser.add_argument("--refit", action="store_true")
     parser.add_argument(
-        "--station-meta", help="Override station table and clear column mapping"
+        "--station-meta",
+        help=(
+            "Override station table; clear old mapping "
+            "and detect standard/info.csv columns"
+        ),
     )
     parser.add_argument("--hint-col", help="Override foundation forecast column")
     a = parser.parse_args(argv)

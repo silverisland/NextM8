@@ -5,7 +5,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # 与 M8 使用同一服务器环境；本地没有该环境时使用 PATH 中的 python。
 PYTHON_BIN="${PYTHON:-/home/ma-user/ts3/bin/python}"
 if [ -z "${PYTHON:-}" ] && [ ! -x "$PYTHON_BIN" ]; then PYTHON_BIN=python; fi
-PRE_CUDA_LD="${PRE_CUDA_LD-/usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu}"
+PRE_CUDA_LD="/usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu"
 GPUS=auto
 PORT=29700
 CPU_THREADS="${OMP_NUM_THREADS:-}"
@@ -24,11 +24,12 @@ usage() {
 训练选项原样传给 forecast_backbones.m4_rum.train，例如：
   --config <yaml> --splits-dir <dir> --out <dir>
   --train-parquet <path...> --valid-parquet <path...> --out <dir>
+  --station-meta <csv>    覆盖站表并自动识别标准 station_meta.csv / 线上 info.csv 表头
   --max-steps <n> --save-every <n>
 训练/验证路径支持目录、文件或加引号的通配符；只给训练路径时全量训练、不验证。
 同时兼容 --splits_dir、--train_parquet、--valid_parquet、--max_steps 等下划线写法。
 batch_size、precision、lr 等训练超参数在 YAML 的 train.schedule 下配置。
-PRE_CUDA_LD 可覆盖默认 CUDA 库路径前缀；设为空字符串可禁用前缀。
+CUDA 库路径前缀与 M8 一致，固定为 /usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu。
 USAGE
 }
 
@@ -78,9 +79,7 @@ if [ "$GPUS" != auto ]; then
 fi
 
 # 动态库路径必须在首次 import torch 前配置，探卡及所有训练子进程共用此环境。
-if [ -n "$PRE_CUDA_LD" ]; then
-  export LD_LIBRARY_PATH="${PRE_CUDA_LD}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-fi
+export LD_LIBRARY_PATH="${PRE_CUDA_LD}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # 在设置可见卡之后，由训练所用解释器检测；auto 尊重外部 CUDA_VISIBLE_DEVICES。
 NP="$("$PYTHON_BIN" -c 'import torch; print(torch.cuda.device_count())')"
 if [ "$GPUS" != auto ] && [ "$NP" -ne "${#GPU_LIST[@]}" ]; then

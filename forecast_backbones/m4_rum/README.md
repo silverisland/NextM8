@@ -48,7 +48,7 @@ Pinball 模式只将末层从 1 维改为 K 个分位（默认 9 个），原历
 
 默认列：`timestamp_win`、`station_id`（或 `station`）、`observe_power`、
 `observe_power_future`、`general_ghi(_predict)`、`general_temp(_predict)`、`timesfm3`。
-`timesfm3` 自动兼容 `tsfm_predict`，所有配置输入列支持大小写不敏感匹配。
+`timesfm3` 自动兼容 `tsfm_predict`，天气和基模特征列支持大小写不敏感匹配。
 气象按配置中的逐变量 offset/scale 归一；基模预测与功率必须同单位。
 
 这里消费预先生成的基模预测列，不在训练循环或推理 forward 中运行/微调基模。
@@ -72,6 +72,39 @@ Pinball 模式只将末层从 1 维改为 K 个分位（默认 9 个），原历
 `.aux` 包含 `history_unavailable`、`hint_unavailable`、`future_weather_unavailable`；
 专用评估保留这些标记。通用 `unified_inference` 仅返回预测，不保留 aux。
 所有天气不可用时虽仍可产生有限数值，业务应依据标记决定是否接受。
+
+### 站表映射
+
+训练、验证和推理共用 `pipelines.forecasting.stations` 的站表映射，与 M8 的规则一致，
+不调用 M8 私有代码。CSV 支持 UTF-8/BOM、GBK；标准表头为
+`station_id,station,lat,lon,alt_m,cap_mw`，坐标和海拔的值可留空。
+线上 `info.csv` 的 `plantid / plant_pointname / LATITUDE / LONGITUDE / GCCAPACITY`
+也可自动识别，分别映射到编号、站名、纬度、经度、固定容量，海拔默认 0。
+
+- 数据已有整数 `station_id` 时直接查编号；文本数字编号在训练/评估加载时转为整数。
+  非数字的文本编号按站名映射；没有编号列时用 `station` 补齐。
+- 站名去首尾空格，`1002`、`1002.0`、`"1002.0"` 统一为 `"1002"`。
+  按站名查找时先匹配站表的 `station`，找不到且为数字才尝试编号；普通文本精确匹配。
+- 编号与站名重复、未知站名、映射冲突都会报错；容量必须是有限正数。
+  已有编号时不会再用同时存在的站名列交叉核验，两列须由上游保持一致。
+
+训练可用 `--station-meta /path/to/station_meta.csv`（或 shell 的 `--station_meta`）换表；
+它会清空配方中的旧列名映射，自动识别标准表或线上表。自定义中文表头应在 YAML 中一起设置：
+
+```yaml
+dataset:
+  station_meta: /path/to/stations.csv
+  station_meta_cols:
+    station_id: 场站编号
+    station: 场站名称
+    cap_mw: 装机容量
+    lat: null
+    lon: null
+    alt_m: null
+```
+
+自定义映射时直接使用该 YAML，不追加会清空映射的 `--station-meta`。
+训练保存的 `model_config.yaml` 会保留实际站表路径与映射，推理时须保证该路径可访问。
 
 ## 训练
 
@@ -131,7 +164,7 @@ bash train_shell/train_m4_rum.sh \
 
 环境初始化与 M8 对齐：首次导入 PyTorch 探卡前，将
 `/usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu` 加到 `LD_LIBRARY_PATH` 前，保留原有路径。
-可用环境变量 `PRE_CUDA_LD` 更换前缀，或设为空字符串禁用；探卡和训练使用同一解释器与库路径。
+`PRE_CUDA_LD` 与 M8 一样在脚本中写死，不接受外部环境变量覆盖；探卡和训练使用同一解释器与库路径。
 未指定 `--cpu_threads` 时沿用 `OMP_NUM_THREADS`，否则按可用 CPU 数除以训练进程数分配，至少为 1。
 启动时打印实际解释器、库路径、GPU 和线程设置，便于核对服务器环境。
 
@@ -139,6 +172,13 @@ GPU 选择由启动脚本控制，训练超参数仍由 YAML 的 `train.schedule
 `batch_size` 是每张卡的大小：64 × 2 卡 = 全局 128，64 × 4 卡 = 全局 256；
 如需保持单卡时的全局 batch，应相应减小此值。`precision` 可设 `fp32`、`fp16` 或 `bf16`，
 BF16 需要硬件支持。启动逻辑已通过模拟可见卡测试，尚未进行真实 GPU/DDP 实测。
+
+多卡进程在能力检测和 HF 初始化前按 `LOCAL_RANK` 绑定当前逻辑 CUDA 设备，
+NCCL 同步显式使用该设备的 `barrier(device_ids=[...])`；CPU/Gloo 同步不传 GPU 编号。
+例如 `--gpus 5,7` 对应两个进程内的 `cuda:0`、`cuda:1`，不是 `cuda:5`、`cuda:7`。
+各进程会打印 rank、device 和可见卡设置，以及等待主进程准备数据缓存的状态。
+若日志停在 `waiting for rank 0 data cache`，先查看 rank 0 是否仍在加载数据或已经报错；
+仅凭首次 barrier 的设备未知警告，不能判断 CUDA 动态库配置错误或已经死锁。
 
 `--train-parquet` 与 `--valid-parquet` 都支持递归目录、带引号的通配符和文件列表，
 不自动切分或丢弃行。同时提供两者时按验证集指标选优、早停，无需预先生成切分清单；

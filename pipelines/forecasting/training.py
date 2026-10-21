@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import os
 import time
 from pathlib import Path
 
@@ -153,6 +154,16 @@ def build_training_args(cfg: dict, out_dir, max_steps=None) -> TrainingArguments
     s = cfg["train"]["schedule"]
     steps = s.get("max_steps") if max_steps is None else max_steps
     cuda = torch.cuda.is_available()
+    local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+    if cuda and local_rank >= 0:
+        count = torch.cuda.device_count()
+        if local_rank >= count:
+            raise ValueError(
+                f"LOCAL_RANK={local_rank} exceeds the {count} visible CUDA devices; "
+                "check CUDA_VISIBLE_DEVICES and the launcher's process count"
+            )
+        # Bind before capability probes and HF/Accelerate process-group setup.
+        torch.cuda.set_device(local_rank)
     bf16 = (
         str(s.get("precision", "fp32")) == "bf16"
         and cuda

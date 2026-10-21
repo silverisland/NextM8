@@ -80,6 +80,7 @@ def launch(tmp_path):
             capture_output=True,
             text=True,
             cwd=tmp_path,
+            check=False,
         )
         return result, json.loads(record.read_text()) if record.exists() else None
 
@@ -164,12 +165,12 @@ def test_invalid_launch_does_not_start_training(launch, options, count, message)
         (None, None, CUDA_LIBS),
         (None, "", CUDA_LIBS),
         (None, "/existing", f"{CUDA_LIBS}:/existing"),
-        ("/custom/cuda", "/existing", "/custom/cuda:/existing"),
-        ("", "/existing", "/existing"),
-        ("", None, None),
+        ("/custom/cuda", "/existing", f"{CUDA_LIBS}:/existing"),
+        ("", "/existing", f"{CUDA_LIBS}:/existing"),
+        ("", None, CUDA_LIBS),
     ],
 )
-def test_cuda_libraries_ready_for_probe_and_training(
+def test_fixed_cuda_libraries_ready_for_probe_and_training(
     launch, prefix, existing, expected
 ):
     result, recorded = launch(
