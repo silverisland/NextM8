@@ -12,12 +12,16 @@
 # 用法（cwd 任意）：
 #   bash eval_shell/eval_pretrain.sh                 # 默认 MODEL=m5，与旧 eval_m5.sh 行为一致
 #   MODEL=m7 bash eval_shell/eval_pretrain.sh        # Timestral-209M
+#   MODEL=m7 bash eval_shell/eval_pretrain.sh --point p_star   # 覆盖上报点（目前只 M7；M5 用 eval_m5.sh --point）
+# 参数：
+#   --point <rule>  覆盖配置的 decision.point：p_star / median / mean / p_star_l1 / quantile:<τ> / none（旧行为）；
+#                   也可用环境变量 POINT。给了 --point 时默认 OUT_DIR 末尾加 _<rule>（不同规则的结果不会被 SKIP 混在一起）
 # 环境变量（均有默认）：
 #   MODEL        模型名            默认 m5（m7 = Timestral-209M）
 #   PYTHON       解释器            默认 /home/ma-user/ts3/bin/python（M7 需在该环境装 timestral，torch 较老时 --no-deps）
 #   CKPT_DIR     模型配置目录      默认 $BASE_DIR/forecast_backbones/$MODEL
 #   STATION_DIR  17 站 test 数据  默认 $BASE_DIR/datasets/test
-#   OUT_DIR      结果输出目录     默认 $BASE_DIR/runs/$MODEL/pretrain_100m_v1/metrics_ens
+#   OUT_DIR      结果输出目录     默认 $BASE_DIR/runs/$MODEL/pretrain_100m_v1/metrics_ens[_<point>]
 #   CAP_POWER    已不使用（容量只取站表 station_meta.csv 的 cap_mw；参数保留只为兼容）
 #   NUM_WORKERS  并行 worker 数   默认 8
 #   BATCH_SIZE   推理 batch       默认 512
@@ -31,14 +35,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${BASE_DIR}"
 
+POINT="${POINT:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --point) POINT="$2"; shift 2 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    *) echo "未知参数: $1（只支持 --point；其余设置用环境变量）" >&2; exit 2 ;;
+  esac
+done
+
 MODEL="${MODEL:-m5}"
+if [ -n "$POINT" ] && [ "$MODEL" = "m5" ]; then
+  echo "错误: M5 零样本（legacy 配置）没有决策层，--point 不生效；M5 请用 eval_shell/eval_m5.sh --point" >&2
+  exit 2
+fi
 STATION_SCRIPT="${SCRIPT_DIR}/eval_pretrain.py"
 PYTHON="${PYTHON:-/home/ma-user/ts3/bin/python}"
 CUDA_LIB="LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu"
 
 CKPT_DIR="${CKPT_DIR:-${BASE_DIR}/forecast_backbones/${MODEL}}"
 STATION_DIR="${STATION_DIR:-${BASE_DIR}/datasets/test}"
-OUT_DIR="${OUT_DIR:-${BASE_DIR}/runs/${MODEL}/pretrain_100m_v1/metrics_ens}"
+OUT_DIR="${OUT_DIR:-${BASE_DIR}/runs/${MODEL}/pretrain_100m_v1/metrics_ens${POINT:+_${POINT//:/_}}}"
 CAP_POWER="${CAP_POWER:-465}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
@@ -57,6 +74,7 @@ echo "  STATION_DIR: $STATION_DIR"
 echo "  OUT_DIR    : $OUT_DIR"
 echo "  CAP_POWER  : $CAP_POWER"
 echo "  NUM_WORKERS: $NUM_WORKERS  BATCH_SIZE: $BATCH_SIZE"
+echo "  POINT      : ${POINT:-（用配置）}"
 echo "  站数: $N_STATIONS     worker 日志: $PARALLEL_LOGS"
 echo "=========================================="
 
@@ -117,6 +135,7 @@ run_one() {
       --out_dir "$OUT_DIR" \
       --cap_power "$CAP_POWER" \
       --batch_size "$BATCH_SIZE" \
+      ${POINT:+--point "$POINT"} \
       2>&1 | grep -avE "^Predict:|it/s\]|Generating train split"
   local rc=${PIPESTATUS[0]}
   if [ -f "$summary_file" ]; then

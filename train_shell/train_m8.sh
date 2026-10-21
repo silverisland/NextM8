@@ -5,10 +5,10 @@
 # 配置只改运行时副本不改仓库 yaml。模型很小（≈1.5M 参数），单卡就够；多卡只是加大每步行数。
 #
 # 用法：
-#   bash train_m8.sh --splits_dir /data/xxx/splits                                   # 默认配置，全部可见 GPU
-#   bash train_m8.sh --config forecast_backbones/m8/config/variants/k3_resid.yaml --gpus 0   # 某个变体，单卡
+#   bash train_m8.sh --splits_dir /data/xxx/splits                                   # 默认配置 j1_final2，全部可见 GPU
+#   bash train_m8.sh --config forecast_backbones/m8/config/k3_resid.yaml --gpus 0   # 某个变体，单卡
 #   bash train_m8.sh --gpus 0 --max_steps 20 --run_id smoke                          # 冒烟
-#   bash train_m8.sh --train_parquet "/data/train/*.parquet" --config forecast_backbones/m8/config/variants/j1_final2.yaml --max_steps 6000 --gpus 0
+#   bash train_m8.sh --train_parquet "/data/train/*.parquet" --config forecast_backbones/m8/config/j1_final2.yaml --max_steps 6000 --gpus 0
 #                                                                                    # 全量训练：现成的训练 parquet 直接吃，不切分、不剔行、无验证
 #   bash train_m8.sh --train_parquet ... --config .../k3_resid.yaml --hint_col tfm_pred --max_steps 6000   # 数据里插值列叫 tfm_pred（不改 yaml）
 #   bash train_m8.sh --train_parquet "/data/train" --config .../j1_final2.yaml --max_steps 8000 --save_every 500 --gpus 0
@@ -20,7 +20,7 @@ if [ -d "$_HERE/forecast_backbones" ]; then BASE_DIR="$_HERE"; else BASE_DIR="$(
 
 SPLITS_DIR="${BASE_DIR}/data/splits/m1_m4_v1"
 TRAIN_PARQUET=""                    # 给了就是全量训练：文件夹 / 通配符（加引号）/ 单个文件，不走切分目录，隐含 --refit
-CONFIG="${BASE_DIR}/forecast_backbones/m8/config/configs.yaml"
+CONFIG="${BASE_DIR}/forecast_backbones/m8/config/j1_final2.yaml"   # 默认 = 最终配方；未写的字段取 config.py 的 DEFAULT_CFG
 RUNS_BASE="${BASE_DIR}/runs"
 RUN_ID=""                           # 留空 = 配置 run.tag（或 变体文件名）+ 时间戳
 GPUS="auto"
@@ -47,7 +47,8 @@ usage() {
   --splits_dir <dir>       pipelines.time_splits 落的切分目录（train/valid.parquet + split_manifest.json；不需要 cal.parquet）
   --train_parquet <path>   全量训练：现成的训练 parquet（文件夹 / 加引号的通配符 / 文件），不切分、不剔除任何行、无验证集，
                            固定 --max_steps 步后存 checkpoint（隐含 --refit）。与 --splits_dir 二选一
-  --config <yaml>          M8 配置或变体（默认 forecast_backbones/m8/config/configs.yaml；变体在 config/variants/）
+  --config <yaml>          M8 配置（默认 forecast_backbones/m8/config/j1_final2.yaml；各变体直接放在 config/ 下，
+                           只写与 config.py 的 DEFAULT_CFG 不同的字段）
   --run_id <name>          产物目录名：<runs_base>/m8/<run_id>（默认 <tag>_<日期_时间>）
   --runs_base <dir>        产物根目录（默认 <仓库>/runs）
   --gpus <csv|auto>        用哪些卡（默认 auto = 全部可见卡）；每张卡一个进程
@@ -163,6 +164,7 @@ elif hint_col:
 print(f"HINT_COL={fe.get('hint_col') or '（不用）'}")
 if station_meta:
     cfg.setdefault("dataset", {})["station_meta"] = os.path.abspath(station_meta)
+    cfg["dataset"]["station_meta_cols"] = None      # 换了站表，配置里的列名映射（info.csv 表头）不再适用：标准表头 / info.csv 表头都自动识别
 yaml.safe_dump(cfg, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_keys=False)
 meta = (cfg.get("dataset") or {}).get("station_meta", "forecast_backbones/m8/station_meta.csv")
 print(f"STATION_META={meta}")

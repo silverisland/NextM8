@@ -38,6 +38,9 @@
     timestral.make_positive         -> 预测与分位钳到 ≥0（PV 功率建议 true，默认）
     timestral.symmetric_averaging   -> ±context 对称平均（timestral 默认开，同 M5 的 use_symmetric_averaging）
     timestral.eager_init            -> 构造时即加载权重（默认 true；测试里设 false 换替身）
+    timestral.col_aliases           -> {配置列: [数据列, ...]}（2026-10-21，同 M5）：配置列名 → 数据列名，先精确匹配、再查别名、
+                                       最后大小写不敏感（配置写 general_ghi，线上数据是 general_GHI）；非精确匹配时 warning 一次；
+                                       同一列有两个大小写变体直接报错。input_report(columns) 打印"配置列 → 数据列"核对表
 
 决策层（2026-10-20，m7/decision.py，M7 自带不引用 M5；默认关 = 上面的旧行为逐位不变）：
     decision.point                  -> null（默认：logits = 模型 0.5 档 / predict_quantile 档，不钳 cap）
@@ -71,6 +74,7 @@
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
 from typing import List, Optional
 
@@ -121,6 +125,8 @@ DEFAULT_CFG = {
         "make_positive": True,      # 预测钳制在正值域（光伏功率 ≥0）
         "symmetric_averaging": True,
         "eager_init": True,
+        # 列名别名 {配置列: [数据列, ...]}；解析顺序：精确 → 别名 → 大小写不敏感（配置 general_ghi，线上数据 general_GHI）
+        "col_aliases": {},
     },
 }
 
@@ -179,7 +185,9 @@ class TransformersAdaptedM7Model(nn.Module):
         self._backbone_device = None
         self._q_idx = None              # quantile_levels 在模型 21 档里的索引，加载 backbone 时解析
         self._median_idx = None
-        self._warned_pairs = set()      # 已提示过缺列的协变量对，只提示一次
+        self._warned_pairs = set()      # 已提示过缺列的协变量对 / 非精确匹配的列，只提示一次
+        self.col_aliases = {str(k): [str(a) for a in (v if isinstance(v, (list, tuple)) else [v])]
+                            for k, v in (t.get("col_aliases") or {}).items()}
         if bool(t["eager_init"]):
             self._ensure_backbone(self._resolve_device())
 
@@ -252,15 +260,21 @@ class TransformersAdaptedM7Model(nn.Module):
             p = repo
         return StationMeta.from_csv(p, cols)
 
+    @property
+    def station_meta(self):
+        """站表（m7/stations.StationMeta）；decision.point 为 null 时构造期没加载，这里按 dataset.station_meta 懒加载。
+        线上模板用它做 站名 → station_id 映射、剔除没容量的站（同 M5 模板）。"""
+        if self._station_meta is None:
+            self._station_meta = self._load_station_meta(self.station_meta_path, self.station_meta_cols)
+        return self._station_meta
+
     def station_cap(self, station) -> float:
         """站名或数值站号 → 该站固定容量（站表 cap_mw）。eval_pretrain 计分用它（有此方法就不再读 m6 站表）。
         decision.point 为 null 时站表没在构造期加载，这里按 dataset.station_meta 懒加载。"""
-        if self._station_meta is None:
-            self._station_meta = self._load_station_meta(self.station_meta_path, self.station_meta_cols)
-        sid = self._station_meta.id_of(norm_station_name(station))
+        sid = self.station_meta.id_of(norm_station_name(station))
         if sid is None:
             raise ValueError(f"站 {station!r} 不在 station_meta（{self.station_meta_path}）里，拿不到容量：容量只来自站表")
-        return station_cap_mw(self._station_meta, sid)
+        return station_cap_mw(self.station_meta, sid)
 
     def _station_caps(self, batch_dict: dict) -> np.ndarray:
         """[B] 每行该站固定容量（站表 cap_mw）：有数值 station_id 列直接用，否则按 station 站名映射。"""
@@ -357,21 +371,73 @@ class TransformersAdaptedM7Model(nn.Module):
                 raise ValueError(f"列 {col!r} 含 {bad} 个非有限值（nan_policy='raise'）")
         return arr
 
+    # ------------------------------------------------------------------ 列名解析 / 输入核对（2026-10-21，自 M5 复制）
+    def resolve_col(self, keys, col: str) -> Optional[str]:
+        """配置列名 col → keys（数据列名 / batch_dict 键）里实际用的那一个；找不到返回 None。"""
+        keys = list(keys)
+        if col in keys:
+            return col
+        for a in self.col_aliases.get(col, ()):
+            if a in keys:
+                return a
+        for c in [col] + self.col_aliases.get(col, []):
+            hits = [k for k in keys if isinstance(k, str) and k.lower() == c.lower()]
+            if len(hits) > 1:
+                raise ValueError(f"列 {c!r} 在数据里有多个大小写变体 {hits}，无法确定用哪个；请删掉多余的列")
+            if hits:
+                return hits[0]
+        return None
+
+    def _key(self, batch_dict: dict, col: str) -> Optional[str]:
+        """resolve_col + 非精确匹配时提示一次（线上日志里能看到配置列名实际对上了哪一列）。"""
+        k = self.resolve_col(batch_dict.keys(), col)
+        if k is not None and k != col and (col, k) not in self._warned_pairs:
+            warnings.warn(f"配置列 {col!r} 用数据里的 {k!r}（别名 / 大小写不敏感匹配）")
+            self._warned_pairs.add((col, k))
+        return k
+
+    def _fcol(self, batch_dict: dict, col: str) -> np.ndarray:
+        """按配置列名取列（经 resolve_col）；找不到时 _col 报 KeyError。"""
+        return self._col(batch_dict, self._key(batch_dict, col) or col)
+
+    def input_report(self, columns):
+        """数据列名 → (可读的逐行说明, {配置列: 数据列或 None})。线上第一次起报前打一次，核对协变量设置（同 M5）。"""
+        cols = [str(c) for c in columns]
+        res: dict = {}
+
+        def show(c):
+            k = self.resolve_col(cols, c); res[c] = k
+            return f"{c} ✓" if k == c else (f"{c} → 数据列 {k} ✓" if k else f"{c} ✗ 数据里没有")
+
+        sid = "station_id" if "station_id" in cols else ("station" if "station" in cols else None)
+        lines = [f"站点列: {sid or '✗ 没有 station_id / station'}" + ("（站名，按 station_meta 映射成站号）" if sid == "station" else ""),
+                 f"目标列（历史功率）: {show(self.target_col)}",
+                 f"NWP 协变量 past_future（{len(self.past_future_cols)} 对，缺列的对不喂给 Timestral）:"]
+        for h, f in self.past_future_cols:
+            lines.append(f"  - 历史 {show(h)} | 未来 {show(f)}")
+        if self.past_only_cols:
+            lines.append("past_only: " + "，".join(show(c) for c in self.past_only_cols))
+        lines.append(f"上报点: {self.decision_point or '模型 0.5 档直出'}"
+                     + (f"（{self.decision_levels} 档 → {self.decision_grid} 点网格，tail={self.decision_tail}，"
+                        f"floor={self.decision_floor}·cap，站表 {self.station_meta_path}）" if self.decision_point else ""))
+        return lines, res
+
     # ------------------------------------------------------------------ 协变量
     def _covariates(self, batch_dict: dict):
-        """→ (known [B,C,L+H] | None, past [B,C,L] | None)。"""
+        """→ (known [B,C,L+H] | None, past [B,C,L] | None)。列名经 resolve_col（精确 → 别名 → 大小写不敏感）。"""
         L, H = self.context_len, self.pred_len
         pf = []
         for hist_c, fut_c in self.past_future_cols:
-            if hist_c not in batch_dict or fut_c not in batch_dict:
+            hk, fk = self._key(batch_dict, hist_c), self._key(batch_dict, fut_c)
+            if hk is None or fk is None:
                 if (hist_c, fut_c) not in self._warned_pairs:
                     print(f"[timestral] 协变量对 {(hist_c, fut_c)} 在 batch 里缺列，本次推理跳过（只提示一次）")
                     self._warned_pairs.add((hist_c, fut_c))
                 continue
-            h = self._col(batch_dict, hist_c)[:, -L:]
-            f = self._col(batch_dict, fut_c)[:, :H]
+            h = self._col(batch_dict, hk)[:, -L:]
+            f = self._col(batch_dict, fk)[:, :H]
             pf.append(np.concatenate([h, f], axis=1))                           # [B, L+H]
-        po = [self._col(batch_dict, c)[:, -L:] for c in self.past_only_cols]    # [B, L]
+        po = [self._fcol(batch_dict, c)[:, -L:] for c in self.past_only_cols]   # [B, L]
         known = np.stack(pf, axis=1) if pf else None
         past = np.stack(po, axis=1) if po else None
         return known, past
@@ -424,7 +490,7 @@ class TransformersAdaptedM7Model(nn.Module):
         if self._backbone is None:
             raise RuntimeError("backbone未加载")
         dev = torch.device(self._backbone_device)
-        tgt = self._col(batch_dict, self.target_col)[:, -self.context_len:]     # [B, L]
+        tgt = self._fcol(batch_dict, self.target_col)[:, -self.context_len:]    # [B, L]
         known, past = self._covariates(batch_dict)
 
         chunks = []

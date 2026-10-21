@@ -16,6 +16,7 @@
 训练模型的构造必须从零起步：train.weights_path 改指向 out_dir 下从不写入的 .fresh/ 哨兵路径。"""
 from __future__ import annotations
 
+
 import argparse
 import contextlib
 import functools
@@ -34,7 +35,7 @@ try:
     from .features import station_cap_mw
     from .transformer_trainer import evaluate_model, build_training_args
     from .transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
-    from .data import _dataset_with_station_id, _check_presplit_dir
+    from .data import _dataset_with_station_id, _check_presplit_dir, report_inputs
     from .rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
     from . import _dist
 except ImportError:
@@ -43,7 +44,7 @@ except ImportError:
     from forecast_backbones.m8.features import station_cap_mw
     from forecast_backbones.m8.transformer_trainer import evaluate_model, build_training_args
     from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model, save_weights, load_weights
-    from forecast_backbones.m8.data import _dataset_with_station_id, _check_presplit_dir
+    from forecast_backbones.m8.data import _dataset_with_station_id, _check_presplit_dir, report_inputs
     from forecast_backbones.m8.rows import SHORT_ISSUE_TIME, scored_row_index, issue_grid_row_index, StationDaySampler, row_stations
     from forecast_backbones.m8 import _dist
 try:
@@ -55,6 +56,19 @@ except ImportError:
 
 WEIGHTS_FILE, CONFIG_FILE = "model.safetensors", "model_config.yaml"
 EARLY_STOP_METRICS = {"nanwang_after_pstar": True, "nrmse": False, "nanwang_ultra_proxy": True}   # 指标 → 是否越高越好
+
+
+from pipelines.forecasting.metrics import seen_unseen_scores as seen_unseen_scores
+from pipelines.forecasting.metrics import nrmse_pct as nrmse_pct
+from pipelines.forecasting.training import WeightEma as WeightEma
+from pipelines.forecasting.training import EmaCallback as EmaCallback
+from pipelines.forecasting.training import CheckpointCallback as CheckpointCallback
+from pipelines.forecasting.training import EvaluationCallback
+from pipelines.forecasting.training import ForecastTrainer as _M8Trainer
+from pipelines.forecasting.data import load_presplit as load_presplit
+from pipelines.forecasting.data import expand_parquets as expand_parquets
+from pipelines.forecasting.data import load_full as load_full
+from pipelines.forecasting.data import _refit_rows as _refit_rows
 
 
 def ultra_proxy_pct(res: pd.DataFrame) -> float:
@@ -94,43 +108,8 @@ def score_nanwang(model, ds_val, collate, cfg, res: pd.DataFrame | None = None) 
             res = evaluate_model(model, _subset(ds_val, idx), collate, cfg)
         finally:
             model.train(was)
-    if res.empty:
-        return float("nan"), pd.DataFrame(columns=TABLE_COLS), res
-    gccap = {model.station_meta.name(int(s)): station_cap_mw(model.station_meta, int(s)) for s in res["station_id"].unique()}   # 每站固定容量
-    sd = NanwangMetric().short_d1_daily(res, gccap)
-    name_to_id = {model.station_meta.name(int(s)): int(s) for s in res["station_id"].unique()}
-    if len(sd) == 0:
-        return float("nan"), pd.DataFrame(columns=TABLE_COLS), res
-    g = sd.groupby("station")["accuracy_pct"].agg(["mean", "count"]).reset_index()
-    table = pd.DataFrame({"station_id": g["station"].map(name_to_id).astype(int), "station": g["station"],
-                          "accuracy_pct": g["mean"].astype(float), "n_days": g["count"].astype(int)})
-    known = cfg["dataset"].get("known_stations")
-    table["seen"] = True if not known else table["station_id"].isin([int(s) for s in known])
-    # 诊断列：这站的打分行有多少走了退化几何（缺坐标）；这站打分行上的 nrmse
-    by_sid = {int(s): g for s, g in res.groupby("station_id")}
-    table["degraded_frac"] = table["station_id"].map(lambda s: float(by_sid[s]["degraded"].mean()) if "degraded" in res else 0.0).round(3)
-    table["nrmse_pct"] = table["station_id"].map(lambda s: nrmse_pct(by_sid[s])).round(2)
-    return float(sd["accuracy_pct"].mean()), table, res
-
-
-def seen_unseen_scores(table: pd.DataFrame) -> tuple[float, float, int]:
-    """逐站表 → (已见站站日均值, 未见站站日均值, 未见站数)；按 n_days 加权等于站日均值。"""
-    if table.empty or "seen" not in table:
-        return float("nan"), float("nan"), 0
-    def wmean(t):
-        return float((t["accuracy_pct"] * t["n_days"]).sum() / t["n_days"].sum()) if len(t) and t["n_days"].sum() else float("nan")
-    seen, unseen = table[table["seen"]], table[~table["seen"]]
-    return wmean(seen), wmean(unseen), int(len(unseen))
-
-
-def nrmse_pct(res: pd.DataFrame) -> float:
-    if res.empty:
-        return float("nan")
-    y = np.stack(res["observe_power_future"].to_numpy()).astype(float)
-    p = np.stack(res["observe_power_predict"].to_numpy()).astype(float)
-    r = (y - p) / res["cap"].to_numpy(float)[:, None]
-    ok = np.isfinite(r)
-    return float(100.0 * np.sqrt(np.mean(r[ok] ** 2))) if ok.any() else float("nan")
+    from pipelines.forecasting.metrics import score_nanwang_result
+    return score_nanwang_result(model, res, cfg)
 
 
 def score_nrmse(model, ds_val, collate, cfg, issue_every_min: int = 60) -> tuple[float, pd.DataFrame]:
@@ -146,104 +125,9 @@ def score_nrmse(model, ds_val, collate, cfg, issue_every_min: int = 60) -> tuple
 
 
 # ------------------------------------------------------------------ 回调
-class WeightEma:
-    """权重指数滑动平均（train.ema_decay）：每个优化步后 shadow ← d_n·shadow + (1−d_n)·θ，d_n = min(decay, (1+n)/(10+n))
-    （前几步 d 小，shadow 快速跟上随机初始化之后的权重）；浮点张量平均，其它缓冲直接拷贝。
-    applied(model) 期间模型权重换成 shadow（验证、存最优），退出复原。"""
-
-    def __init__(self, model: torch.nn.Module, decay: float):
-        self.decay, self.n, self.last_decay = float(decay), 0, float("nan")
-        if not 0.0 <= self.decay <= 1.0:
-            raise ValueError(f"train.ema_decay 须在 [0, 1]，得到 {decay!r}")
-        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
-
-    @torch.no_grad()
-    def update(self, model: torch.nn.Module) -> None:
-        self.n += 1
-        d = min(self.decay, (1.0 + self.n) / (10.0 + self.n))
-        self.last_decay = d
-        for k, v in model.state_dict().items():
-            s = self.shadow[k]
-            if s.dtype.is_floating_point:
-                s.mul_(d).add_(v.detach().to(s.device), alpha=1.0 - d)
-            else:
-                s.copy_(v.detach().to(s.device))
-
-    @contextlib.contextmanager
-    def applied(self, model: torch.nn.Module):
-        backup = {k: v.detach().clone() for k, v in model.state_dict().items()}
-        model.load_state_dict(self.shadow, strict=True)
-        try:
-            yield
-        finally:
-            model.load_state_dict(backup, strict=True)
-
-    def load_into(self, model: torch.nn.Module) -> None:
-        """把 shadow 永久写进模型（refit 的最终权重）。"""
-        model.load_state_dict(self.shadow, strict=True)
 
 
-class EmaCallback(TrainerCallback):
-    """每个优化步后更新 EMA；须排在 EvalCallback 前面（同一步的验证用更新后的 shadow）。"""
-
-    def __init__(self, ema: WeightEma, model: torch.nn.Module):
-        self.ema, self.model = ema, model
-
-    def on_step_end(self, args, state, control, **kwargs):
-        self.ema.update(self.model)
-        return control
-
-
-class CheckpointCallback(TrainerCallback):
-    """每 every 个优化步存一份自包含 checkpoint：<out>/checkpoints/step_XXXXX/{model.safetensors, model_config.yaml}。
-    model_config.yaml 的 run.out_dir 指向该目录本身，train.weights_path = ${run.out_dir}/model.safetensors，原地就能加载；
-    开了 EMA 存 EMA 权重（与最终权重同口径）。须排在 EmaCallback 后面（同一步存更新后的 shadow）。只在主进程调用。"""
-
-    def __init__(self, model: torch.nn.Module, out: Path, every: int, cfg_dump: dict, ema: "WeightEma | None" = None):
-        self.model, self.root, self.every, self.cfg_dump, self.ema = model, Path(out) / "checkpoints", int(every), cfg_dump, ema
-        self.saved: list[int] = []
-
-    def save(self, step: int) -> Path:
-        d = self.root / f"step_{int(step):05d}"
-        d.mkdir(parents=True, exist_ok=True)
-        if self.ema is not None:
-            with self.ema.applied(self.model):
-                save_weights(self.model, d / WEIGHTS_FILE)
-        else:
-            save_weights(self.model, d / WEIGHTS_FILE)
-        cfg = deep_merge(self.cfg_dump, {"run": {"out_dir": str(d.resolve())},
-                                         "train": {"weights_path": "${run.out_dir}/" + WEIGHTS_FILE}})
-        dump_config(cfg, d / CONFIG_FILE)
-        self.saved.append(int(step))
-        return d
-
-    def on_step_end(self, args, state, control, **kwargs):
-        step = int(state.global_step)
-        if step > 0 and step % self.every == 0 and step not in self.saved:
-            d = self.save(step)
-            print(f"[m8] checkpoint step {step} → {d}", flush=True)
-        return control
-
-
-class EvalCallback(TrainerCallback):
-    def __init__(self, model, ds_val, collate, cfg, best_path, patience: int, log_path, eval_every_steps=None, ema: WeightEma | None = None):
-        self.model, self.ds_val, self.collate, self.cfg, self.ema = model, ds_val, collate, cfg, ema
-        self.best_path, self.log_path, self.patience = Path(best_path), Path(log_path), int(patience)
-        self.eval_every_steps = int(eval_every_steps) if eval_every_steps else None
-        es = cfg["train"]["early_stop"]
-        self.metric = str(es.get("metric", "nanwang_after_pstar"))
-        if self.metric not in EARLY_STOP_METRICS:
-            raise ValueError(f"train.early_stop.metric={self.metric!r} 未知，可选 {sorted(EARLY_STOP_METRICS)}")
-        self.higher_better = EARLY_STOP_METRICS[self.metric]
-        self.issue_every_min = int(es.get("nrmse_issue_every_min", 60))
-        self.smooth_k = int(es.get("smooth_k", 1) or 1)
-        if self.smooth_k < 1:
-            raise ValueError(f"train.early_stop.smooth_k 须 ≥ 1，得到 {self.smooth_k}")
-        self.best = -np.inf if self.higher_better else np.inf
-        self.best_step, self.bad_evals, self.history, self.raw_scores = None, 0, [], []
-        self.last_unseen = None
-        self.last_extra: dict = {}
-
+class EvalCallback(EvaluationCallback):
     def _score(self) -> float:
         self.model._progress_desc = "[m8] 验证"
         self.last_extra = {}
@@ -263,151 +147,8 @@ class EvalCallback(TrainerCallback):
         finally:
             self.model._progress_desc = None
 
-    def _record(self, step: int, epoch: float, score: float, loss: float | None) -> bool:
-        """score = 本次原始验证分；best / 早停按最近 smooth_k 次原始分（非有限的不算）的均值判。"""
-        self.raw_scores.append(float(score))
-        window = [s for s in self.raw_scores[-self.smooth_k:] if np.isfinite(s)]
-        sel = float(np.mean(window)) if window else float("nan")
-        better = sel > self.best if self.higher_better else sel < self.best
-        if np.isfinite(sel) and better:
-            self.best, self.best_step, self.bad_evals = float(sel), int(step), 0
-            save_weights(self.model, self.best_path)
-        else:
-            self.bad_evals += 1
-        self.history.append({"step": int(step), "epoch": float(epoch), self.metric: float(score),
-                             **({f"{self.metric}_smooth": sel} if self.smooth_k > 1 else {}), "train_loss": loss,
-                             **({"nanwang_unseen": self.last_unseen} if self.last_unseen is not None else {}),
-                             **{k: (float(v) if v == v else None) for k, v in self.last_extra.items()},
-                             "best": self.best, "bad_evals": self.bad_evals, "time": time.time()})
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.log_path.write_text(json.dumps({"history": self.history, "best": self.best, "best_step": self.best_step,
-                                             "patience": self.patience, "metric": self.metric, "smooth_k": self.smooth_k,
-                                             "ema_decay": None if self.ema is None else self.ema.decay,
-                                             "higher_better": self.higher_better}, indent=2, ensure_ascii=False), encoding="utf-8")
-        sm = f" smooth{self.smooth_k}={sel:.4f}" if self.smooth_k > 1 else ""
-        print(f"[m8] step {step} (epoch {epoch:.3g}): {self.metric}={score:.4f}{sm} best={self.best:.4f}@step {self.best_step} "
-              f"bad={self.bad_evals}/{self.patience}", flush=True)
-        return self.bad_evals >= self.patience
-
-    def _evaluate(self, state, control):
-        loss = next((h["loss"] for h in reversed(state.log_history) if "loss" in h), None)
-        if _dist.is_main():
-            with (self.ema.applied(self.model) if self.ema is not None else contextlib.nullcontext()):   # 验证与存最优都用 EMA 权重
-                stop = self._record(int(state.global_step or 0), float(state.epoch or 0.0), self._score(), loss)
-        else:
-            stop = False
-        if _dist.broadcast_from_main(stop) and control is not None:
-            control.should_training_stop = True
-
-    def on_step_end(self, args, state, control, **kwargs):
-        every = self.eval_every_steps
-        if every and (state.global_step % every == 0 or state.global_step >= state.max_steps):
-            self._evaluate(state, control)
-        return control
-
-    def on_epoch_end(self, args, state, control, **kwargs):
-        if not self.eval_every_steps:
-            self._evaluate(state, control)
-        return control
-
-
-class _M8Trainer(Trainer):
-    def __init__(self, *a, sampling: str = "random", station_col: str = "station_id", ts_col: str = "timestamp_win", **kw):
-        super().__init__(*a, **kw)
-        self._sampling, self._station_col, self._ts_col = sampling, station_col, ts_col
-
-    def _get_train_sampler(self, *a, **kw):          # transformers>=4.46 多传一个 dataset 位置参数，4.40 不传：两种签名都接
-        if self._sampling == "station_day":
-            return StationDaySampler(self.train_dataset, self._station_col, self._ts_col, seed=self.args.seed)
-        return super()._get_train_sampler(*a, **kw)
-
 
 # ------------------------------------------------------------------ 数据
-def load_presplit(splits_dir, cfg: dict, station_meta, scratch_dir, reuse: bool = False, refit: bool = False):
-    """refit=True：全量重训，train.parquet ∪ valid.parquet 全部当训练行（valid 可以是 0 行），不建验证集（返回 ds_val=None）。"""
-    import pyarrow.parquet as pq
-    d = _check_presplit_dir(splits_dir, need_cal=False)
-    man = json.loads((d / "split_manifest.json").read_text(encoding="utf-8"))
-    load = functools.partial(_dataset_with_station_id, cfg=cfg, station_meta=station_meta, scratch_dir=scratch_dir, reuse=reuse)
-    if refit:
-        ds_train = load([str(_refit_rows(d, scratch_dir, reuse))])
-        if len(ds_train) == 0:
-            raise ValueError(f"{d} 的 train ∪ valid 为空")
-        return ds_train, None, man
-    if pq.read_metadata(d / "valid.parquet").num_rows == 0:
-        raise ValueError(f"{d} 的 valid.parquet 为 0 行：这是全量重训切分，训练请加 --refit（不验证、不早停、固定步数）")
-    ds_train, ds_val = load([str(d / "train.parquet")]), load([str(d / "valid.parquet")])
-    if len(ds_train) == 0 or len(ds_val) == 0:
-        raise ValueError(f"{d} 的 train/valid 为空")
-    return ds_train, ds_val, man
-
-
-def report_inputs(model, columns, verbose: bool = True) -> list[list[str]]:
-    """训练开始前核对"配置要的列 ↔ 训练数据里的列"并打进日志；插值 / future_only 列缺了直接报错。
-    返回训练数据里实际有的 past_future 对（写进 model_config.yaml 的 features.cov_present，推理时据此判断 NWP 缺列兜底）。"""
-    lines, res = model.fe.input_report(columns)
-    if verbose:
-        print("[m8] ======== 输入列核对（配置列 → 训练数据列；✗ = 数据里没有）========")
-        for ln in lines:
-            print(f"[m8]   {ln}")
-    missing_fo = [c for c, _ in model.fe.future_only if res.get(c) is None]
-    if missing_fo:
-        raise ValueError(f"训练数据里没有插值 / future_only 列 {missing_fo}：检查 features.hint_col（或 train_m8.sh --hint_col）；"
-                         f"数据列 {sorted(map(str, columns))}")
-    present = [[h, f] for h, f in model.fe.pairs if res.get(h) and res.get(f)]
-    if verbose:
-        absent = [[h, f] for h, f in model.fe.pairs if [h, f] not in present]
-        print(f"[m8]   → 实际使用的 NWP 协变量对 {len(present)}/{len(model.fe.pairs)}：{present}"
-              + (f"；缺列、通道恒 0：{absent}" if absent else ""))
-        if not present and model.fe.pairs:
-            print("[m8]   ⚠️ 一对 NWP 协变量都没对上：模型等于不看天气预报，请检查 features.past_future 的列名", flush=True)
-    return present
-
-
-def expand_parquets(items) -> list[str]:
-    """目录 → 其下全部 *.parquet（递归，train/date=2026-06-01/data_0.parquet 这种分区目录也行）；通配符 → 展开；文件 → 原样。
-    按路径排序，去重。"""
-    import glob
-    out: list[str] = []
-    for it in items or ():
-        p = Path(str(it))
-        if p.is_dir():
-            out += sorted(str(f) for f in p.rglob("*.parquet") if not any(part.startswith(".") for part in f.relative_to(p).parts))
-        else:
-            hits = sorted(glob.glob(str(it)))
-            if not hits:
-                raise FileNotFoundError(f"--train-parquet {it!r} 没有匹配到文件")
-            out += hits
-    return sorted(dict.fromkeys(out))
-
-
-def load_full(train_parquet, cfg: dict, station_meta, scratch_dir, reuse: bool = False):
-    """全量训练：现成的训练 parquet（文件夹 / 通配符 / 文件列表，一站一个文件也行）全部当训练行，一行不删、没有验证集。
-    站列是站名文本时按 station_meta 映射成整数站号（_dataset_with_station_id）。返回 (ds_train, None, manifest)。"""
-    files = expand_parquets(train_parquet)
-    if not files:
-        raise FileNotFoundError(f"--train-parquet {train_parquet!r} 下没有 parquet 文件")
-    ds = _dataset_with_station_id(files, cfg, station_meta, scratch_dir=scratch_dir, reuse=reuse)
-    if len(ds) == 0:
-        raise ValueError(f"--train-parquet {files} 里没有行")
-    man = {"generated_by": "forecast_backbones.m8.train --train-parquet", "plan": None, "train_parquet": files}
-    return ds, None, man
-
-
-def _refit_rows(d: Path, scratch_dir, reuse: bool) -> Path:
-    """train.parquet ∪ valid.parquet（去掉 split_block 列）→ scratch_dir/refit_rows.parquet；valid 为 0 行时直接用 train.parquet。
-    reuse=True（多卡的非主进程）：主进程已写好就直接用。"""
-    import pyarrow.parquet as pq
-    if pq.read_metadata(d / "valid.parquet").num_rows == 0:
-        return d / "train.parquet"
-    out = Path(scratch_dir) / "refit_rows.parquet"
-    if reuse and out.exists():
-        return out
-    tr = pd.read_parquet(d / "train.parquet")
-    va = pd.read_parquet(d / "valid.parquet").drop(columns=["split_block"], errors="ignore")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    pd.concat([tr, va], ignore_index=True).to_parquet(out, index=False)
-    return out
 
 
 def _summary_row(cfg, tag, out, model, best_step, n_evals, minutes, n_val, n_train,
@@ -574,7 +315,7 @@ def train_m8(config_path, splits_dir=None, out_dir=None, max_steps=None, tag: st
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="M8 PVRex 训练")
-    ap.add_argument("--config", default="forecast_backbones/m8/config/configs.yaml")
+    ap.add_argument("--config", default="forecast_backbones/m8/config/j1_final2.yaml")
     ap.add_argument("--splits-dir", default=None, help="pipelines.time_splits 落好的目录（train/valid.parquet + split_manifest.json）")
     ap.add_argument("--train-parquet", nargs="+", default=None,
                     help="现成的训练 parquet：文件夹 / 通配符 / 文件列表，全量训练、不切块、不剔除行、无验证集（等于 --refit）。与 --splits-dir 二选一")

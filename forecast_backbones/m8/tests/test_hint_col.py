@@ -8,7 +8,7 @@ from forecast_backbones.m8.solar import StationMeta
 from forecast_backbones.m8.transformer_models import TransformersAdaptedM8Model
 from forecast_backbones.m8.tests.conftest import ROOT
 
-V = ROOT / "forecast_backbones/m8/config/variants"
+V = ROOT / "forecast_backbones/m8/config"
 
 
 def _fb(small_cfg, features):

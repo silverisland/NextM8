@@ -166,8 +166,9 @@ def test_residual_variant_is_identity_shift_of_hint(small_cfg, batch):
 @pytest.mark.parametrize("name", ["j1_final2", "k3_resid"])
 def test_timesfm_variant_files_train_step(small_cfg, batch, name):
     from forecast_backbones.m8.tests.conftest import ROOT
-    cfg = load_config(str(ROOT / "forecast_backbones/m8/config/variants" / f"{name}.yaml"))
+    cfg = load_config(str(ROOT / "forecast_backbones/m8/config" / f"{name}.yaml"))
     cfg["dataset"]["station_meta"] = small_cfg["dataset"]["station_meta"]
+    cfg["dataset"]["station_meta_cols"] = None                                                      # 变体写的是 info.csv 表头，合成站表是标准列名
     cfg["model"].update(small_cfg["model"])
     m = build_model(model_name="m8", model_config=cfg); m.train()
     bd = {**batch["batch_dict"], cfg["features"]["hint_col"]: batch["batch_dict"]["timesfm_predict"]}   # 合成数据的提示列改成变体声明的插值列名
@@ -179,7 +180,7 @@ def test_j1_final2_recipe():
     """j1_final2 = 退火调度 + p* 分段选点 + 晴空出力比 + 历史包络 + timesfm3 未来提示（hint_dropout 0.3），默认骨干。"""
     from forecast_backbones.m8.config import DEFAULT_CFG
     from forecast_backbones.m8.tests.conftest import ROOT
-    j1 = load_config(str(ROOT / "forecast_backbones/m8/config/variants/j1_final2.yaml"))
+    j1 = load_config(str(ROOT / "forecast_backbones/m8/config/j1_final2.yaml"))
     assert j1["features"]["derived"]["clear_sky_ratio"]["enabled"] and j1["features"]["derived"]["history_envelope"]["enabled"]
     assert j1["features"]["hint_col"] == "timesfm3" and j1["train"]["hint_dropout"] == 0.3 and not j1["features"]["hint_residual"]
     sch = j1["train"]["schedule"]
@@ -192,7 +193,7 @@ def test_j1_final2_recipe():
 def test_all_variant_configs_load(small_cfg):
     import glob
     from forecast_backbones.m8.tests.conftest import ROOT
-    files = sorted(glob.glob(str(ROOT / "forecast_backbones/m8/config/variants/*.yaml")))
+    files = sorted(glob.glob(str(ROOT / "forecast_backbones/m8/config/*.yaml")))
     assert {Path(f).stem for f in files} == {"j1_final2", "k1_hint01", "k2_hint00", "k3_resid", "k4_lr2e4", "k5_lr5e4", "k6_regular"}
     tags = [load_config(f)["run"]["tag"] for f in files]
     assert len(set(tags)) == len(tags)

@@ -10,8 +10,8 @@
 权重：train.weights_path 存在即在构造时严格加载（推理）；训练入口把它改指向从不写入的哨兵路径，保证从零起步。"""
 from __future__ import annotations
 
+
 import sys
-import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -41,28 +41,9 @@ except ImportError:
     from forecast_backbones.m8.losses import pinball_loss
 
 
-def load_station_meta(path, cols: dict | None = None) -> StationMeta:
-    """dataset.station_meta（任意路径、任意文件名）+ dataset.station_meta_cols（列名映射，见 StationMeta.apply_cols）。
-    路径不存在直接报错；只有仓库内的默认相对路径（forecast_backbones/...）在别的工作目录下解析失败时才回退到 m8 自带那份。"""
-    p = Path(path)
-    if not p.exists():
-        fallback = Path(__file__).parent / "station_meta.csv"
-        if not p.is_absolute() and p.parts[:1] == ("forecast_backbones",) and fallback.exists():
-            warnings.warn(f"station_meta {p} 不存在（相对当前工作目录解析失败）：回退到 {fallback}")
-            return StationMeta.from_csv(fallback, cols)
-        raise FileNotFoundError(f"station_meta {p} 不存在（dataset.station_meta；相对路径按当前工作目录解析）")
-    return StationMeta.from_csv(p, cols)
-
-
-def save_weights(model: nn.Module, path) -> None:
-    from safetensors.torch import save_file
-    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    save_file({k: v.detach().cpu().contiguous() for k, v in model.state_dict().items()}, str(path))
-
-
-def load_weights(model: nn.Module, path) -> None:
-    from safetensors.torch import load_file
-    model.load_state_dict(load_file(str(path)), strict=True)
+from pipelines.forecasting.stations import load_station_meta as load_station_meta
+from pipelines.forecasting.checkpoints import save_weights as save_weights
+from pipelines.forecasting.checkpoints import load_weights as load_weights
 
 
 class TransformersAdaptedM8Model(nn.Module):
@@ -108,6 +89,15 @@ class TransformersAdaptedM8Model(nn.Module):
     def set_known_stations(self, station_ids) -> list[int]:
         """训练入口调用：记录训练集里的站号，推理时名单外的站走未知站槽。同步进 cfg（随 model_config.yaml 落盘）。"""
         ids = sorted({int(s) for s in station_ids})
+        n = int(self.fe.n_slots)
+        if n > 0:                                                  # 槽位 = 站号 % n_station_slots + 1：南网 plantid 会超过 4096，相差 n 的两站共用一个嵌入
+            by_slot: dict[int, list[int]] = {}
+            for s in ids:
+                by_slot.setdefault(s % n, []).append(s)
+            clash = [v for v in by_slot.values() if len(v) > 1]
+            if clash:
+                raise ValueError(f"训练站 {clash[:5]} 的站号对 features.static.n_station_slots={n} 取模后落在同一个嵌入槽位："
+                                 f"把 n_station_slots 调到大于最大站号 {max(ids)}（如 {1 << max(ids).bit_length()}）再训")
         self.cfg["dataset"]["known_stations"] = ids
         self.fe.known_stations = np.array(ids, dtype=np.int64) if ids else None
         return ids

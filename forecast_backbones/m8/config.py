@@ -3,45 +3,12 @@
 """M8 配置：yaml → dict，与 DEFAULT_CFG 深合并，解析 ${run.out_dir}。deep_merge / interpolate / dump_config 自带（2026-10-13 起不再引用 m6）。"""
 from __future__ import annotations
 
+
 import copy
 import json
 from pathlib import Path
 
 import yaml
-
-
-def deep_merge(base: dict, override: dict) -> dict:
-    """dict 递归合并；非 dict（含 list）整体替换。"""
-    out = copy.deepcopy(base)
-    for k, v in (override or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = deep_merge(out[k], v)
-        else:
-            out[k] = copy.deepcopy(v)
-    return out
-
-
-def interpolate(cfg: dict) -> dict:
-    """把字符串里的 ${run.out_dir} 替换成 cfg['run']['out_dir']。只支持这一个占位符。"""
-    out_dir = str(cfg.get("run", {}).get("out_dir", ""))
-
-    def _walk(x):
-        if isinstance(x, dict):
-            return {k: _walk(v) for k, v in x.items()}
-        if isinstance(x, list):
-            return [_walk(v) for v in x]
-        if isinstance(x, str) and "${run.out_dir}" in x:
-            return x.replace("${run.out_dir}", out_dir)
-        return x
-
-    return _walk(cfg)
-
-
-def dump_config(cfg: dict, path) -> None:
-    """配置写成 yaml（元组转列表，键序不变）。"""
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    plain = json.loads(json.dumps(cfg, ensure_ascii=False, default=str))
-    Path(path).write_text(yaml.safe_dump(plain, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
 __all__ = ["DEFAULT_CFG", "load_config", "deep_merge", "interpolate", "dump_config", "raw_override", "future_only_cols"]
@@ -53,6 +20,8 @@ DEFAULT_CFG: dict = {
         "label_col": "observe_power_future",
         "ts_col": "timestamp_win",
         "station_id_col": "station_id",
+        # 训练数据根目录（南网 m8_train_cli.py 读其下 train/**/*.parquet；--src-dir / --train-path 可覆盖）。家里走切分目录，不用它
+        "src_dir": None,
         "station_meta": "forecast_backbones/m8/station_meta.csv",   # M8 自己的站表（station_id, station, lat, lon, alt_m, cap_mw）；与 m6 那份内容相同但各自维护
         # 站表列名映射 {内部名: 你表里的列名}，表头随意；没写的按内部名找；lat/lon/alt_m 可写 null 表示表里没有。
         # 例：{station_id: 场站编号, station: 场站名称, lat: 纬度, lon: 经度, alt_m: null, cap_mw: 装机容量}
@@ -67,11 +36,11 @@ DEFAULT_CFG: dict = {
     "features": {
         # (历史列, 未来列) 对；两列都在 batch_dict 里才用，缺列只提示一次并跳过（该通道为 0）。
         # 列名大小写不敏感（2026-10-19）：线上 / 新训练数据是大写 general_GHI / general_TEMP，这里写小写也能对上（见 col_aliases）
+        # 2026-10-20 删掉 Solargis 两对（GHI_solargis / temp_solargis）：南网训练数据没有；线上 multi_infer 又把 general_* 抄成
+        #   *_SOLARGIS 列，留着它们训练时恒 0、线上却被喂进 general 的值。旧 checkpoint 的 model_config.yaml 自带四对，照常加载
         "past_future": [
             ["general_ghi", "general_ghi_predict"],
             ["general_temp", "general_temp_predict"],
-            ["GHI_solargis", "ghi_solargis_predict"],
-            ["temp_solargis", "temp_solargis_predict"],
         ],
         "past_only": [],
         # 只有未来段的"提示"通道（如 TimesFM 单变量预测 timesfm_predict）：历史段恒 0，未来段按 scale 归一；
@@ -156,13 +125,10 @@ DEFAULT_CFG: dict = {
 }
 
 
-def raw_override(config_path) -> dict:
-    """yaml 路径 / dict / None → 尚未合并、未插值的 override dict。"""
-    if config_path is None:
-        return {}
-    if isinstance(config_path, dict):
-        return config_path
-    return yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+from pipelines.forecasting.config import deep_merge as deep_merge
+from pipelines.forecasting.config import interpolate as interpolate
+from pipelines.forecasting.config import dump_config as dump_config
+from pipelines.forecasting.config import raw_override as raw_override
 
 
 def normalize_future_only(entries) -> list[dict]:

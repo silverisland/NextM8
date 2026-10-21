@@ -84,6 +84,10 @@ F_SERIES = ["f1_final", "f2_lr5e5", "f3_lr2e4", "f4_drop01", "f5_wd01"]
 
 @pytest.mark.parametrize("name,check", [
     ("z0_zeroshot", lambda c: c["finetune"]["enabled"] is False and c["finetune"]["inference_path"] == "torch"),
+    ("z1_zeroshot_pstar", lambda c: c["finetune"]["enabled"] is False and c["finetune"]["inference_path"] == "torch"
+                                    and c["decision"]["point"]["default"] == "p_star" and not c["decision"]["physics"]["night_zero"]
+                                    and c["decision"]["physics"]["clear_sky_cap_ratio"] is None
+                                    and c["dataset"]["station_meta"] == "forecast_backbones/m5/info.csv"),
     # f 系列：s7_fh_const（冻结 head + 常数 lr）+ p*，每个只差一处超参
     ("f1_final", lambda c: c["finetune"]["unfreeze_output_head"] is False and c["train"]["schedule"]["lr_scheduler"] == "constant"
                            and c["train"]["schedule"]["lr"] == 1e-4 and c["train"]["ema_decay"] is None
@@ -123,6 +127,16 @@ def test_f_series_is_same_model_one_hyperparam_apart(name, changed):
     assert [d for d in _diff(a, b) if not d.startswith(("run.", "eval.", "train.weights_path"))] == changed
 
 
+def test_z1_is_z0_plus_pstar():
+    """z1_zeroshot_pstar = z0_zeroshot + decision/d2_pstar_point：除 run 段与站表位置（z1 自带线上 info.csv）外逐键相同。"""
+    from forecast_backbones.m5.config import deep_merge, load_config
+    z0 = yaml.safe_load((M5 / "config" / "z0_zeroshot.yaml").read_text(encoding="utf-8"))
+    d2 = yaml.safe_load((M5 / "config" / "decision" / "d2_pstar_point.yaml").read_text(encoding="utf-8"))
+    a, b = load_config(deep_merge(z0, d2)), load_config(str(M5 / "config" / "z1_zeroshot_pstar.yaml"))
+    assert [d for d in _diff(a, b) if not d.startswith(("run.", "eval.", "train.weights_path"))] == \
+        ["dataset.station_meta", "dataset.station_meta_cols"]
+
+
 def test_decision_yaml_only_touches_decision():
     from forecast_backbones.m5.config import load_config
     raw = yaml.safe_load((M5 / "config" / "decision" / "d2_pstar_point.yaml").read_text(encoding="utf-8"))
@@ -136,5 +150,5 @@ def test_configs_yaml_stays_zero_shot():
 
 def test_every_variant_yaml_is_covered_by_a_test():
     names = {p.stem for p in (M5 / "config").glob("*.yaml")} - {"configs"}       # configs.yaml = 线上零样本（legacy）配置
-    covered = {"z0_zeroshot", *F_SERIES, "s3_c1_envelope", "s3_c1_envelope_zs"}
+    covered = {"z0_zeroshot", "z1_zeroshot_pstar", *F_SERIES, "s3_c1_envelope", "s3_c1_envelope_zs"}
     assert names == covered, names ^ covered

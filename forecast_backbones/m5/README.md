@@ -12,6 +12,16 @@
 配置（2026-10-20 起同 M8 平铺）：`config/*.yaml` = 各配方，只写与 `config.py` 的 `DEFAULT_CFG` 不同的字段；`config/decision/` = 只动决策层的 yaml；
 `config/configs.yaml` = 线上零样本（legacy，不要拿来训练；`train_shell/train_script.py`、`eval_pretrain.py` 按这个路径找）。
 
+三种用法各一份配置（2026-10-21）：
+
+| 配置 | 微调 | 上报点 | 站表 | 线上 | 家里 |
+|---|---|---|---|---|---|
+| `config/configs.yaml` | 无 | 中位数（legacy，无决策层） | 不读 | 原有 multi_infer（m5_0） | `eval_pretrain.sh` |
+| `config/z1_zeroshot_pstar.yaml` | 无 | p*（无晴空上限、夜间不归零） | info.csv（只用容量 + 站名映射） | 模板 `M5_CONFIG` 指到它（m5_2） | `z0_zeroshot` run + `eval_m5.sh --point p_star` |
+| `config/f*.yaml`（f1_final 等） | LoRA | p* | info.csv | 模板 `M5_CONFIG` 指到训练产物的 `model_config.yaml`（m5_1） | `train_m5_variants.sh` + `eval_m5.sh` |
+
+p* 一定要装机容量（权重下限 0.2·cap，与南网考核分母同一个数），所以零样本 + p* 也要站表；经纬度不用。
+
 基线（D8：站点几何默认关）：输入只有 ghi、温度；决策层只钳容量、不加晴空上限；点预测取中位数。
 零样本 `z0_zeroshot` 与 LoRA run 只差 LoRA 权重，summary 里 `gain = nanwang_short_D+1 − nanwang_zeroshot`。
 
@@ -24,7 +34,8 @@
 | `f4_drop01` | f1 + LoRA dropout 0.1 | 同一模型，调正则 |
 | `f5_wd01` | f1 + weight_decay 0.1 | 同一模型，调正则 |
 | `s3_c1_envelope` / `_zs` | f1 + 功率历史日形包络通道（训练 / 零样本） | 输入多一条通道 = 另一个模型，家里先与 f1 成对比 |
-| `z0_zeroshot` | 不训练 | 零样本参照 |
+| `z0_zeroshot` | 不训练 | 零样本参照（中位数） |
+| `z1_zeroshot_pstar` | 不训练，p* 选点，自带线上 info.csv | 零样本 + p*：线上模板直接用；= `z0_zeroshot` + `d2_pstar_point`（测试守住） |
 | `decision/d2_pstar_point` | 只改点预测为 p* | 给 p* 之前训的 run 不重训改决策 |
 
 f 系列每个 yaml 都带南网训练设置：`dataset.src_dir`、列名（`timestamp_win / observe_power / observe_power_future /
@@ -72,6 +83,10 @@ CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 -- m5_train_cli.py 
   `train.optim`（LoRA+ / head_lr / adapter_lr）、`finetune.init_from`。
 
 ## 线上推理模板（`nanwang_online/eval_scripts_template/m5/single_model_scene_infer_m5.py`）
+
+`M5_CONFIG` 一行切换：LoRA = 训练产物目录里的 `model_config.yaml`（同目录 `model.safetensors`，`finetune.enabled` 为真时加载并断言
+`weights_loaded`）；零样本 + p* = 仓库里的 `config/z1_zeroshot_pstar.yaml`（不加载权重）。`M5_OUT_TAG` 跟着改输出表名。
+原始零样本（`configs.yaml`，legacy）不走本模板。
 
 照 M8 模板写，差别标 `[M5 适配]`：不做 TSFM 预推理（M5 本身就是 TimesFM；M8 的 `tsfm_predict` 那一路保持零样本 M5，不要换成本模型）；
 显式加载 LoRA 权重并断言 `weights_loaded`（否则安静退化成零样本）；TimesFM-3 底座路径从线上零样本 M5 的 `model_config.yaml` 取；

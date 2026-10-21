@@ -4,7 +4,7 @@ from forecast_backbones.m8.config import load_config
 from forecast_backbones.m8.evaluate import decision_override
 from forecast_backbones.m8.tests.conftest import ROOT
 
-V = ROOT / "forecast_backbones/m8/config/variants"
+V = ROOT / "forecast_backbones/m8/config"
 D = ROOT / "forecast_backbones/m8/config/decision"
 EXPECTED = {
     "k1_hint01":  {"train.hint_dropout": 0.1},

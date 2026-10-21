@@ -1,0 +1,19 @@
+# 192 steps after issue time; at 10:00, D+1 is [55:151].
+run: {model_name: m4_rum, tag: rum, out_dir: runs/m4_rum/rum, seeds: [0]}
+dataset:
+  station_meta: pipelines/forecasting/assets/info.csv
+  station_meta_cols:
+    station_id: plantid
+    station: plant_pointname
+    lat: LATITUDE
+    lon: LONGITUDE
+    alt_m: null
+    cap_mw: GCCAPACITY
+features:
+  hint_col: timesfm3
+  col_aliases: {timesfm3: [tsfm_predict]}
+train:
+  schedule:
+    batch_size: 64  # Per GPU; two GPUs give a global batch size of 128.
+    precision: fp32  # fp32 / fp16 / bf16 (requires hardware support)
+# Other defaults are defined in config.py. No residual / gate / station embedding.

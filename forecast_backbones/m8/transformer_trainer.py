@@ -7,6 +7,7 @@ p_star, median, night, elev_deg, p_clear, var_bin, var_signal, degraded, q_0.1..
 M8_build_training_args：框架契约（train_script.build_train_args）。"""
 from __future__ import annotations
 
+
 import inspect
 import sys
 from pathlib import Path
@@ -25,6 +26,9 @@ except ImportError:
     sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
     from forecast_backbones.m8.config import load_config
     from forecast_backbones.m8.decision import quantile_cols
+
+
+from pipelines.forecasting.training import build_training_args as build_training_args
 
 
 def _np(x):
@@ -71,26 +75,6 @@ def evaluate_model(model, test_dataset, HF_collate_fn, config) -> pd.DataFrame:
                     rec[c] = q[i, :, j].astype(np.float32)
                 rows.append(rec)
     return pd.DataFrame(rows)
-
-
-def build_training_args(cfg: dict, out_dir, max_steps=None) -> TrainingArguments:
-    """max_steps：None = 用 train.schedule.max_steps；0（或配置里 null）= 不限步数，按 epochs_max 训。"""
-    s = cfg["train"]["schedule"]
-    steps = s.get("max_steps") if max_steps is None else max_steps
-    cuda = torch.cuda.is_available()
-    bf16 = str(s.get("precision", "fp32")) == "bf16" and cuda and torch.cuda.is_bf16_supported()
-    fp16 = str(s.get("precision", "fp32")) == "fp16" and cuda
-    eval_kw = "eval_strategy" if "eval_strategy" in inspect.signature(TrainingArguments.__init__).parameters else "evaluation_strategy"
-    return TrainingArguments(
-        output_dir=str(Path(out_dir) / "hf"), per_device_train_batch_size=int(s["batch_size"]),
-        num_train_epochs=float(s["epochs_max"]), learning_rate=float(s["lr"]), weight_decay=float(s["weight_decay"]),
-        max_grad_norm=float(s["grad_clip"]), bf16=bf16, fp16=fp16, use_cpu=not cuda,
-        lr_scheduler_type="cosine", warmup_steps=int(s.get("warmup_steps", 0)),
-        save_strategy="no", logging_steps=int(s.get("logging_steps", 50)), report_to=[],
-        remove_unused_columns=False, disable_tqdm=not bool(s.get("progress_bar", True)), dataloader_pin_memory=cuda,
-        dataloader_num_workers=int(s.get("num_workers", 0)),
-        max_steps=(int(steps) if steps else -1), seed=int((cfg["run"].get("seeds") or [0])[0]),
-        ddp_timeout=7200, **{eval_kw: "no"})
 
 
 def M8_build_training_args(model_config, result_dir, max_steps=None):

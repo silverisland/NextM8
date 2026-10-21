@@ -67,7 +67,7 @@ yaml.safe_dump(cfg, open(dst, "w", encoding="utf-8"), allow_unicode=True, sort_k
 print(f"[{dst}] decision = {cfg.get('decision')}")
 EOF
   echo "===== 变体 $v ====="
-  MODEL=m7 CKPT_DIR="$d" OUT_DIR="$d/metrics_ens" bash "${SCRIPT_DIR}/eval_pretrain.sh" || FAIL=$(( FAIL + 1 ))
+  MODEL=m7 POINT= CKPT_DIR="$d" OUT_DIR="$d/metrics_ens" bash "${SCRIPT_DIR}/eval_pretrain.sh" || FAIL=$(( FAIL + 1 ))   # 上报点只由变体 yaml 决定
 done
 
 # 汇总：每变体各指标的站平均

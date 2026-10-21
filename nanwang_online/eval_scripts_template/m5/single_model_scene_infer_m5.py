@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 # nanwang_online/eval_scripts_template/m5/single_model_scene_infer_m5.py
-# 线上单模型场景推理脚本（站级 / 省级 × 短期 / 超短期）—— M5 LoRA 微调版（f1_final 等，m5_train_cli.py 训出来的 checkpoint）。
+# 线上单模型场景推理脚本（站级 / 省级 × 短期 / 超短期）—— M5 full 模式：LoRA 微调版（f1_final 等，m5_train_cli.py 训出来的 checkpoint）
+# 或零样本 + p*（config/z1_zeroshot_pstar.yaml），由 M5_CONFIG 一行切换（2026-10-21）。原始零样本（config/configs.yaml，中位数）
+# 走线上原有的 multi_infer，不用本模板。
 # 照 eval_scripts_template/m8/single_model_scene_infer_m8.py 写（读数据、气象聚合、异常检测、选对象、写 DS 表逐行相同），
 # 与 M8 模板的差别都标了 [M5 适配]：
 #   1. 不需要 TSFM 预推理：M5 本身就是 TimesFM-3（M8 的 tsfm_predict 插值列来自零样本 M5，那一路不要换成本模型——
 #      M8 训练时看到的是零样本 TimesFM 的预测）。
-#   2. 权重：显式从 checkpoint 目录加载并断言加载成功（weights_loaded）。model_config.yaml 里的 train.weights_path 是训练机上的
-#      路径，不覆盖就找不到权重，M5 会安静地退化成零样本。
+#   2. 权重：LoRA 配置（finetune.enabled）显式从 M5_CONFIG 同目录的 model.safetensors 加载并断言加载成功（weights_loaded）。
+#      model_config.yaml 里的 train.weights_path 是训练机上的路径，不覆盖就找不到权重，M5 会安静地退化成零样本。
+#      零样本 + p* 配置（finetune.enabled: false）没有权重，不加载。
 #   3. TimesFM-3 底座权重目录从线上零样本 M5 的配置（algo/nuoya_algo/forecast_backbones/m5/model_config.yaml）取：
 #      checkpoint 里的 timesfm3.checkpoint 是训练机上的路径。
 #   4. 站表：dataset.station_meta 指向线上站点信息表（info.csv 表头自动识别，容量只取 GCCAPACITY，与训练同口径）。
@@ -54,8 +57,15 @@ predict_type = 'ultra_short'  # ultra_short, short
 area = 'province_guangxi_solar'
 train_data_saved_dir = '/home/wangding_hw/nuoya/data/train'  # DS层输入的目录，子目录就是每个具体的表
 infer_out_saved_dir = '/home/wangding_hw/nuoya/data/infer'  # DS临时输出表的目录，子目录就是每个具体的表
-# [M5 适配] m5_1 = LoRA 微调版（m5_0 留给线上零样本 M5）；表名按线上约定改
-out_table_name = f'ds_out_m5_1_{PREDICT_OBJECT}_{predict_type}'  # 输出表的具体表名
+# [M5 适配] 选配置（只改这一处；LoRA / 零样本由配置里的 finetune.enabled 自动判断）：
+#   LoRA 微调版：m5_train_cli.py 的产物目录（runs/m5/<ckpt-dir>/model_result 或 checkpoint-N）整个拷过来，指到里面的 model_config.yaml
+#                （同目录要有 model.safetensors）
+#   零样本 + p*：仓库里的 forecast_backbones/m5/config/z1_zeroshot_pstar.yaml（没有权重要拷）
+M5_CONFIG = algo_home_path / 'algo/checkpoints/f1_final/model_config.yaml'
+# M5_CONFIG = algo_home_path / 'algo/nuoya_algo/forecast_backbones/m5/config/z1_zeroshot_pstar.yaml'
+# [M5 适配] 输出表：m5_0 = 线上原始零样本（multi_infer）；m5_1 = LoRA 微调版；m5_2 = 零样本 + p*。换配置时一起改；表名按线上约定改
+M5_OUT_TAG = 'm5_1'
+out_table_name = f'ds_out_{M5_OUT_TAG}_{PREDICT_OBJECT}_{predict_type}'  # 输出表的具体表名
 
 if predict_type == 'ultra_short':
     PRED_LEN = 192
@@ -66,28 +76,32 @@ elif predict_type == 'short':
 ##########################
 
 ########## 模型初始化 ##########
-m5_ckpt_dir = algo_home_path / 'algo/checkpoints/f1_final'       # m5_train_cli.py 的 runs/m5/<ckpt-dir>/model_result（或 checkpoint-N）整个拷过来
-m5_release_config = str(m5_ckpt_dir / 'model_config.yaml')
-m5_ckpt_path = str(m5_ckpt_dir / 'model.safetensors')
+m5_ckpt_path = str(Path(M5_CONFIG).parent / 'model.safetensors')   # 只有 LoRA 配置用
 # [M5 适配] 线上站点信息表（plantid / plant_pointname / GCCAPACITY / LONGITUDE / LATITUDE，表头自动识别）。
 #   station 列按 plant_pointname 对数据里的 plant_guangfu1358；容量只取 GCCAPACITY（与训练同口径：每站固定容量）。换成线上实时那份的路径
-m5_station_meta = str(m5_ckpt_dir / 'info.csv')
+m5_station_meta = str(algo_home_path / 'algo/nuoya_algo/forecast_backbones/m5/info.csv')
 # [M5 适配] TimesFM-3 底座权重：取线上零样本 M5 配置里的路径（训练机上的路径在这里不存在）
 m5_zero_shot_config = str(algo_home_path / 'algo/nuoya_algo/forecast_backbones/m5/model_config.yaml')
 timesfm3_ckpt = yaml.safe_load(open(m5_zero_shot_config, 'r', encoding='utf-8'))['timesfm3']['checkpoint']
 
-config_m5 = yaml.safe_load(open(m5_release_config, 'r', encoding='utf-8'))
-config_m5['train']['weights_path'] = m5_ckpt_path            # [M5 适配] 构造时从这里加载 LoRA 权重（键不对直接报错）
-config_m5['dataset']['station_meta'] = m5_station_meta       # [M5 适配]
+config_m5 = yaml.safe_load(open(M5_CONFIG, 'r', encoding='utf-8'))
+m5_lora = bool((config_m5.get('finetune') or {}).get('enabled', True))   # [M5 适配] 缺省 true（同 M5 DEFAULT_CFG）
+if m5_lora:
+    config_m5.setdefault('train', {})['weights_path'] = m5_ckpt_path   # [M5 适配] 构造时从这里加载 LoRA 权重（键不对直接报错）
+config_m5.setdefault('dataset', {})['station_meta'] = m5_station_meta   # [M5 适配]
 config_m5['dataset']['station_meta_cols'] = None             # [M5 适配] info.csv 表头自动识别；自定义表头时在这里写映射
-config_m5['timesfm3']['checkpoint'] = timesfm3_ckpt          # [M5 适配]
+config_m5.setdefault('timesfm3', {})['checkpoint'] = timesfm3_ckpt      # [M5 适配]
 model_m5 = TransformersAdaptedM5Model(config_m5).eval()
-if model_m5.mode != 'full' or not model_m5.weights_loaded:   # [M5 适配] 没加载到 LoRA 权重 = 零样本，直接停
-    raise FileNotFoundError(f'M5 LoRA 权重没有加载：{m5_ckpt_path}（mode={model_m5.mode}）')
+if model_m5.mode != 'full':                                  # [M5 适配] 本模板只跑 full 模式（LoRA / 零样本 + p*）
+    raise ValueError(f'M5_CONFIG={M5_CONFIG} 不是 full 模式配置（原始零样本 configs.yaml 走线上 multi_infer）')
+if m5_lora and not model_m5.weights_loaded:                  # [M5 适配] LoRA 配置没加载到权重 = 安静地退化成零样本，直接停
+    raise FileNotFoundError(f'M5 LoRA 权重没有加载：{m5_ckpt_path}')
 M5_COL = type(model_m5).__name__                             # unified_inference / rolling_inference 的预测列名
-print(f'[M5] 权重 {m5_ckpt_path}；底座 {timesfm3_ckpt}；站表 {m5_station_meta}（{len(model_m5.station_meta.ids())} 个站）；'
+print(f'[M5] 配置 {M5_CONFIG}（{"LoRA" if m5_lora else "零样本"}）；权重 {m5_ckpt_path if m5_lora else "无"}；底座 {timesfm3_ckpt}；'
+      f'站表 {m5_station_meta}（{len(model_m5.station_meta.ids())} 个站）；'
       f'context={model_m5.context_length} pred={model_m5.prediction_length}；可训参数 {model_m5.n_params():,}；'
-      f'训练站 {len(config_m5["dataset"].get("known_stations") or [])} 个；点预测 {config_m5["decision"]["point"]["default"]}')
+      f'训练站 {len(model_m5.cfg["dataset"].get("known_stations") or [])} 个；点预测 {model_m5.cfg["decision"]["point"]["default"]}；'
+      f'输出表 {out_table_name}')
 
 ######### 按 report_time 时间循环推理 #########
 # report_time = "2026-10-01 10:00:00"

@@ -18,10 +18,14 @@ REF_W, REF_OUT = FIX / "j1_small_reference.safetensors", FIX / "j1_small_referen
 
 
 def _j1_small(tmp_path):
-    cfg = load_config(str(ROOT / "forecast_backbones/m8/config/variants/j1_final2.yaml"))
+    cfg = load_config(str(ROOT / "forecast_backbones/m8/config/j1_final2.yaml"))
     cfg["dataset"]["station_meta"] = str(write_station_meta(tmp_path, drop_coords_for=(1002,)))   # 1002 缺坐标 → 走包络
+    cfg["dataset"]["station_meta_cols"] = None                                                    # 变体写的是 info.csv 表头，合成站表是标准列名
     cfg["model"].update({"d_model": 32, "d_ff": 64, "head_hidden": 32, "n_heads": 2, "blocks": ["conv", "deltanet"], "pos_in_patch_dim": 8})
     cfg["features"]["hint_col"] = "timesfm_predict"                                               # 合成 batch 里的插值列名
+    # 参考文件按 2026-10-20 之前的默认四对 NWP 生成（之后默认删了 Solargis 两对）：钉住四对，守的是代码不变、旧 checkpoint 照常复现
+    cfg["features"]["past_future"] = [["general_ghi", "general_ghi_predict"], ["general_temp", "general_temp_predict"],
+                                      ["GHI_solargis", "ghi_solargis_predict"], ["temp_solargis", "temp_solargis_predict"]]
     cfg["features"]["static"]["n_station_slots"] = 64                                             # 站点嵌入缩小，参考文件才小
     cfg["run"]["out_dir"] = str(tmp_path / "run")
     return cfg

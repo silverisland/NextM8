@@ -90,4 +90,4 @@ def test_variants_skip_decision_only_yamls(tmp_path):
 def test_variants_default_dir_is_flat_config_without_online_yaml(tmp_path):
     head, slots = _plan(tmp_path, *EIGHT)                                    # 不给 --variants：config/ 下全部
     names = sorted(n for _, js in slots.values() for n in js)
-    assert names == ["f1_final", "f2_lr5e5", "f3_lr2e4", "f4_drop01", "f5_wd01", "s3_c1_envelope", "s3_c1_envelope_zs", "z0_zeroshot"]
+    assert names == ["f1_final", "f2_lr5e5", "f3_lr2e4", "f4_drop01", "f5_wd01", "s3_c1_envelope", "s3_c1_envelope_zs", "z0_zeroshot", "z1_zeroshot_pstar"]

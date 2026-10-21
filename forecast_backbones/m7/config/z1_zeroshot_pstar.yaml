@@ -1,0 +1,42 @@
+# Z1 零样本 + p*（2026-10-21）：Timestral-209M 不微调、不做晴空上限 / 夜间归零，只把上报点从模型 0.5 档换成 p*。
+#    = configs.yaml + decision.point: p_star + 线上站表 info.csv（其余逐键相同，tests/test_decision.py 守住）；
+#      = config/decision/a4_pstar_21.yaml 的决策（21 档 → 200 点网格）。
+#    p* 要装机容量（权重下限 0.2·cap，与南网考核分母同一个数），所以要站表；只用容量和站名映射，不用经纬度。
+#    两种 M7 配置：config/configs.yaml = 原始零样本（0.5 档直出，不读站表；家里 eval_pretrain 默认用它）
+#                  config/z1_zeroshot_pstar.yaml = 本文件
+#    线上：nanwang_online/eval_scripts_template/m7/single_model_scene_infer_m7.py 把 M7_CONFIG 指到本文件
+#    家里：MODEL=m7 bash eval_shell/eval_pretrain.sh --point p_star（站表用 m7/station_meta.csv，决策相同）
+run:
+  model_name: m7
+model: {}
+dataset:
+  pv_col: observe_power
+  # 站表：p* 取容量 cap_mw（GCCAPACITY）与站名映射；相对路径按仓库根目录解析，线上模板显式覆盖成线上那份
+  station_meta: forecast_backbones/m7/info.csv     # 线上站表（表头自动识别）；数据 station 列（plant_guangfu1358）对 plant_pointname
+# 决策层（m7/decision.py）：零样本 + p*，分位排序 → 钳 [0, cap] → 21 档 → 200 点网格 → p*
+decision:
+  point: p_star      # null | median | mean | p_star | p_star_l1 | quantile:<τ>
+  levels: model      # model = 模型全部 21 档 | output = 下面 timestral.quantile_levels 的 9 档（M5 口径）
+  grid: 200          # 等概率网格点数（M5 p* 的 step 0.005 = 200）
+  tail: flat         # flat | linear
+  floor_ratio: 0.2
+timestral:
+  # 服务器本地权重目录（离线）：huggingface-cli download mistralai/Timestral-209M --local-dir <下行路径>
+  checkpoint: /data/tangqingang/Timestral-209M   # ⚠️ 线上模板显式覆盖（timestral_ckpt）
+  context_len: 672
+  pred_len: 192
+  eager_init: true
+  device: auto
+  # 与 M5 零样本相同的两对未来已知协变量（历史 672 + 未来 192 拼接）
+  past_future_cols:
+    - [general_ghi,general_ghi_predict]
+    - [general_temp,general_temp_predict]
+  past_only_cols: []
+  per_core_batch_size: 64
+  # 与 M5 的 9 档对齐（须是模型 21 档 0.01/0.05/0.1/…/0.95/0.99 的子集）
+  quantile_levels: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+  return_quantiles: true
+  predict_quantile: null   # null=中位数（同 M5）
+  nan_policy: interp       # 同 M5；native=NaN 交给 Timestral 的观测掩码
+  make_positive: true
+  symmetric_averaging: true

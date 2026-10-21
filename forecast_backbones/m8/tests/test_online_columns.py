@@ -120,7 +120,7 @@ def test_report_inputs_lists_resolved_columns(small_cfg, tmp_path, capsys):
     log = capsys.readouterr().out
     assert present == [["general_ghi", "general_ghi_predict"], ["general_temp", "general_temp_predict"]]
     assert "general_ghi → 数据列 general_GHI ✓" in log and "timesfm3 → 数据列 tsfm_predict ✓" in log
-    assert "GHI_solargis ✗" in log
+    assert "solargis" not in log.lower()                                                    # 2026-10-20 默认配置不再含 Solargis 对
     with pytest.raises(ValueError, match="timesfm3"):
         report_inputs(m, [c for c in on.columns if c != "tsfm_predict"], verbose=False)
 
@@ -133,3 +133,18 @@ def test_expand_parquets_recurses_into_date_partitions(tmp_path):
     pd.DataFrame({"a": [1]}).to_parquet(tmp_path / "train" / ".data" / "tmp.parquet")
     files = expand_parquets([tmp_path / "train"])
     assert [f.split("date=")[1][:10] for f in files] == ["2026-06-01", "2026-06-02"]
+
+
+def test_pair_absent_in_training_is_not_fed_at_inference(small_cfg, batch):
+    """训练数据没有的 NWP 对（不在 cov_present）推理时即使有列也不喂：线上 multi_infer 把 general_* 抄成 *_SOLARGIS，
+    训练时恒 0 的通道不能突然收到值。"""
+    pairs = [["general_ghi", "general_ghi_predict"], ["general_temp", "general_temp_predict"],
+             ["GHI_solargis", "ghi_solargis_predict"], ["temp_solargis", "temp_solargis_predict"]]
+    cfg = load_config({**small_cfg, "features": {"past_future": pairs, "cov_present": pairs[:2]}})
+    fb = FeatureBuilder(cfg, StationMeta.from_csv(cfg["dataset"]["station_meta"]))
+    bd = dict(batch["batch_dict"])
+    bd.update({"GHI_SOLARGIS": bd["general_ghi"], "GHI_SOLARGIS_predict": bd["general_ghi_predict"],
+               "TEMP_SOLARGIS": bd["general_temp"], "TEMP_SOLARGIS_predict": bd["general_temp_predict"]})
+    x = fb.build(bd, training=False)["x"]
+    assert (x[:, :, fb.idx["pf:GHI_solargis"]] == 0).all() and (x[:, :, fb.idx["pf:temp_solargis"]] == 0).all()
+    assert (x[:, :, fb.idx["pf:general_ghi"]] != 0).any() and (x[:, :, fb.idx["cov_missing"]] == 0).all()

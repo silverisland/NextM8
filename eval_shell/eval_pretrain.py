@@ -33,6 +33,11 @@ make_models_summary 汇总。
     配置文件优先 <checkpoint_dir>/model_config.yaml，不存在则用 <checkpoint_dir>/config/configs.yaml；
     --model 缺省时取配置里的 run.model_name。
 
+上报点覆盖（--point，2026-10-21，目前只 M7 支持）：
+    --point p_star / median / mean / p_star_l1 / quantile:<τ> 覆盖配置的 decision.point（none = 旧行为，模型 0.5 档直出），
+    其余决策键（levels / grid / tail / floor_ratio）沿用配置。不支持的模型（M5 legacy 零样本没有决策层）直接报错，
+    M5 请用 eval_shell/eval_m5.sh --point。summary.json 多一个 point 键。
+
 可选历史尾部缩放（--tail_scale/--tail_len）：
     仅对**推理输入**的 observe_power 历史序列做**内存级**缩放，不改动磁盘 parquet。
     --tail_scale <factor>：把每条历史序列末尾 --tail_len（默认 4）个点整体乘以 factor
@@ -82,13 +87,23 @@ def load_model_config(checkpoint_dir):
     )
 
 
-def load_pretrain_model(model_name, checkpoint_dir, device):
+def apply_point(model_config, point):
+    """--point 覆盖 decision.point（point=None 不动配置；"none" / "null" = 旧行为）。返回覆盖后的配置副本。"""
+    if point is None:
+        return model_config
+    cfg = dict(model_config)
+    cfg["decision"] = {**(model_config.get("decision") or {}),
+                       "point": None if str(point).strip().lower() in ("none", "null") else str(point).strip()}
+    return cfg
+
+
+def load_pretrain_model(model_name, checkpoint_dir, device, point=None):
     """从配置直接构建零样本 adapter（无 safetensors 加载）-> (model, model_config)。
 
     与 eval_station_script.load_model_from_checkpoint 的区别：零样本模型没有可加载的
     state_dict；checkpoint_dir 只提供配置（M5 的 timesfm3 段 / M7 的 timestral 段），
     基础模型权重由 adapter 自己加载。model_name 为 None 时取配置里的 run.model_name。
-    构建后 to(device).eval()。
+    构建后 to(device).eval()。point 非 None 时覆盖 decision.point（见 apply_point），模型不支持直接报错。
     """
     from pipelines.model_registry import import_model_class
 
@@ -97,8 +112,11 @@ def load_pretrain_model(model_name, checkpoint_dir, device):
         model_name = (model_config.get("run") or {}).get("model_name")
         if not model_name:
             raise ValueError(f"未指定 --model，且 {config_path} 里没有 run.model_name")
-    print(f"[model] {model_name}  config={config_path}")
+    model_config = apply_point(model_config, point)
+    print(f"[model] {model_name}  config={config_path}" + (f"  point={model_config['decision']['point']}" if point is not None else ""))
     model = import_model_class(model_name)(model_config)
+    if point is not None and getattr(model, "decision_point", "<无决策层>") != model_config["decision"]["point"]:
+        raise ValueError(f"模型 {model_name} 不支持 --point（没有 decision.point 决策层）；M5 请用 eval_shell/eval_m5.sh --point")
     model.to(device)
     model.eval()
     return model, model_config
@@ -159,7 +177,7 @@ def station_table_cap(station_df, st, station_meta=None, model=None) -> float:
 
 def infer_station_pretrain(model_name, checkpoint_dir, station_path, cap_power,
                            batch_size=512, device="cuda", drop_label_cols=True,
-                           tail_scale=None, tail_len=4):
+                           tail_scale=None, tail_len=4, point=None):
     """单站零样本推理纯函数 -> (st, cap, result_df)。
 
     与 eval_station_script.py::infer_station 一一对应，仅把
@@ -180,7 +198,7 @@ def infer_station_pretrain(model_name, checkpoint_dir, station_path, cap_power,
         station_df = scale_observe_power_tail(station_df, tail_len=tail_len, factor=tail_scale)
 
     # ---- 1. 加载模型（从 config 构建，非 checkpoint）----
-    model, model_config = load_pretrain_model(model_name, checkpoint_dir, device)
+    model, model_config = load_pretrain_model(model_name, checkpoint_dir, device, point=point)
 
     bs = batch_size
     if isinstance(model_config, dict):
@@ -235,7 +253,7 @@ def infer_station_pretrain(model_name, checkpoint_dir, station_path, cap_power,
 
 def run_station(model_name, checkpoint_dir, station_path, out_dir,
                 cap_power, batch_size=512, device="cuda",
-                tail_scale=None, tail_len=4):
+                tail_scale=None, tail_len=4, point=None):
     """对单个站点完成零样本推理 -> 指标 -> xlsx + summary.json。"""
     from pipelines.metric import SolarMetricCalculator
     from pipelines.nanwang_metric import NanwangMetric
@@ -248,7 +266,7 @@ def run_station(model_name, checkpoint_dir, station_path, out_dir,
     st, cap, result_df = infer_station_pretrain(
         model_name, checkpoint_dir, station_path, cap_power,
         batch_size=batch_size, device=device,
-        tail_scale=tail_scale, tail_len=tail_len,
+        tail_scale=tail_scale, tail_len=tail_len, point=point,
     )
 
     # ---- 3+4. solar 指标 + 南网月度表，合并写 {站}-metrics.xlsx ----
@@ -272,6 +290,8 @@ def run_station(model_name, checkpoint_dir, station_path, out_dir,
     # ---- 5. summary.json ----
     summary = extract_summary(report, nanwang_tables)
     summary["station"], summary["cap_power"], summary["rows"] = st, cap, int(len(result_df))
+    if point is not None:
+        summary["point"] = str(point)
     summary_path = out_dir / f"{st}-summary.json"
     with open(summary_path, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, ensure_ascii=False, indent=2, cls=NumpyJSONEncoder)
@@ -307,6 +327,9 @@ def main():
                              "（不落盘），如 0.1=末尾4点×0.1；None=不缩放（默认）")
     parser.add_argument("--tail_len", type=int, default=4,
                         help="尾部缩放的点数（默认 4）")
+    parser.add_argument("--point", type=str, default=None,
+                        help="覆盖 decision.point：p_star / median / mean / p_star_l1 / quantile:<τ> / none（旧行为）；"
+                             "缺省用配置。目前只 M7 支持")
     args = parser.parse_args()
 
     if args.checkpoint_dir is None and args.model is None:
@@ -316,7 +339,7 @@ def main():
     run_station(
         args.model, checkpoint_dir, Path(args.station_path), Path(args.out_dir),
         args.cap_power, args.batch_size, device,
-        tail_scale=args.tail_scale, tail_len=args.tail_len,
+        tail_scale=args.tail_scale, tail_len=args.tail_len, point=args.point,
     )
 
 

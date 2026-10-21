@@ -27,12 +27,19 @@ Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU 
 
 ## 框架契约（与 m6 相同）
 
+2026-10-21：通用配置、站表、数据加载、训练回调和报表实现迁入
+`pipelines/forecasting/` 公共层，M8 原有函数/类入口保留兼容导出。
+部署 M8 时需要保留该公共包；模型网络、特征与决策层仍在 M8 目录内。
+M4-Rum 直接使用公共层，不依赖 M8 私有模块。
+
 - `transformer_models.py`：第一个 nn.Module 子类 `TransformersAdaptedM8Model(model_config)`；`forward(batch_dict, labels=None)`
   → `TransformersAdaptedModelOutput`（`.logits` 提交曲线，`.aux` 与 m6 同 schema：quantiles / quantiles_cal / p_star / median /
   night / elev_deg / p_clear / var_bin / station_id / cap …，可直接喂 m6 的 `recompute_points` / `ladder_report` / `Calibrator`）。
 - `transformer_trainer.py`：`evaluate_model(model, ds, collate, cfg)`（result_df 与 m6 同 schema）、`M8_build_training_args`。
 - `train.py`：`train_m8(config, splits_dir, out_dir, max_steps, tag)`；`train_script.py --model_name m8` 走独立入口（同 m6）。
-- 配置真源 `config/configs.yaml`（= `config.py` 的 DEFAULT_CFG）；变体 `config/variants/*.yaml` 只写与默认不同的字段。
+- 默认值真源是 `config.py` 的 DEFAULT_CFG；各变体 yaml 直接放在 `config/` 下（j1_final2 / k3_resid / k1–k6），只写与 DEFAULT_CFG 不同的字段，
+  加载时深合并。`config/decision/` 是评估时换决策层用的 yaml（不重训），不是训练变体。2026-10-20 起删掉了 `config/configs.yaml`
+  （它不被任何变体继承，只是不给 `--config` 时的默认）：`train_m8.sh` / `train.py` 不给 `--config` 时用 `config/j1_final2.yaml`。
 - 站表：`dataset.station_meta`（任意路径与文件名，默认 `forecast_backbones/m8/station_meta.csv`，训练前填真实坐标；缺坐标站退化为钟表几何或历史日形包络）。
   表头随意：`dataset.station_meta_cols: {station_id: 场站编号, station: 场站名称, lat: 纬度, lon: 经度, alt_m: null, cap_mw: 装机容量}`
   把你的列名映射到内部名，没写的按内部名找，lat / lon / alt_m 写 null 表示表里没有。显式给的路径不存在直接报错，不回退。
@@ -51,13 +58,13 @@ Block ×4（默认 conv → deltanet → conv → deltanet；pre-RMSNorm + GELU 
 ```bash
 # 单个配置（默认全部可见 GPU；模型小，单卡足够）
 bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --gpus 0
-bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --config forecast_backbones/m8/config/variants/k3_resid.yaml --gpus 1
+bash train_m8.sh --splits_dir data/splits/m1_m4_v1 --config forecast_backbones/m8/config/k3_resid.yaml --gpus 1
 # 全部变体批量跑：每张卡一条队列，跑完汇总 variants_summary.csv
 bash train_m8_variants.sh --splits_dir data/splits/m1_m4_v1 --gpus 0,1,2,3,4,5,6,7
 bash train_m8_variants.sh --splits_dir ... --variants j1_final2,k3_resid --seeds 0,1,2 --gpus 0,1
 bash train_m8_variants.sh --splits_dir ... --max_steps 50 --gpus 0 --batch_tag smoke       # 先冒烟
 # 直接用 python
-python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/configs.yaml --splits-dir data/splits/m1_m4_v1 --out runs/m8/x
+python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/j1_final2.yaml --splits-dir data/splits/m1_m4_v1 --out runs/m8/x
 ```
 
 切分目录用 `pipelines.time_splits` 落的 `train/valid.parquet + split_manifest.json`（与 M1–M4 / M6 同一份；不需要 cal.parquet）。
@@ -68,7 +75,7 @@ python -m forecast_backbones.m8.train --config forecast_backbones/m8/config/conf
 （默认整点起报行）、`reports/summary.csv`（一行：tag / 南网 D+1 / nrmse / best_step / 参数量 / 结构字段）、`reports/station_table.csv`。
 多个 run 汇总：`python -m forecast_backbones.m8.collect_runs runs/m8/<batch_tag> --out x.csv`。
 
-## 变体矩阵（`config/variants/`，批量测试用）
+## 变体矩阵（`config/*.yaml`，批量测试用）
 
 | 组 | 变体 | 用途 |
 |---|---|---|
@@ -270,6 +277,38 @@ done
 ```
 
 之前扫过、结论是噪声、不要再碰的：骨干类型、patch_len、d_model 加大、token 头、双流、EMA、平滑选点、按站日采样。
+
+## 南网服务器全量训练（`train_shell/m8_train_cli.py`，2026-10-20）
+
+家里用 `train_m8.sh` / `train_m8_variants.sh`（切分目录、有验证集、早停）选出架构；到南网用全部训练数据重训时走
+`m8_train_cli.py`：结构与南网的 `train_scripts/m6_b_train_cli.py` 一致（`pipelines.UnifiedDataset` + `pipelines.train_model`，
+产物 `runs/m8/<ckpt-dir>/model_result/{model.safetensors, model_config.yaml}`）。`nanwang_online/m8_train_cli.py` 是同一份拷贝
+（`tests/test_nanwang_cli.py` 守住两份一致），拷到南网仓库的 `train_scripts/` 下即可用（`BASE_PATH` = 文件上两级）。
+
+```bash
+cd <仓库>/train_scripts
+python m8_train_cli.py --config j1_final2.yaml --ckpt-dir j1_final2                       # 读 <src-dir>/train/**/*.parquet
+python m8_train_cli.py --config k4_lr2e4.yaml  --ckpt-dir k4_lr2e4
+python m8_train_cli.py --config k3_resid.yaml  --ckpt-dir smoke --max-steps 2                # 冒烟
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 -- m8_train_cli.py --config j1_final2.yaml --ckpt-dir j1_2gpu
+```
+
+- 命令行参数与 m6_b 模板相同（`--config / --ckpt-dir / --src-dir / --train-path / --max-steps`），其余全在 yaml 里。每个变体 yaml 都带
+  南网训练设置：`dataset.src_dir`（`/home/wangding_hw/datasets/cleaned_processed_dataset_rulev3_with_tsfm`，读其下 `train/date=*/data_0.parquet`；
+  `--src-dir` / `--train-path` 覆盖）、`dataset.station_meta: forecast_backbones/m8/info.csv`（线上站表，相对路径按仓库根目录解析）+
+  `station_meta_cols`（`plantid / plant_pointname / LATITUDE / LONGITUDE / GCCAPACITY`）、列名（`timestamp_win / observe_power /
+  observe_power_future / general_ghi(_predict) / general_temp(_predict) / timesfm3`）、`train.schedule.save_every: 500`
+  （每 500 步存 `hf_trainer_output/checkpoint-N/`，带 `model_config.yaml`，事后挑步）。家里用 `train_m8.sh --station_meta forecast_backbones/m8/station_meta.csv`
+  换回家里的站表（列名映射随之清空、表头自动识别）。
+- `--config` = `config/` 下的文件名（或绝对路径）。**超参全部来自该 yaml 的 `train.schedule`**（lr / batch_size / max_steps /
+  warmup_steps / weight_decay / grad_clip / precision），不读 m6_b 的 `optimization` 段，也不用它写死的 wd 0.01、warmup_ratio 0.05、fp16：
+  同一个 yaml 在家里和南网是同一套超参。南网上要试新超参就在 `config/` 下加一个 yaml（只写改动的字段）。
+- `--max-steps` 缺省 `-1` = 配置的 `train.schedule.max_steps`（j1_final2 6000，cosine 按它退火；配置写 null 才按 `epochs_max`）；`> 0` 覆盖。
+- 列名自动对：大写 `general_GHI`、`timesfm3` / `tsfm_predict` 都行；数据里没有的 NWP 对通道恒 0，插值列缺了直接报错；`cap_power_on` 不用。
+  数据必须有 `station` 站名列（collate 用 `drop_str_type=False` 保留它），站名要在站表 `plant_pointname` 列里。
+- 训练集站号 `known_stations` 与实际用上的 NWP 对 `cov_present` 写进 `model_config.yaml`；`save_every` 的
+  `hf_trainer_output/checkpoint-N/` 训完也补上 `model_config.yaml`，与 `model_result/` 一样可直接给 `eval_m8.sh` / 线上模板加载。
+- 不支持 `train.ema_decay` 与 `sampling: station_day`（`train_model` 不接回调 / 采样器），配置里开了直接报错；要用就走 `train_m8.sh --train_parquet`。
 
 ## 已删除的分支（2026-10-14 瘦身）
 

@@ -1,0 +1,22 @@
+# K3 = j1_final2 + 残差学习（d4）：输出 = TimesFM 归一值 + 网络输出。round6 里 d4 比 d3 超短期代理 +0.65、D+1 持平
+#    跑法：bash train_m8_variants.sh --splits_dir <m8_v1> --variants j1_final2,k1_hint01,k2_hint00,k3_resid,k4_lr2e4,k5_lr5e4,k6_regular --seeds 0,1,2 --batch_tag round7
+run: {tag: k3_resid, out_dir: runs/m8/k3_resid}
+dataset:                             # 南网训练（m8_train_cli.py）：数据位置、列名、站表都在这里，命令行只给 --config / --ckpt-dir
+  src_dir: /home/wangding_hw/datasets/cleaned_processed_dataset_rulev3_with_tsfm   # 读其下 train/date=*/data_0.parquet
+  ts_col: timestamp_win
+  pv_col: observe_power
+  label_col: observe_power_future
+  station_meta: forecast_backbones/m8/info.csv      # 线上站表；相对路径按仓库根目录解析。数据 station 列（plant_guangfu1358）对 plant_pointname
+  station_meta_cols: {station_id: plantid, station: plant_pointname, lat: LATITUDE, lon: LONGITUDE, alt_m: null, cap_mw: GCCAPACITY}
+features:
+  past_future:                       # 训练数据列名（小写；大写 general_GHI 也能对上）
+    - [general_ghi, general_ghi_predict]
+    - [general_temp, general_temp_predict]
+  derived: {clear_sky_ratio: {enabled: true}, history_envelope: {enabled: true}}
+  hint_col: timesfm3                 # 插值列名：数据里叫别的就改这里，或 train_m8.sh --hint_col <列名>
+  hint_residual: true
+train:
+  schedule: {lr: 3.0e-4, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250, save_every: 500}   # save_every：每 500 步存一份 checkpoint，全量训练事后挑步
+  early_stop: {patience: 8}
+  hint_dropout: 0.3
+decision: {point: {default: p_star, by_step: [{steps: [0, 16], method: p_star_l1}, {steps: [55, 151], method: p_star}]}}

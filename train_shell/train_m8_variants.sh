@@ -3,7 +3,7 @@
 # train_m8_variants.sh —— 批量训练 M8 的多个变体：每个变体一张卡，卡数不够时排队；跑完汇总成一张表。
 #
 # 用法：
-#   bash train_m8_variants.sh --splits_dir /data/xxx/splits                      # 跑 config/variants/ 下全部变体，全部可见卡
+#   bash train_m8_variants.sh --splits_dir /data/xxx/splits                      # 跑 config/ 下全部变体（不含 config/decision/），全部可见卡
 #   bash train_m8_variants.sh --splits_dir ... --gpus 0,1,2,3 --variants j1_final2,k3_resid
 #   bash train_m8_variants.sh --splits_dir ... --max_steps 50 --gpus 0 --batch_tag smoke        # 全部变体冒烟
 #   bash train_m8_variants.sh --splits_dir ... --variants j1_final2,k3_resid --seeds 0,1,2      # 每个变体 3 颗种子（tag 带 _s<seed>）
@@ -20,7 +20,7 @@ _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "$_HERE/forecast_backbones" ]; then BASE_DIR="$_HERE"; else BASE_DIR="$(cd "$_HERE/.." && pwd)"; fi
 SPLITS_DIR="${BASE_DIR}/data/splits/m1_m4_v1"
 TRAIN_PARQUET=""       # 给了就是全量训练（透传 --train_parquet，不用 --splits_dir）
-VARIANT_DIR="${BASE_DIR}/forecast_backbones/m8/config/variants"
+VARIANT_DIR="${BASE_DIR}/forecast_backbones/m8/config"
 VARIANTS=""            # 逗号分隔的变体名（不带 .yaml）；留空 = 目录下全部
 GPUS="auto"
 MAX_STEPS=""

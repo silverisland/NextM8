@@ -1,0 +1,25 @@
+# Z1 零样本 + p*（2026-10-21）：不挂 LoRA、不训练、不做晴空上限 / 夜间归零，只把上报点从中位数换成 p*。
+#    = z0_zeroshot + decision/d2_pstar_point；与 f1_final 走同一条 torch 推理 + 决策链，两者只差 LoRA。
+#    p* 要装机容量（权重下限 0.2·cap，与南网考核分母同一个数），所以仍要站表；只用容量和站名映射，不用经纬度。
+#    三种 M5 配置：config/configs.yaml = 原始零样本（legacy，中位数，不读站表；家里 eval_pretrain / 线上 multi_infer 用）
+#                  config/z1_zeroshot_pstar.yaml = 本文件（零样本 + p*）
+#                  config/f*.yaml = LoRA（m5_train_cli.py 训，线上用训练产物里的 model_config.yaml）
+#    线上：nanwang_online/eval_scripts_template/m5/single_model_scene_infer_m5.py 把 M5_CONFIG 指到本文件即可（没有权重要拷）
+#    家里：z0_zeroshot 的 run 目录 + bash eval_shell/eval_m5.sh --point p_star（逐位相同）
+run: {tag: z1_zeroshot_pstar, out_dir: runs/m5/z1_zeroshot_pstar}
+dataset:
+  ts_col: timestamp_win
+  pv_col: observe_power
+  label_col: observe_power_future
+  station_meta: forecast_backbones/m5/info.csv      # 线上站表；相对路径按仓库根目录解析。数据 station 列（plant_guangfu1358）对 plant_pointname
+  station_meta_cols: {station_id: plantid, station: plant_pointname, lat: LATITUDE, lon: LONGITUDE, alt_m: null, cap_mw: GCCAPACITY}
+timesfm3:
+  checkpoint: /data/tangqingang/timesfm-3.0-pytorch  # ⚠️ TimesFM-3 底座权重目录（线上模板从线上零样本配置取，不读这里）
+features:
+  past_future:                       # 配置写小写；线上大写 general_GHI 也能对上（大小写不敏感）
+    - [general_ghi, general_ghi_predict]
+    - [general_temp, general_temp_predict]
+finetune:
+  enabled: false                     # 零样本：不挂 LoRA，也不加载任何权重
+  inference_path: torch              # 与 z0_zeroshot / f1_final 同一条可微路径
+decision: {point: {default: p_star}}  # 晴空上限 / 夜间归零保持默认关（D8）：分位排序 → 钳 [0, cap] → p*

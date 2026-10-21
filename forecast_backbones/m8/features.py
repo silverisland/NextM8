@@ -390,6 +390,8 @@ class FeatureBuilder:
         csi = (self.csi_col or "").lower()
         absent_trained = []                                                         # 训练时有、这次缺的对
         for hist_c, fut_c in self.pairs:
+            if self.cov_present is not None and (hist_c, fut_c) not in self.cov_present:
+                continue                                                            # 训练数据里没有的对：通道保持训练时的 0，推理时有列也不喂
             arr = self._pair(batch_dict, hist_c, fut_c)
             if arr is None:
                 if self.cov_present is not None and (hist_c, fut_c) in self.cov_present:
