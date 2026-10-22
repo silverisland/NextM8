@@ -2,8 +2,13 @@
 
 面向短期光伏功率预测的 M4 变体。历史上下文、未来气象与基模预测按时刻拼接，
 共享 MLP 输出 192 点功率，或输出逐时刻分位并通过独立选点层得到功率。
-没有基模残差相加或门控混合；新版 query_decoder 支持可选站点 embedding（默认关闭）。
+默认直接预测；新版 query_decoder 支持可选站点 embedding 和架构分支（默认关闭）。
 原结构由 `model.architecture: legacy` 保留；新的 `query_decoder` 见下一节。
+
+新增 [19 组架构对照配置与运行说明](config/arch_sweep/README.md)：以 q6 的 EMA 配方为基线，
+独立测试残差输出头、天气条件化历史日曲线、局部天气卷积和 hint 门控，
+覆盖四种开关的全部组合，并附大模型/站点 embedding 与宽输出头对照。
+新开关位于 `model.extensions`，默认关闭，旧配置和权重继续兼容；需要重新训练开启新分支的模型。
 
 ## D+1 优化版：query_decoder
 
@@ -32,7 +37,7 @@ hint_dropout=0.3，而 M8 K2 的 hint_dropout=0。旧 Pinball 只有全时段 p_
 未来时刻 0 对齐历史 `L-96`，第 95 步对齐 `L-1`，第二天重复相位，不能拿未来真实功率填入。
 未来自注意力只使用本次起报已知的 NWP/基模预测，不读取未来标签。
 缺历史时仍有可用的空 token，避免全掩码 attention 产生 NaN；日曲线也遵循 history_dropout。
-新版没有强制添加 TimesFM 残差，所有分位仍由网络直接预测。
+默认不强制添加 TimesFM 残差，所有分位由网络直接预测；显式开启 hint_gate 后另加可学习的 hint 基准分支。
 
 建议至少跑以下两个配置，保持相同切分、种子及 GPU 数：
 

@@ -1,0 +1,118 @@
+# Architecture ablation; EMA=0.99 and q6 training/selection settings.
+run:
+  model_name: m4_rum
+  tag: a00_ema_baseline
+  seeds:
+  - 0
+  out_dir: runs/m4_rum/arch_sweep/a00_ema_baseline
+dataset:
+  pv_col: observe_power
+  label_col: observe_power_future
+  ts_col: timestamp_win
+  station_id_col: station_id
+  station_meta: pipelines/forecasting/assets/info.csv
+  station_meta_cols:
+    station_id: plantid
+    station: plant_pointname
+    lat: LATITUDE
+    lon: LONGITUDE
+    alt_m: null
+    cap_mw: GCCAPACITY
+  known_stations: null
+  context_len: 672
+  pred_len: 192
+  step_min: 15
+features:
+  past_future:
+  - - general_ghi
+    - general_ghi_predict
+  - - general_temp
+    - general_temp_predict
+  weather_offsets:
+  - 0.0
+  - 15.0
+  weather_scales:
+  - 1000.0
+  - 15.0
+  hint_col: timesfm3
+  col_aliases:
+    timesfm3:
+    - tsfm_predict
+  cov_present: null
+model:
+  architecture: query_decoder
+  decoder_layers: 2
+  station_embedding: false
+  n_station_slots: 4096
+  extensions:
+    residual_head: false
+    weather_day_reference: false
+    day_hidden: 32
+    local_weather: false
+    local_kernels:
+    - 3
+    - 9
+    hint_gate: false
+    hint_gate_hidden: 32
+  patch_len: 16
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  d_ff: 256
+  context_dim: 64
+  weather_dim: 64
+  head_hidden: 128
+  head_dim: 64
+  dropout: 0.1
+  quantiles:
+  - 0.1
+  - 0.2
+  - 0.3
+  - 0.4
+  - 0.5
+  - 0.6
+  - 0.7
+  - 0.8
+  - 0.9
+train:
+  history_dropout: 0.0
+  hint_dropout: 0.0
+  slot_dropout: 0.3
+  loss: pinball
+  ema_decay: 0.99
+  weights_path: ${run.out_dir}/model.safetensors
+  schedule:
+    lr: 0.0003
+    weight_decay: 0.05
+    batch_size: 8
+    max_steps: 6000
+    epochs_max: 20
+    warmup_steps: 300
+    grad_clip: 1.0
+    precision: fp32
+    logging_steps: 50
+    eval_every_steps: 250
+    save_every: 500
+    sampling: random
+    progress_bar: true
+    num_workers: 0
+  early_stop:
+    metric: nanwang_short_D+1
+    patience: 8
+    nrmse_issue_every_min: 60
+    smooth_k: 1
+decision:
+  point:
+    default: p_star
+    by_step:
+    - steps:
+      - 0
+      - 16
+      method: p_star_l1
+    clip_negative: true
+    capacity_cap: true
+    floor_ratio: 0.2
+    tau_grid_step: 0.005
+    tail: flat
+eval:
+  batch_size: 32

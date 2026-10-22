@@ -43,6 +43,15 @@ DEFAULT_CFG = {
         "decoder_layers": 2,
         "station_embedding": False,
         "n_station_slots": 4096,
+        "extensions": {
+            "residual_head": False,
+            "weather_day_reference": False,
+            "day_hidden": 32,
+            "local_weather": False,
+            "local_kernels": [3, 9],
+            "hint_gate": False,
+            "hint_gate_hidden": 32,
+        },
         "patch_len": 16,
         "d_model": 128,
         "n_heads": 4,
@@ -129,6 +138,29 @@ def load_config(config=None):
         raise ValueError("model.n_station_slots must be a positive integer")
     if model["station_embedding"] and model["architecture"] != "query_decoder":
         raise ValueError("station_embedding requires model.architecture=query_decoder")
+    ext = model["extensions"]
+    switches = ("residual_head", "weather_day_reference", "local_weather", "hint_gate")
+    for key in switches:
+        if type(ext[key]) is not bool:
+            raise ValueError(f"model.extensions.{key} must be boolean")
+    if any(ext[key] for key in switches) and model["architecture"] != "query_decoder":
+        raise ValueError("model.extensions require model.architecture=query_decoder")
+    for key in ("day_hidden", "hint_gate_hidden"):
+        if type(ext[key]) is not int or ext[key] <= 0:
+            raise ValueError(f"model.extensions.{key} must be a positive integer")
+    kernels = ext["local_kernels"]
+    if (
+        not isinstance(kernels, list)
+        or not kernels
+        or any(
+            type(k) is not int or k < 3 or k > ds["pred_len"] or k % 2 == 0
+            for k in kernels
+        )
+        or len(set(kernels)) != len(kernels)
+    ):
+        raise ValueError(
+            "model.extensions.local_kernels must be unique odd integers in [3, pred_len]"
+        )
     known = ds["known_stations"]
     if known is not None and (
         not isinstance(known, list)

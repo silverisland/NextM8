@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from .query_extensions import LocalWeatherEncoder, WeatherDayReference
+
 
 class QueryRum(nn.Module):
     def __init__(self, cfg):
@@ -74,6 +76,34 @@ class QueryRum(nn.Module):
         if m["station_embedding"]:
             self.station_embedding = nn.Embedding(m["n_station_slots"] + 1, width)
             nn.init.normal_(self.station_embedding.weight, std=0.02)
+        # Disabled branches add neither parameters nor random draws. Old runs
+        # keep their exact state_dict keys and initial base weights.
+        ext = m["extensions"]
+        output_dim = len(m["quantiles"]) if self.is_quantile else 1
+        head_input = width + self.input_dim + channels
+        self.head_skip = None
+        self.day_reference = None
+        self.local_weather = None
+        self.hint_gate = None
+        if ext["residual_head"]:
+            self.head_skip = nn.Linear(head_input, output_dim)
+            nn.init.zeros_(self.head_skip.weight)
+            nn.init.zeros_(self.head_skip.bias)
+        if ext["weather_day_reference"]:
+            self.day_reference = WeatherDayReference(channels - 1, ext["day_hidden"])
+            self.day_query = nn.Linear(4, width)
+            self.day_output = nn.Linear(4, output_dim, bias=False)
+        if ext["local_weather"]:
+            self.local_weather = LocalWeatherEncoder(
+                2 * (channels - 1) + 5, width, ext["local_kernels"], m["dropout"]
+            )
+        if ext["hint_gate"]:
+            self.hint_gate = nn.Sequential(
+                nn.Linear(head_input, ext["hint_gate_hidden"]),
+                nn.GELU(),
+                nn.Linear(ext["hint_gate_hidden"], 1),
+                nn.Sigmoid(),
+            )
 
     def station_slots(self, station_id, device):
         """M8-compatible hashed slots; only training stations get a named slot."""
@@ -155,10 +185,34 @@ class QueryRum(nn.Module):
         query = self.query_projection(inputs)
         if station is not None:
             query = query + station
+        day = None
+        if self.day_reference is not None:
+            day = self.day_reference(history, mask, f.future, f.future_mask)
+            query = query + self.day_query(day)
+        if self.local_weather is not None:
+            known = torch.cat(
+                [
+                    f.future,
+                    f.future_mask.float(),
+                    f.future_time,
+                    lead[None, :, None].expand(size, -1, -1),
+                ],
+                -1,
+            )
+            query = query + self.local_weather(known)
         # Bidirectional self-attention is safe here: all 192 NWP/hint steps are
         # known at issue time. No labels or observed future PV enter the decoder.
         for layer in self.decoder:
             query = layer(query, memory, memory_key_padding_mask=padding)
         quality = mask.float().mean(1)[:, None].expand(-1, self.horizon, -1)
-        output = self.head(torch.cat([self.norm(query), inputs, quality], -1))
+        head_inputs = torch.cat([self.norm(query), inputs, quality], -1)
+        output = self.head(head_inputs)
+        if self.head_skip is not None:
+            output = output + self.head_skip(head_inputs)
+        if day is not None:
+            output = output + self.day_output(day)
+        if self.hint_gate is not None:
+            # A shared scalar gate shifts all quantiles; the main head learns
+            # the quantile-specific correction. Mask/dropout is already in hint.
+            output = output + self.hint_gate(head_inputs) * hint[..., None]
         return output if self.is_quantile else output.squeeze(-1)

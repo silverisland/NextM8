@@ -71,6 +71,7 @@ assert model.n_params() == 310529
 import pytest
 result = pytest.main([
     "forecast_backbones/m4_rum/tests/test_workflow.py",
+    "forecast_backbones/m4_rum/tests/test_query_extensions.py::test_all_branches_ema_training_strict_reload_and_full_report",
     "forecast_backbones/m4_rum/tests/test_pinball.py", "-q", "--disable-warnings",
 ])
 assert not any(n.startswith("forecast_backbones.m8") for n in sys.modules)
