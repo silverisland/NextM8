@@ -162,6 +162,14 @@ def train_m4_rum(
             f"[m4_rum] params={model.n_params():,}, train={len(ds_train)}, "
             f"val={0 if ds_val is None else len(ds_val)}, refit={refit}"
         )
+        if cfg["model"]["station_embedding"]:
+            slots = cfg["model"]["n_station_slots"]
+            occupied = len({sid % slots for sid in known})
+            print(
+                f"[m4_rum] station_embedding: known={len(known)}, "
+                f"occupied_slots={occupied}/{slots}, collisions={len(known) - occupied}, "
+                f"unknown_slot=0, slot_dropout={cfg['train']['slot_dropout']}"
+            )
     schedule = cfg["train"]["schedule"]
     decay = cfg["train"]["ema_decay"]
     ema = WeightEma(model, decay) if decay is not None else None

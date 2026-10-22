@@ -2,7 +2,7 @@
 
 面向短期光伏功率预测的 M4 变体。历史上下文、未来气象与基模预测按时刻拼接，
 共享 MLP 输出 192 点功率，或输出逐时刻分位并通过独立选点层得到功率。
-**没有基模残差相加、门控混合或站点 embedding。**
+没有基模残差相加或门控混合；新版 query_decoder 支持可选站点 embedding（默认关闭）。
 原结构由 `model.architecture: legacy` 保留；新的 `query_decoder` 见下一节。
 
 ## D+1 优化版：query_decoder
@@ -85,7 +85,59 @@ M8 `--full` 的同名字段是逐站月报汇总后再站间平均，不能直�
 另做了一个专门检验未来跨步信息通路的合成任务：输入信号仅出现在后半段，预测前 16 步，
 新版能学习这条关系。这个任务不是光伏 D+1 实验，不代表真实提升幅度。
 
-## D+1 调参配置组（8 组）
+## 站点 embedding 与容量对照
+
+仅 `model.architecture: query_decoder` 支持此功能。站点向量维度等于 `d_model`，
+同时加到全部历史 token（包括空 token）和未来 query 上；每行只抽一次站点 dropout，
+两条路径共享结果。Pinball、p_star、物理裁剪和 D+1 选模机制不变。
+
+```yaml
+model:
+  architecture: query_decoder
+  station_embedding: true
+  n_station_slots: 4096
+train:
+  slot_dropout: 0.3
+```
+
+训练入口仅从训练数据收集 `dataset.known_stations`，保存在每份 checkpoint 的配置中；
+验证集和测试集不能扩充这个名单。已见站按 `station_id % n_station_slots + 1` 映射，
+未见站统一走槽 0；名单为 null 或空时全部走槽 0，不会使用未经训练的随机站点向量。
+训练时以 `slot_dropout` 概率将已见站也切到槽 0，使未知站向量参与学习；验证/推理不做 dropout。
+槽 0 是可训练向量，不是固定零向量。未知站仍须有容量站表记录，不能绕过现有容量检查。
+映射与 M8 一致，可能发生取模冲突；训练日志会报告已见站数、占用槽数和冲突数。
+不要在推理时改槽位数、站号映射或已见站名单。
+
+新增三组配置，与原 `q0_baseline` 组成容量 × embedding 对照（参数量包含 embedding）：
+
+| 配置 | d_model / d_ff | embedding | 参数量 |
+| --- | --- | --- | ---: |
+| `q0_baseline.yaml` | 128 / 256 | 关闭 | 718,601 |
+| `q7_station.yaml` | 128 / 256 | 开启 | 1,243,017 |
+| `q8_width256.yaml` | 256 / 1024 | 关闭 | 3,787,273 |
+| `q9_width256_station.yaml` | 256 / 1024 | 开启 | 4,836,105 |
+
+比较 q7/q0、q9/q8 检验 embedding；比较 q8/q0、q9/q7 检验容量。
+新增配置仍为 seed 0、batch 8/卡、6000 步、每 250 步验证、patience 8。
+先按相同数据切分和 GPU 数比较，胜出方案再重复多个种子；真实 D+1 收益尚未验证。
+
+```bash
+bash train_shell/train_m4_rum.sh --gpus 0 \
+  --config forecast_backbones/m4_rum/config/d1_sweep/q7_station.yaml \
+  --train_parquet 'datasets/train/*.parquet' \
+  --valid_parquet 'datasets/valid/*.parquet'
+
+bash eval_shell/eval_m4_rum.sh \
+  --runs runs/m4_rum/d1_sweep/q7_station \
+  --test 'datasets/test/*.parquet' --full \
+  --out runs/m4_rum/d1_sweep/q7_station/eval_final
+```
+
+将配置名替换为 q8/q9 可运行另外两组。训练和评估继续使用显式选定的 Python，
+不会在解释器不可用时自动回退。旧配置不增加参数、不改变旧权重键；
+开启 embedding 必须重新训练，不能给旧 checkpoint 只改开关后直接推理。
+
+## D+1 原调参配置组（8 组）
 
 配置目录：`config/d1_sweep/`。这些 YAML 将有效参数完整写出，避免后续默认值变化干扰对照。
 统一条件：同一训练/验证集、seed 0、单 GPU、batch 8、最多 6000 步、warmup 300、每 250 步验证、

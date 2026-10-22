@@ -41,6 +41,8 @@ DEFAULT_CFG = {
     "model": {
         "architecture": "legacy",
         "decoder_layers": 2,
+        "station_embedding": False,
+        "n_station_slots": 4096,
         "patch_len": 16,
         "d_model": 128,
         "n_heads": 4,
@@ -56,6 +58,7 @@ DEFAULT_CFG = {
     "train": {
         "history_dropout": 0.2,
         "hint_dropout": 0.3,
+        "slot_dropout": 0.3,
         "loss": "mse",
         "ema_decay": None,
         "weights_path": "${run.out_dir}/model.safetensors",
@@ -120,6 +123,21 @@ def load_config(config=None):
         raise ValueError("M4-Rum uses 192 steps, starting 15 minutes after issue time")
     if model["architecture"] not in ("legacy", "query_decoder"):
         raise ValueError("model.architecture must be legacy or query_decoder")
+    if type(model["station_embedding"]) is not bool:
+        raise ValueError("model.station_embedding must be boolean")
+    if type(model["n_station_slots"]) is not int or model["n_station_slots"] <= 0:
+        raise ValueError("model.n_station_slots must be a positive integer")
+    if model["station_embedding"] and model["architecture"] != "query_decoder":
+        raise ValueError("station_embedding requires model.architecture=query_decoder")
+    known = ds["known_stations"]
+    if known is not None and (
+        not isinstance(known, list)
+        or any(type(sid) is not int for sid in known)
+        or len(set(known)) != len(known)
+    ):
+        raise ValueError(
+            "dataset.known_stations must be null or a list of unique integers"
+        )
     if type(model["decoder_layers"]) is not int or model["decoder_layers"] <= 0:
         raise ValueError("model.decoder_layers must be a positive integer")
     if model["architecture"] == "query_decoder" and ds["context_len"] % 96:
@@ -167,8 +185,12 @@ def load_config(config=None):
             raise ValueError(
                 "Input columns and aliases must not refer to future labels"
             )
-    for key in ("history_dropout", "hint_dropout"):
-        if not 0 <= train[key] <= 1:
+    for key in ("history_dropout", "hint_dropout", "slot_dropout"):
+        if (
+            isinstance(train[key], bool)
+            or not isinstance(train[key], (int, float))
+            or not 0 <= train[key] <= 1
+        ):
             raise ValueError(f"train.{key} must be in [0, 1]")
     if not 0 <= model["dropout"] < 1:
         raise ValueError("model.dropout must be in [0, 1)")

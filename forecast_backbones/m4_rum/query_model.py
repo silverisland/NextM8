@@ -4,6 +4,7 @@ All future inputs are forecasts available at issue time, never future observatio
 Legacy Rum remains separate so its checkpoints and numerical behavior stay stable.
 """
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -65,6 +66,32 @@ class QueryRum(nn.Module):
             nn.GELU(),
             nn.Linear(m["head_dim"], len(m["quantiles"]) if self.is_quantile else 1),
         )
+        # Construct last: enabling this option preserves the initial base weights
+        # for matched-seed ablations. Disabled models retain the old state_dict.
+        self.station_embedding = None
+        self.dataset_cfg = ds  # Training fills known_stations after loading data.
+        self.slot_dropout = cfg["train"]["slot_dropout"]
+        if m["station_embedding"]:
+            self.station_embedding = nn.Embedding(m["n_station_slots"] + 1, width)
+            nn.init.normal_(self.station_embedding.weight, std=0.02)
+
+    def station_slots(self, station_id, device):
+        """M8-compatible hashed slots; only training stations get a named slot."""
+        if self.station_embedding is None:
+            raise RuntimeError("station_embedding is disabled")
+        ids = np.asarray(station_id, dtype=np.int64).reshape(-1)
+        known = self.dataset_cfg["known_stations"]
+        slots = np.where(
+            np.isin(ids, known if known is not None else []),
+            ids % (self.station_embedding.num_embeddings - 1) + 1,
+            0,
+        )
+        slots = torch.as_tensor(slots, dtype=torch.long, device=device)
+        if self.training and self.slot_dropout > 0:
+            slots = slots.masked_fill(
+                torch.rand(slots.shape, device=device) < self.slot_dropout, 0
+            )
+        return slots
 
     def daily_profile(self, history, mask):
         """Align observed daily profiles to S+15min, repeat for both future days."""
@@ -91,6 +118,12 @@ class QueryRum(nn.Module):
         patches = history_input.reshape(size, self.length // self.patch, -1)
         memory = self.patch_projection(patches) + self.position
         memory = torch.cat([self.empty_token.expand(size, -1, -1), memory], 1)
+        station = None
+        if self.station_embedding is not None:
+            # Draw dropout once per sample, shared by history and future paths.
+            slots = self.station_slots(f.station_id, memory.device)
+            station = self.station_embedding(slots)[:, None, :]
+            memory = memory + station
         padding = ~mask.reshape(size, self.length // self.patch, -1).any(-1)
         padding = torch.cat(
             [torch.zeros(size, 1, dtype=torch.bool, device=mask.device), padding], 1
@@ -120,6 +153,8 @@ class QueryRum(nn.Module):
             -1,
         )
         query = self.query_projection(inputs)
+        if station is not None:
+            query = query + station
         # Bidirectional self-attention is safe here: all 192 NWP/hint steps are
         # known at issue time. No labels or observed future PV enter the decoder.
         for layer in self.decoder:
