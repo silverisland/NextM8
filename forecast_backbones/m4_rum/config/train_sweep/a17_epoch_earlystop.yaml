@@ -1,10 +1,10 @@
-# PV smoothing ablation on q6 EMA baseline; evaluation always uses raw targets.
+# A17 epoch experiment: validation and early stopping at epoch end.
 run:
   model_name: m4_rum
-  tag: s01_history3
+  tag: a17_epoch_earlystop
   seeds:
   - 0
-  out_dir: runs/m4_rum/smoothing_sweep/s01_history3
+  out_dir: runs/m4_rum/train_sweep/a17_epoch_earlystop
 dataset:
   pv_col: observe_power
   label_col: observe_power_future
@@ -39,31 +39,26 @@ features:
     timesfm3:
     - tsfm_predict
   cov_present: null
-preprocess:
-  pv_smoothing:
-    history_window: 3
-    target_window: 1
-    alignment: centered
 model:
   architecture: query_decoder
   decoder_layers: 2
-  station_embedding: false
+  station_embedding: true
   n_station_slots: 4096
   extensions:
-    residual_head: false
-    weather_day_reference: false
+    residual_head: true
+    weather_day_reference: true
     day_hidden: 32
-    local_weather: false
+    local_weather: true
     local_kernels:
     - 3
     - 9
-    hint_gate: false
+    hint_gate: true
     hint_gate_hidden: 32
   patch_len: 16
-  d_model: 128
+  d_model: 256
   n_heads: 4
   n_layers: 2
-  d_ff: 256
+  d_ff: 1024
   context_dim: 64
   weather_dim: 64
   head_hidden: 128
@@ -90,13 +85,13 @@ train:
     lr: 0.0003
     weight_decay: 0.05
     batch_size: 8
-    max_steps: 6000
+    max_steps: null  # No step cap: use epochs_max.
     epochs_max: 20
     warmup_steps: 300
     grad_clip: 1.0
     precision: fp32
     logging_steps: 50
-    eval_every_steps: 250
+    eval_every_steps: null  # Validate once at epoch end.
     save_every: 500
     sampling: random
     progress_bar: true

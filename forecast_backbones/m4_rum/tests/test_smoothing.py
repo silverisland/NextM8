@@ -192,7 +192,7 @@ def test_smoothing_recipes_only_change_preprocessing():
     baseline = load_config(ROOT / "d1_sweep/q6_ema099.yaml")
     baseline.pop("run")
     baseline["train"]["weights_path"] = None
-    files = sorted((ROOT / "smoothing_sweep").glob("*.yaml"))
+    files = sorted((ROOT.parent / "archived_experiments" / "smoothing_sweep").glob("*.yaml"))
     assert len(files) == 8
     for path in files:
         c = load_config(path)

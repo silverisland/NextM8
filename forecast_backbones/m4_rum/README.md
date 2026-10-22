@@ -10,8 +10,12 @@
 覆盖四种开关的全部组合，并附大模型/站点 embedding 与宽输出头对照。
 新开关位于 `model.extensions`，默认关闭，旧配置和权重继续兼容；需要重新训练开启新分支的模型。
 
-另提供 [8 组历史 PV / 训练标签居中均值对照](config/smoothing_sweep/README.md)，
-以 q6 为基线独立检验平滑；验证与评估始终使用原始真实功率，不平滑输出预测。
+PV 平滑实验已停止，原配置与结果移至 [平滑实验归档](archived_experiments/smoothing_sweep/README.md)。
+后续训练、推理使用原始功率，推荐从 `config/d1_sweep/q6_ema099.yaml` 继续实验；
+当前训练配置的历史与目标平滑窗口均为 1。旧平滑权重仍按保存的配置加载，以便复现实验。
+
+新增 [a17 按 epoch 验证与早停实验](config/train_sweep/README.md)：每轮验证一次，
+最多 20 个 epoch，连续 8 轮无改善早停；原 a17 按步验证配置保持不变。
 
 ## D+1 优化版：query_decoder
 
