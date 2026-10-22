@@ -3,6 +3,155 @@
 面向短期光伏功率预测的 M4 变体。历史上下文、未来气象与基模预测按时刻拼接，
 共享 MLP 输出 192 点功率，或输出逐时刻分位并通过独立选点层得到功率。
 **没有基模残差相加、门控混合或站点 embedding。**
+原结构由 `model.architecture: legacy` 保留；新的 `query_decoder` 见下一节。
+
+## D+1 优化版：query_decoder
+
+针对 M8 K2 约 78%、Rum 约 74% 的 D+1 差距，新增可选架构及配套对照配置。
+**当前只完成实现和链路验证，没有真实数据上的提分结论。旧默认配置和旧权重行为保留。**
+
+已核对的实现差异：原 Rum 把全部历史压成 64 维 CTX，各未来时刻只访问本时刻的天气/提示，
+缺少未来时刻之间的信息通路；默认 MSE 配置及旧 Pinball 配置均保留 history_dropout=0.2、
+hint_dropout=0.3，而 M8 K2 的 hint_dropout=0。旧 Pinball 只有全时段 p_star，没有非负/容量裁剪。
+这些是待消融的差异，不是已经证明的 4 分差距归因。M8 还具有太阳几何等特征，不能把本版称作等价复现。
+
+新版数据流：
+
+```text
+历史 PV + 气象 + 缺测掩码 + 时间
+  → 同一时间片内联合 Patch → 历史 Transformer → 完整历史 token
+
+每个未来时刻：天气/掩码、时间/提前量、TimesFM/掩码、历史日曲线
+  → 192 个查询 → 未来已知特征之间的 self-attention
+  → 按预测时刻 cross-attention 读取历史 token
+  → 拼回原始逐时刻输入与历史覆盖率 → MLP → 原始分位 → Pinball loss
+  → 仅验证/推理：分位排序、可选物理裁剪、分段 p_star
+```
+
+历史日曲线提供最后 24 小时、历史同一相位均值及可用率；完全由起报时及之前的观测计算。
+未来时刻 0 对齐历史 `L-96`，第 95 步对齐 `L-1`，第二天重复相位，不能拿未来真实功率填入。
+未来自注意力只使用本次起报已知的 NWP/基模预测，不读取未来标签。
+缺历史时仍有可用的空 token，避免全掩码 attention 产生 NaN；日曲线也遵循 history_dropout。
+新版没有强制添加 TimesFM 残差，所有分位仍由网络直接预测。
+
+建议至少跑以下两个配置，保持相同切分、种子及 GPU 数：
+
+| 配置 | 架构 | 用途 |
+| --- | --- | --- |
+| `config/pinball_control.yaml` | 原 legacy | 判断训练/决策调整的收益 |
+| `config/query_decoder.yaml` | 新 query_decoder | 在相同训练/决策条件下检验新架构 |
+
+两者均用 Pinball、history/hint dropout=0、batch 8/卡、lr=3e-4、warmup 300、最多 6000 步、
+每 250 步验证、D+1 早停 patience=8。保留原普通 dropout=0.1、weight_decay=0.05。
+默认前 16 步 p_star_l1，其余 p_star，并启用非负及容量裁剪；对 10:00 起报而言，
+D+1 `[55:151]` 全部使用 p_star，前 16 步的规则不直接影响 D+1。
+物理裁剪不作用于训练损失，不根据验证或测试标签估计容量。
+
+在 NextM8 根目录依次运行（实际路径自行替换）：
+
+```bash
+for VARIANT in pinball_control query_decoder; do
+  bash train_shell/train_m4_rum.sh --gpus 0 \
+    --config "forecast_backbones/m4_rum/config/${VARIANT}.yaml" \
+    --train_parquet 'datasets/train/*.parquet' \
+    --valid_parquet 'datasets/valid/*.parquet' \
+    --out "runs/m4_rum/${VARIANT}_s0" --max_steps 6000 --save_every 500
+
+  bash eval_shell/eval_m4_rum.sh \
+    --runs "runs/m4_rum/${VARIANT}_s0" --test 'datasets/test/*.parquet' \
+    --full --out "runs/m4_rum/${VARIANT}_s0/eval_final"
+done
+```
+
+默认使用 `timesfm3`（兼容 `tsfm_predict`）和 `pipelines/forecasting/assets/info.csv`。
+自定义站表/提示列可传 `--station_meta` / `--hint_col`。必须显式提供验证集才能早停；
+只给 train_parquet 的旧行为仍是全量 refit，不会按 D+1 挑最佳权重。
+多卡时 `batch_size` 是每卡值，对照实验必须固定总批量。换种子修改 YAML 的 `run.seeds: [1]` 等，
+不要把多个数字写进同一次配置当成自动重复训练。先按验证分数选方案，再在固定测试集评估。
+
+**注意 D+1 汇总口径**：原 Rum `reports/summary.csv` 的 `nanwang_short_D+1` 是用于选模的站日平均；
+M8 `--full` 的同名字段是逐站月报汇总后再站间平均，不能直接混着比较。
+现在 Rum `--full` 额外写 `reports/m8_comparable_summary.csv`，其 `nanwang_short_D+1` 与 M8
+完整报告使用同一聚合口径；原汇总表仍保留，`station_mean_nanwang_short_D+1` 同样是这个可比值。
+缺少足够评估天数时可能是 NaN，不能据此判定模型得分为 0。分数单位是 0–100，0.78 应对应 78。
+`reports/members.csv` 增加历史、提示、未来气象整行缺失比例，排查训练/推理输入不一致。
+
+`--point median/p_star/p_star_l1` 会清空分段规则，实现真正的全时段覆盖；保留配置中的物理开关。
+未设置 `clip_negative/capacity_cap` 的旧配置仍不裁剪。新权重必须用 query_decoder 配置加载，
+不能将旧权重强行加载成新版；加载采用严格形状检查，需要重新训练新版。
+
+本地检查包括：旧结构跨未来步梯度严格为零而新版非零、历史日曲线对齐、缺测/dropout、
+标签泄漏、Pinball 梯度、加权中位数、训练/最佳权重/快照/完整报告。
+另做了一个专门检验未来跨步信息通路的合成任务：输入信号仅出现在后半段，预测前 16 步，
+新版能学习这条关系。这个任务不是光伏 D+1 实验，不代表真实提升幅度。
+
+## D+1 调参配置组（8 组）
+
+配置目录：`config/d1_sweep/`。这些 YAML 将有效参数完整写出，避免后续默认值变化干扰对照。
+统一条件：同一训练/验证集、seed 0、单 GPU、batch 8、最多 6000 步、warmup 300、每 250 步验证、
+patience 8、Pinball loss、D+1 p_star；历史/提示 dropout 均为 0，验证批量统一为 32。
+每个配置有独立 tag 和输出目录。这里提供候选实验，没有预先确定的精度排名。
+
+| 配置 | 相对 q0 的变化 | 要验证的问题 |
+| --- | --- | --- |
+| `q0_baseline.yaml` | 新版基线：lr=3e-4，weight_decay=0.05，dropout=0.1，patch=16，宽128/FFN256 | 基准结果 |
+| `q1_lr2e4.yaml` | lr=2e-4 | 学习率降低后 D+1 是否更稳定 |
+| `q2_wd001.yaml` | weight_decay=0.01 | 原权重衰减是否过强 |
+| `q3_dropout005.yaml` | model.dropout=0.05 | 普通 Dropout 是否导致欠拟合 |
+| `q4_patch8.yaml` | patch_len=8，2 小时一个 Patch | 更细历史时间分辨率是否有帮助 |
+| `q5_width192.yaml` | d_model=192、d_ff=384；其他层数/预测头不变 | 增大容量是否有效 |
+| `q6_ema099.yaml` | ema_decay=0.99 | 权重平均是否改善验证稳定性 |
+| `c0_legacy.yaml` | 换回旧 legacy 架构，其余条件一致 | 新架构是否真的优于旧结构 |
+
+除容量组同时调整宽度与 FFN 外，各调参组只改变一个参数；先观察独立收益，再组合。
+EMA 组的验证、最佳权重、快照均使用 EMA 权重。q4/q5 可能占用更多资源，应保持 batch 一致；
+若显存不足，统一降低所有组的 batch 后重跑，或先跳过该组。
+
+单组训练（在 NextM8 根目录）：
+
+```bash
+bash train_shell/train_m4_rum.sh --gpus 0 \
+  --config forecast_backbones/m4_rum/config/d1_sweep/q0_baseline.yaml \
+  --train_parquet 'datasets/train/*.parquet' \
+  --valid_parquet 'datasets/valid/*.parquet'
+```
+
+每组运行中自动按 D+1 验证，无需额外启动验证进程。未提供 valid 时会进入全量 refit，不能用于这轮选模。
+不要让每组都用 `--gpus auto` 抢占全部 GPU。以下两卡示例最多同时跑 2 组，每张卡顺序执行自己的队列；
+CPU 线程数固定为每进程 4，可按服务器资源统一修改。路径替换成真实切分目录：
+
+```bash
+TRAIN_PARQUET='datasets/train/*.parquet'
+VALID_PARQUET='datasets/valid/*.parquet'
+SWEEP_ROOT='runs/m4_rum/d1_sweep'
+mkdir -p "$SWEEP_ROOT/logs"
+
+run_group() {
+  local gpu="$1"
+  shift
+  local variant
+  for variant in "$@"; do
+    bash train_shell/train_m4_rum.sh --gpus "$gpu" --cpu_threads 4 \
+      --config "forecast_backbones/m4_rum/config/d1_sweep/${variant}.yaml" \
+      --train_parquet "$TRAIN_PARQUET" --valid_parquet "$VALID_PARQUET" \
+      --out "$SWEEP_ROOT/$variant" \
+      > "$SWEEP_ROOT/logs/$variant.log" 2>&1 || return 1
+  done
+}
+run_group 0 q0_baseline q1_lr2e4 q2_wd001 q3_dropout005 & pid0=$!
+run_group 1 c0_legacy q4_patch8 q5_width192 q6_ema099 & pid1=$!
+status=0
+wait "$pid0" || status=1
+wait "$pid1" || status=1
+printf 'All workers finished; status=%s (0 means success)\n' "$status"
+```
+
+GPU 编号按服务器修改；`PYTHON=/path/to/python` 可选择环境。自定义站表、提示列时，所有组使用
+相同的 `--station_meta`、`--hint_col`。第二轮更换输出根目录，不复用上轮目录覆盖结果。
+先比较每组 `train_log.json` 的 `best` 和 `best_step`（越高越好，单位 0–100），
+挑前 2–3 组再用 seed 1、2 重复，不能凭单次 seed 下很小的差距认定胜出。
+最后对选定模型做 `--full` 测试，用 `reports/m8_comparable_summary.csv` 与 M8 对比；
+不要按反复查看测试集的分数挑参数。
 
 ## 时间与评估口径
 
@@ -17,10 +166,11 @@ NWP、基模预测和标签必须使用相同起点；不能传入从次日零�
 - NRMSE：默认整点起报，全部 192 点、含夜间，使用固定容量归一。
 - `--full`：全部起报行推理，使用公共层逐站工作簿生成函数，输出相同六张 sheet。
   完整超短期指标仍需要每十五分钟起报的数据，ODS 短期需要相应 09:00 起报行。
-- 模型不截负值、不做容量/晴空钳位、不夜间归零。Pinball 模式的分位插值和 `p_star`
+- 旧默认配置不截负值、不做容量/晴空钳位、不夜间归零；新对照配置可启用非负/容量裁剪。
+  Pinball 模式的分位插值和 `p_star`
   数学口径与 M8 相同，使用 Rum 自己的实现，不带 M8 的太阳几何或物理后处理。
 
-## 网络
+## 原 legacy 网络
 
 ```text
 历史功率/固定容量 + 历史气象 + 有效值掩码
@@ -158,8 +308,11 @@ bash train_shell/train_m4_rum.sh \
 `--gpus 0` 为单卡，`--gpus 0,1,2,3` 为四卡；默认 `auto` 使用 PyTorch 当前可见的全部卡，
 尊重外部 `CUDA_VISIBLE_DEVICES`。多卡时自动通过 `torch.distributed.run` 启动 DDP，
 每张卡一个进程；`--port 29701` 可为并行实验换端口，`--cpu_threads 4` 设置每进程 CPU 线程。
-解释器优先级为 `--venv-python` > `$PYTHON` > M8 服务器环境 `/home/ma-user/ts3/bin/python`
-（不存在时回退到 PATH 中的 `python`）。无 GPU 时需显式加 `--allow-cpu`。
+解释器优先级为 `--venv-python` > `$PYTHON` > M8 服务器环境 `/home/ma-user/ts3/bin/python`。
+选中的解释器不存在或不可执行时直接报错，禁止自动回退到 PATH 中的 `python`。
+`eval_shell/eval_m4_rum.sh` 使用相同优先级，也支持 `--venv-python`，避免训练与评估环境不一致。
+本地运行时显式设置 `PYTHON=/path/to/venv/bin/python` 或传 `--venv-python`。
+无 GPU 时需显式加 `--allow-cpu`。
 同时支持训练参数的连字符写法及上述 M8 风格下划线别名。
 
 环境初始化与 M8 对齐：首次导入 PyTorch 探卡前，将

@@ -63,17 +63,19 @@ def decide(
     capacity: Tensor,
     point_cfg: Mapping,
 ) -> dict[str, Tensor]:
-    """Sort crossing quantiles and select a median or short-term p_star point.
+    """Sort, optionally clip, then apply global or step-specific decisions.
 
-    Inputs and outputs retain their original power units. There is no capacity
-    clipping, negative clipping, calibration, or nighttime modification.
-    Configuration validity is checked by Rum's configuration loader.
+    Physical clipping is opt-in; raw training quantiles are never modified.
     """
     if q_raw.ndim != 3 or q_raw.shape[-1] != len(levels):
         raise ValueError("quantiles must have shape [batch, horizon, len(levels)]")
     if capacity.shape not in ((q_raw.shape[0],), (q_raw.shape[0], 1)):
         raise ValueError("capacity must have shape [batch] or [batch, 1]")
     quantiles = q_raw.sort(dim=-1).values
+    if point_cfg.get("clip_negative", False):
+        quantiles = quantiles.clamp_min(0)
+    if point_cfg.get("capacity_cap", False):
+        quantiles = torch.minimum(quantiles, capacity.to(quantiles).reshape(-1, 1, 1))
     median = level_value(quantiles, levels, 0.5)
     optimal = p_star(
         quantiles,
@@ -83,11 +85,26 @@ def decide(
         step=point_cfg.get("tau_grid_step", 0.005),
     )
     method = point_cfg.get("default", "median")
-    if method not in ("median", "p_star"):
+    rules = point_cfg.get("by_step", [])
+    choices = {"median": median, "p_star": optimal}
+    if method == "p_star_l1" or any(rule["method"] == "p_star_l1" for rule in rules):
+        grid = quantile_grid(quantiles, levels, point_cfg.get("tau_grid_step", 0.005))
+        floor = capacity.to(grid).reshape(-1, 1, 1) * point_cfg.get("floor_ratio", 0.2)
+        weights = floor / torch.maximum(grid, floor)
+        cdf = weights.cumsum(-1)
+        index = (cdf >= cdf[..., -1:] * 0.5).to(torch.int64).argmax(-1, keepdim=True)
+        choices["p_star_l1"] = grid.gather(-1, index).squeeze(-1)
+    if method not in choices:
         raise ValueError(f"Unsupported point method: {method!r}")
+    point = choices[method]
+    if rules:
+        point = point.clone()
+        for rule in rules:
+            start, end = rule["steps"]
+            point[:, start:end] = choices[rule["method"]][:, start:end]
     return {
         "quantiles_cal": quantiles,
         "median": median,
         "p_star": optimal,
-        "point": optimal if method == "p_star" else median,
+        "point": point,
     }

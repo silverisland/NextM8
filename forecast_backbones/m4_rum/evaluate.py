@@ -31,7 +31,9 @@ def load_member(run, device="cpu", point=None):
     if point is not None:
         if cfg.get("train", {}).get("loss", "mse") != "pinball":
             raise ValueError("--point requires a checkpoint trained with pinball loss")
-        cfg = deep_merge(cfg, {"decision": {"point": {"default": point}}})
+        cfg = deep_merge(
+            cfg, {"decision": {"point": {"default": point, "by_step": []}}}
+        )
     model = TransformersAdaptedM4RumModel(cfg).to(device)
     if not model.weights_loaded:
         raise RuntimeError(f"Failed to load {weights}")
@@ -85,7 +87,15 @@ def evaluate(
         if len(ds) == 0:
             raise ValueError("Empty test dataset")
         scores, _, frame = validate(model, ds, collate, full)
-        member_rows.append({"run": str(run), **scores})
+        coverage = {
+            f"{name}_rate": float(frame[name].mean())
+            for name in (
+                "history_unavailable",
+                "hint_unavailable",
+                "future_weather_unavailable",
+            )
+        }
+        member_rows.append({"run": str(run), **scores, **coverage})
         if result is None:
             first, result = model, frame.copy()
         else:
@@ -189,6 +199,24 @@ def evaluate(
                 summary[f"station_mean_{key}"] = pd.to_numeric(
                     station_metrics[key], errors="coerce"
                 ).mean()
+        # M8's full-evaluation summary uses station means, whereas Rum's
+        # nanwang_short_D+1 above is a station-day mean used for checkpointing.
+        # Export an explicitly comparable table without changing the old keys.
+        comparable = {
+            "n_members": len(runs),
+            "n_stations": len(station_metrics),
+            "aggregation": "station_mean_of_monthly_report",
+        }
+        for key in (
+            "nanwang_short_D+1",
+            "nanwang_ultra_short",
+            "ods_short_rmse_acc",
+            "ods_ultra_short_rmse_acc",
+        ):
+            comparable[key] = summary.get(f"station_mean_{key}", float("nan"))
+        pd.DataFrame([comparable]).to_csv(
+            reports / "m8_comparable_summary.csv", index=False
+        )
     pd.DataFrame([summary]).to_csv(reports / "summary.csv", index=False)
     print(pd.DataFrame([summary]).to_string(index=False))
     return {"summary": summary, "station_table": table, "result": result}
@@ -211,7 +239,7 @@ def main(argv=None):
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument(
         "--point",
-        choices=("median", "p_star"),
+        choices=("median", "p_star", "p_star_l1"),
         help="Override pinball checkpoint point selection",
     )
     a = parser.parse_args(argv)

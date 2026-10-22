@@ -1,0 +1,18 @@
+# Same training/data/decision recipe as pinball_control; only network changes.
+run: {model_name: m4_rum, tag: rum_query, out_dir: runs/m4_rum/query, seeds: [0]}
+dataset:
+  station_meta: pipelines/forecasting/assets/info.csv
+  station_meta_cols: {station_id: plantid, station: plant_pointname, lat: LATITUDE, lon: LONGITUDE, alt_m: null, cap_mw: GCCAPACITY}
+model:
+  architecture: query_decoder
+train:
+  loss: pinball
+  history_dropout: 0.0
+  hint_dropout: 0.0
+  schedule: {batch_size: 8, precision: fp32, lr: 0.0003, max_steps: 6000, warmup_steps: 300, eval_every_steps: 250, save_every: 500}
+decision:
+  point:
+    default: p_star
+    by_step: [{steps: [0, 16], method: p_star_l1}]
+    clip_negative: true
+    capacity_cap: true

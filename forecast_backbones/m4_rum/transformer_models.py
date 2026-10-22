@@ -15,6 +15,7 @@ from . import model as architecture
 from .config import load_config
 from .decision import decide
 from .features import FeatureBuilder
+from .query_model import QueryRum
 
 
 class TransformersAdaptedM4RumModel(nn.Module):
@@ -27,7 +28,12 @@ class TransformersAdaptedM4RumModel(nn.Module):
             ds["station_meta"], ds["station_meta_cols"]
         )
         self.fe = FeatureBuilder(self.cfg, self.station_meta)
-        self.core = architecture.Rum(self.cfg)
+        core = (
+            QueryRum
+            if self.cfg["model"]["architecture"] == "query_decoder"
+            else architecture.Rum
+        )
+        self.core = core(self.cfg)
         self.levels = tuple(self.cfg["model"]["quantiles"])
         self.weights_loaded = False
         weights = self.cfg["train"]["weights_path"]

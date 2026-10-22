@@ -39,6 +39,8 @@ DEFAULT_CFG = {
         "cov_present": None,
     },
     "model": {
+        "architecture": "legacy",
+        "decoder_layers": 2,
         "patch_len": 16,
         "d_model": 128,
         "n_heads": 4,
@@ -83,6 +85,9 @@ DEFAULT_CFG = {
     "decision": {
         "point": {
             "default": "median",
+            "by_step": [],
+            "clip_negative": False,
+            "capacity_cap": False,
             "floor_ratio": 0.2,
             "tau_grid_step": 0.005,
             "tail": "flat",
@@ -113,6 +118,12 @@ def load_config(config=None):
     ds, model, fe, train = (cfg[k] for k in ("dataset", "model", "features", "train"))
     if ds["pred_len"] != 192 or ds["step_min"] != 15:
         raise ValueError("M4-Rum uses 192 steps, starting 15 minutes after issue time")
+    if model["architecture"] not in ("legacy", "query_decoder"):
+        raise ValueError("model.architecture must be legacy or query_decoder")
+    if type(model["decoder_layers"]) is not int or model["decoder_layers"] <= 0:
+        raise ValueError("model.decoder_layers must be a positive integer")
+    if model["architecture"] == "query_decoder" and ds["context_len"] % 96:
+        raise ValueError("query_decoder context_len must contain complete 96-step days")
     for key in (
         "patch_len",
         "d_model",
@@ -182,8 +193,33 @@ def load_config(config=None):
     ):
         raise ValueError("model.quantiles must remain distinct and in (0,1) in float32")
     point = cfg["decision"]["point"]
-    if point["default"] not in ("median", "p_star") or point["tail"] != "flat":
-        raise ValueError("decision.point supports median/p_star with flat tails")
+    methods = ("median", "p_star", "p_star_l1")
+    if point["default"] not in methods or point["tail"] != "flat":
+        raise ValueError(
+            "decision.point supports median/p_star/p_star_l1 with flat tails"
+        )
+    if not isinstance(point["by_step"], list):
+        raise ValueError("decision.point.by_step must be a list")  # noqa: TRY004 -- configuration errors use ValueError
+    occupied = set()
+    for rule in point["by_step"]:
+        if not isinstance(rule, dict) or set(rule) != {"steps", "method"}:
+            raise ValueError("Each by_step rule requires steps and method")
+        bounds = rule["steps"]
+        if (
+            not isinstance(bounds, (list, tuple))
+            or len(bounds) != 2
+            or any(type(x) is not int for x in bounds)
+            or not 0 <= bounds[0] < bounds[1] <= ds["pred_len"]
+            or rule["method"] not in methods
+        ):
+            raise ValueError("Invalid by_step bounds or method")
+        indices = set(range(*bounds))
+        if indices & occupied:
+            raise ValueError("by_step rules must not overlap")
+        occupied.update(indices)
+    for key in ("clip_negative", "capacity_cap"):
+        if type(point[key]) is not bool:
+            raise ValueError(f"decision.point.{key} must be boolean")
     for key in ("floor_ratio", "tau_grid_step"):
         value = point[key]
         if (
@@ -195,7 +231,12 @@ def load_config(config=None):
             raise ValueError(f"decision.point.{key} must be finite and positive")
     if not 1e-4 <= point["tau_grid_step"] <= 1:
         raise ValueError("decision.point.tau_grid_step must be in [0.0001, 1]")
-    if point["default"] == "p_star" and train["loss"] != "pinball":
+    if (
+        point["default"] != "median"
+        or point["by_step"]
+        or point["clip_negative"]
+        or point["capacity_cap"]
+    ) and train["loss"] != "pinball":
         raise ValueError("p_star requires train.loss=pinball and a quantile head")
     if train["early_stop"]["metric"] not in ("nanwang_short_D+1", "nrmse"):
         raise ValueError("early_stop.metric must be nanwang_short_D+1 or nrmse")
