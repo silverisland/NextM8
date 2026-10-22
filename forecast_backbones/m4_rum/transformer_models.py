@@ -16,6 +16,7 @@ from .config import load_config
 from .decision import decide
 from .features import FeatureBuilder
 from .query_model import QueryRum
+from .smoothing import masked_moving_average
 
 
 class TransformersAdaptedM4RumModel(nn.Module):
@@ -84,6 +85,11 @@ class TransformersAdaptedM4RumModel(nn.Module):
             rows = valid.any(dim=1)
             if not rows.any():
                 raise ValueError("Batch contains no finite future labels")
+            smoothing = self.cfg["preprocess"]["pv_smoothing"]
+            if self.training and smoothing["target_window"] > 1:
+                target = masked_moving_average(
+                    target, valid, smoothing["target_window"], smoothing["alignment"]
+                )
             target = torch.where(valid, target, 0)
             if self.core.is_quantile:
                 # Train raw quantiles; sorting and p_star belong only to reporting.

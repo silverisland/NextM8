@@ -15,6 +15,8 @@ from pipelines.forecasting.stations import (
     window_timestamps,
 )
 
+from .smoothing import masked_moving_average
+
 
 def as_numpy(value):
     return (
@@ -134,7 +136,15 @@ class FeatureBuilder:
             x = x[:, -length:]
             return F.pad(x, (length - x.shape[1], 0), value=float("nan"))
 
-        past, future = [window(ds["pv_col"]) / cap], []
+        pv = window(ds["pv_col"]) / cap
+        smoothing = self.cfg["preprocess"]["pv_smoothing"]
+        if smoothing["history_window"] > 1:
+            valid_pv = torch.isfinite(pv)
+            pv = masked_moving_average(
+                pv, valid_pv, smoothing["history_window"], smoothing["alignment"]
+            )
+            pv = torch.where(valid_pv, pv, float("nan"))
+        past, future = [pv], []
         for pair, offset, scale in zip(
             self.fe["past_future"],
             self.fe["weather_offsets"],

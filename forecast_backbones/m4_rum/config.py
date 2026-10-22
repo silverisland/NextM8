@@ -38,6 +38,13 @@ DEFAULT_CFG = {
         "col_aliases": {"timesfm3": ["tsfm_predict"]},
         "cov_present": None,
     },
+    "preprocess": {
+        "pv_smoothing": {
+            "history_window": 1,
+            "target_window": 1,
+            "alignment": "centered",
+        },
+    },
     "model": {
         "architecture": "legacy",
         "decoder_layers": 2,
@@ -130,6 +137,20 @@ def load_config(config=None):
     ds, model, fe, train = (cfg[k] for k in ("dataset", "model", "features", "train"))
     if ds["pred_len"] != 192 or ds["step_min"] != 15:
         raise ValueError("M4-Rum uses 192 steps, starting 15 minutes after issue time")
+    smoothing = cfg["preprocess"]["pv_smoothing"]
+    if smoothing["alignment"] != "centered":
+        raise ValueError(
+            "pv_smoothing.alignment must be centered (keep boundary points unchanged)"
+        )
+    for key, limit in (
+        ("history_window", ds["context_len"]),
+        ("target_window", ds["pred_len"]),
+    ):
+        window = smoothing[key]
+        if type(window) is not int or window < 1 or window > limit or window % 2 == 0:
+            raise ValueError(
+                f"pv_smoothing.{key} must be an odd integer in [1, {limit}]"
+            )
     if model["architecture"] not in ("legacy", "query_decoder"):
         raise ValueError("model.architecture must be legacy or query_decoder")
     if type(model["station_embedding"]) is not bool:
