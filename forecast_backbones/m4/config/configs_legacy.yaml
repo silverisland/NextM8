@@ -1,0 +1,117 @@
+dataset:
+  # feature_aggregations:
+  # - agg_output_col: 'general_ghi'
+  #   raw_input_cols:
+  #   - "ssrd_pos_1"
+  #   - "ssrd_pos_2"
+  #   - "ssrd_pos_3"
+  #   - "ssrd_pos_4"
+  #   - "ssrd_pos_5"
+  #   - "ssrd_pos_6"
+  #   - "ssrd_pos_7"
+  #   - "ssrd_pos_8"
+  #   - "ssrd_pos_9"
+
+  # - agg_output_col: 'general_temp'
+  #   raw_input_cols:
+  #   - "t2m_pos_1"
+  #   - "t2m_pos_2"
+  #   - "t2m_pos_3"
+  #   - "t2m_pos_4"
+  #   - "t2m_pos_5"
+  #   - "t2m_pos_6"
+  #   - "t2m_pos_7"
+  #   - "t2m_pos_8"
+  #   - "t2m_pos_9"
+
+  # - agg_output_col: 'general_ghi_predict'
+  #   raw_input_cols:
+  #     # - 'GHI_SOLARGIS_predict'
+  #     - 'ssrd_pos_1_predict'
+  #     - 'ssrd_pos_2_predict'
+  #     - 'ssrd_pos_3_predict'
+  #     - 'ssrd_pos_4_predict'
+  #     - 'ssrd_pos_5_predict'
+  #     - 'ssrd_pos_6_predict'
+  #     - 'ssrd_pos_7_predict'
+  #     - 'ssrd_pos_8_predict'
+  #     - 'ssrd_pos_9_predict'
+
+  # - agg_output_col: 'general_temp_predict'
+  #   raw_input_cols:
+  #     # - 'TEMP_SOLARGIS_predict'
+  #     - 't2m_pos_1_predict'
+  #     - 't2m_pos_2_predict'
+  #     - 't2m_pos_3_predict'
+  #     - 't2m_pos_4_predict'
+  #     - 't2m_pos_5_predict'
+  #     - 't2m_pos_6_predict'
+  #     - 't2m_pos_7_predict'
+  #     - 't2m_pos_8_predict'
+  #     - 't2m_pos_9_predict'
+
+  conv_cols:
+    - 'general_ghi'
+    # - 'GHI_SOLARGIS'
+    - 'general_temp'
+    # - 'TEMP_SOLARGIS'
+  conv_predict_cols:
+    - 'general_ghi_predict'
+    # - 'GHI_SOLARGIS_predict'
+    - 'general_temp_predict'
+    # - 'TEMP_SOLARGIS_predict'
+
+  target_col:  'observe_power_future'
+  pv_col: 'observe_power'
+  tsfm_col: 'chronos'
+  timestamp_col: 'timestamp_win'
+  label_norm:
+  - cap_power_on
+
+
+
+inference:
+  is_training: 1          # 2 ft; 1 train; 0 inference
+  checkpoints: './checkpoints/'
+  model_id: 'm4_v321_test'
+  pred_len: 192
+  input_len: 672
+  seq_len: 864
+  ft_checkpoints: './checkpoints/'   #ft
+  ft_model_id: 'm4_v321_test'        #ft
+
+model:
+  fc_dropout: 0.2
+  head_dropout: 0.1
+  patch_len: 96
+  stride: 96
+  padding_patch: 'None'
+  revin: 1
+  affine: 0
+  subtract_last: 0
+  individual: 0
+  enc_in: 3 # 这里控制输入通道数量
+  d_model: 256
+  n_heads: 4
+  e_layers: 4
+  d_layers: 1
+  d_ff: 1024
+  factor: 1
+  dropout: 0.1
+  activation: 'ReLU'
+  embedding_dim: 256
+  loss_type: mae
+  lambda_main: 100
+  lambda_nw: 50
+optimization:
+  random_seed: 2025
+  train_epochs: 100
+  learning_rate: 0.0001
+  lradj: 'TST'
+  pct_start: 0.3
+  num_workers: 0
+  batch_size: 512
+  patience: 10
+  device: 'cuda'
+  gpu: 0
+  fp16: true
