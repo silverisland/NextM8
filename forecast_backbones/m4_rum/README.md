@@ -71,7 +71,8 @@ for VARIANT in pinball_control query_decoder; do
 done
 ```
 
-默认使用 `timesfm3`（兼容 `tsfm_predict`）和 `pipelines/forecasting/assets/info.csv`。
+配置文件默认使用 `timesfm3`（兼容 `tsfm_predict`）和 `forecast_backbones/m8/station_meta.csv`，
+站表列名映射统一为 `station_id / station / lat / lon / alt_m / cap_mw`。
 自定义站表/提示列可传 `--station_meta` / `--hint_col`。必须显式提供验证集才能早停；
 只给 train_parquet 的旧行为仍是全量 refit，不会按 D+1 挑最佳权重。
 多卡时 `batch_size` 是每卡值，对照实验必须固定总批量。换种子修改 YAML 的 `run.seeds: [1]` 等，
@@ -336,7 +337,7 @@ bash train_shell/train_m4_rum.sh \
 python -m forecast_backbones.m4_rum.train \
   --splits-dir data/splits/m8_v1 --out runs/m4_rum/rum_s0
 
-# 南网数据：configs.yaml 指向公共 assets/info.csv，列名映射与 M8 j1 相同
+# configs.yaml 与各实验配置统一使用 forecast_backbones/m8/station_meta.csv 及其标准列名
 python -m forecast_backbones.m4_rum.train \
   --config forecast_backbones/m4_rum/config/configs.yaml \
   --train-parquet /path/to/train --out runs/m4_rum/full \
@@ -493,6 +494,7 @@ Rum 的网络、特征、训练、评估均不得导入其他模型的私有实�
 M8 原有模块保留兼容入口，调用同一份公共实现，不维护两份框架逻辑。
 
 部署只需 `forecast_backbones/m4_rum`、`pipelines`、`interfaces` 及配置引用的站表，
-**不需要 M8 目录、网络、权重或任何 M8 私有代码**。
+不依赖 M8 的网络、权重或私有代码。当前 YAML 配置引用 `forecast_backbones/m8/station_meta.csv`；
+独立部署时需携带该 CSV，或修改 `station_meta` 指向实际站表位置。
 `tests/test_dependencies.py` 检查静态导入边界，并在不包含 M8 的临时部署目录里
 禁止导入其他模型，实际运行训练、checkpoint 重载、统一推理和完整报表评估。

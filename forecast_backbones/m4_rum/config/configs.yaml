@@ -1,14 +1,14 @@
 # 192 steps after issue time; at 10:00, D+1 is [55:151].
 run: {model_name: m4_rum, tag: rum, out_dir: runs/m4_rum/rum, seeds: [0]}
 dataset:
-  station_meta: pipelines/forecasting/assets/info.csv
+  station_meta: forecast_backbones/m8/station_meta.csv
   station_meta_cols:
-    station_id: plantid
-    station: plant_pointname
-    lat: LATITUDE
-    lon: LONGITUDE
-    alt_m: null
-    cap_mw: GCCAPACITY
+    station_id: station_id
+    station: station
+    lat: lat
+    lon: lon
+    alt_m: alt_m
+    cap_mw: cap_mw
 features:
   hint_col: timesfm3
   col_aliases: {timesfm3: [tsfm_predict]}

@@ -79,6 +79,14 @@ fi
 
 # 动态库路径必须在首次 import torch 前配置，探卡及所有训练子进程共用此环境。
 export LD_LIBRARY_PATH="${PRE_CUDA_LD}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# HF datasets 的 Arrow 缓存默认放在 work 下的 NFS 路径，避免写入根文件系统触发磁盘配额。
+# 外部已设 HF_DATASETS_CACHE 时尊重外部值
+if [ -z "${HF_DATASETS_CACHE:-}" ]; then
+  export HF_DATASETS_CACHE="${HOME:-/home/ma-user}/work/hanjs/hf_cache/datasets"
+  mkdir -p "$HF_DATASETS_CACHE"
+fi
+
 # 在设置可见卡之后，由训练所用解释器检测；auto 尊重外部 CUDA_VISIBLE_DEVICES。
 NP="$("$PYTHON_BIN" -c 'import torch; print(torch.cuda.device_count())')"
 if [ "$GPUS" != auto ] && [ "$NP" -ne "${#GPU_LIST[@]}" ]; then

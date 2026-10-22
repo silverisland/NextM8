@@ -18,5 +18,12 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "Python 解释器不可执行: ${PYTHON_BIN}（可用 --venv-python 或 PYTHON 显式指定；不自动回退）" >&2
   exit 1
 fi
+# HF datasets 的 Arrow 缓存默认放在 work 下的 NFS 路径，避免写入根文件系统触发磁盘配额。
+# 外部已设 HF_DATASETS_CACHE 时尊重外部值
+if [ -z "${HF_DATASETS_CACHE:-}" ]; then
+  export HF_DATASETS_CACHE="${HOME:-/home/ma-user}/work/hanjs/hf_cache/datasets"
+  mkdir -p "$HF_DATASETS_CACHE"
+fi
+
 echo "Python=$PYTHON_BIN"
 exec "$PYTHON_BIN" -m forecast_backbones.m4_rum.evaluate "${ARGS[@]}"

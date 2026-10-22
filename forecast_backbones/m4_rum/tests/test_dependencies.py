@@ -38,10 +38,10 @@ def test_no_private_model_dependencies():
 
 
 def test_default_assets_do_not_require_another_model():
-    for config in (None, RUM / "config" / "configs.yaml"):
-        path = Path(load_config(config)["dataset"]["station_meta"])
-        assert path.parts[:2] == ("pipelines", "forecasting")
-        assert (ROOT / path).is_file()
+    # Built-in defaults remain standalone; YAML recipes explicitly share M8's CSV.
+    path = Path(load_config(None)["dataset"]["station_meta"])
+    assert path.parts[:2] == ("pipelines", "forecasting")
+    assert (ROOT / path).is_file()
 
 
 def test_train_and_full_evaluation_without_m8_directory(tmp_path):

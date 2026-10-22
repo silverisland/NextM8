@@ -1,14 +1,14 @@
 # Independent quantile head; use p_star for validation and inference.
 run: {model_name: m4_rum, tag: rum_pinball, out_dir: runs/m4_rum/rum_pinball, seeds: [0]}
 dataset:
-  station_meta: pipelines/forecasting/assets/info.csv
+  station_meta: forecast_backbones/m8/station_meta.csv
   station_meta_cols:
-    station_id: plantid
-    station: plant_pointname
-    lat: LATITUDE
-    lon: LONGITUDE
-    alt_m: null
-    cap_mw: GCCAPACITY
+    station_id: station_id
+    station: station
+    lat: lat
+    lon: lon
+    alt_m: alt_m
+    cap_mw: cap_mw
 model:
   quantiles: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 train:
