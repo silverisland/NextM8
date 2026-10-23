@@ -95,23 +95,36 @@ bash eval_shell/eval_m4.sh \
 训练中完全不存在的气象对保存为禁用通道，推理不会自动启用未训练通道。
 PatchTST 不额外输入缺失掩码，没有 Rum 的缺失分支机制。
 
-输入预处理和评估容量读站表的固定 `cap_mw`；主损失的容量保持原 M4 规则，见下文。
+输入预处理和评估容量读站表的固定 `cap_mw`。
 标准站表及线上 `info.csv` 均通过公共站表接口识别；训练保存实际站表路径，
 部署时须携带该站表或更新配置中的路径。
-损失只有原 M4 主损失：`criterion(prediction / capacity, target / capacity)`，
-默认 MAE，可选 `train.loss: mse` 或 `huber`（Huber 默认 delta=1）。
-预测和标签均以原功率单位传入损失。容量优先取 `dataset.label_norm` 的第一列，
-默认 `cap_power_on`；列缺失或 `label_norm` 为空时逐位置使用 `max(target, 1)`，
-与原主损失一致。容量支持标量、每行容量和逐时间步容量。
-直接对所有 batch/时间位置求 mean，不再改成带掩码的逐行平均；缺失标签会保留
-原 criterion 的 NaN 行为，训练标签需由上游保证有效。
-不乘 `lambda_main`，不添加 `PVNormalizedLoss` 或分位损失。
-独立实现位于 `m4/losses.py`，容量仅在有标签的损失计算中使用，不参与推理。
-不默认裁剪负值或夜间归零，输出恢复原功率单位。
 
-旧配置备份为 `config/configs_legacy.yaml`，仅作历史参考。当前按主损失训练，
-不依赖其他模型的损失实现；旧备份中的复合损失系数不用于新入口。
-新配置、固定容量预处理及 checkpoint 格式需要重新训练，旧权重不自动迁移。
+损失按用户提供的原始公式实现，配置为 `train.loss: quantile`：
+
+```python
+error = y_true - y_pred
+loss = 0
+for quantile in np.arange(0.1, 1.0, 0.1):
+    loss += torch.mean(torch.max(quantile * error, (quantile - 1) * error))
+```
+
+这里修正了原示例的拼写 `np.arrange` → `np.arange`。九个分位共用同一组
+`[B,192]` 点预测，每项对 batch 和时间点取 mean，再将九项求和，不除以9。
+对称分位求和在数学上等价于 `4.5 * MAE`；实现保留原循环和浮点计算顺序，
+并未增加九分位输出头。独立实现位于 `m4/losses.py`。
+
+当前 forward 将恢复原功率单位的 `logits` 与原功率标签传入该函数；损失内部
+不再除以容量，不读 `cap_power_on`，不使用 `max(target, 1)` 兜底，
+不添加南网损失或额外权重。缺失标签仍按原公式传播 NaN，训练标签需由上游保证有效。
+不默认裁剪负值或夜间归零。
+
+此前迁移版本将修改后的 MAE/MSE/Huber 主损失误当成原始设计，现已用上述用户
+提供的公式替换。旧迁移配置中的 `train.loss: mae/mse/huber` 和
+`dataset.label_norm` 不再支持：请改为 `train.loss: quantile` 并删除 `label_norm`。
+这次仅改变损失及其配置，不改变网络参数形状和推理前向；已有迁移版权重在更新
+配置后仍可推理，但若要得到原公式训练的模型，需要重新训练。
+`config/configs_legacy.yaml` 保留为旧格式参考，不由新入口直接加载。
+
 训练请使用 `train_m4.sh`，不使用旧 `train_shell/train_script.py`。
 
 ## 验证
@@ -121,7 +134,7 @@ PatchTST 不额外输入缺失掩码，没有 Rum 的缺失分支机制。
 ```
 
 测试覆盖训练选优、全量训练、EMA、严格重载、迁移运行目录、统一推理、
-原主损失数值/梯度、完整报表、解释器优先级和 GPU 启动参数。
+用户原始分位求和公式的数值/梯度、完整报表、解释器优先级和 GPU 启动参数。
 独立部署测试仅复制 M4、pipelines、interfaces，并拦截所有其他模型导入，
 实际完成训练、推理与完整报表。
 

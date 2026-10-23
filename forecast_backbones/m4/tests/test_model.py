@@ -7,29 +7,17 @@ from forecast_backbones.m4.config import load_config
 from forecast_backbones.m4.transformer_models import TransformersAdaptedM4Model
 
 
-@pytest.mark.parametrize("loss", ["mae", "mse", "huber"])
-@pytest.mark.parametrize("capacity_column", ["cap_power_on", "custom_capacity", None])
-def test_original_main_loss_and_backward(cfg, batch, loss, capacity_column):
-    cfg["train"]["loss"] = loss
-    cfg["dataset"]["label_norm"] = [capacity_column] if capacity_column else []
+def test_user_quantile_loss_in_forward_and_backward(cfg, batch):
+    from forecast_backbones.m4.losses import quantile_loss
+
     model = TransformersAdaptedM4Model(cfg).train()
     labels = batch["labels"]["observe_power_future"]
-    bd = dict(batch["batch_dict"])
-    if capacity_column:
-        bd[capacity_column] = torch.tensor([50.0, 200.0])
-        capacity = bd[capacity_column][:, None]
-    else:
-        capacity = torch.maximum(labels, torch.ones_like(labels))
-    out = model(bd, labels)
-    criterion = {
-        "mae": torch.nn.L1Loss,
-        "mse": torch.nn.MSELoss,
-        "huber": torch.nn.HuberLoss,
-    }[loss]()
-    expected = criterion(
-        (out.logits / capacity).unsqueeze(1), (labels / capacity).unsqueeze(1)
+    out = model(batch["batch_dict"], labels)
+    assert out.logits.shape == labels.shape == (2, 192)
+    torch.testing.assert_close(
+        out.loss, quantile_loss(out.logits, labels), rtol=0, atol=0
     )
-    torch.testing.assert_close(out.loss, expected, rtol=0, atol=0)
+    torch.testing.assert_close(out.loss, 4.5 * (out.logits - labels).abs().mean())
     out.loss.backward()
     assert any(
         p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters()
@@ -39,18 +27,16 @@ def test_original_main_loss_and_backward(cfg, batch, loss, capacity_column):
     )
 
 
-def test_missing_capacity_column_uses_original_target_fallback(cfg, batch):
+def test_loss_does_not_use_row_capacity_or_target_capacity_fallback(cfg, batch):
     model = TransformersAdaptedM4Model(cfg)
-    bd = {k: v for k, v in batch["batch_dict"].items() if k != "cap_power_on"}
     labels = batch["labels"]["observe_power_future"]
-    out = model(bd, labels)
-    capacity = torch.maximum(labels, torch.ones_like(labels))
-    torch.testing.assert_close(
-        out.loss,
-        torch.nn.functional.l1_loss(out.logits / capacity, labels / capacity),
-        rtol=0,
-        atol=0,
-    )
+    bd = dict(batch["batch_dict"])
+    reference = model(bd, labels).loss
+    for capacity in (torch.tensor([0.0, float("nan")]), torch.tensor([1.0, 1000.0])):
+        bd["cap_power_on"] = capacity
+        torch.testing.assert_close(model(bd, labels).loss, reference, rtol=0, atol=0)
+    del bd["cap_power_on"]
+    torch.testing.assert_close(model(bd, labels).loss, reference, rtol=0, atol=0)
 
 
 def test_labels_and_row_capacity_never_enter_predictions(cfg, batch):
@@ -103,6 +89,7 @@ def test_configs_and_weights_are_independent(cfg):
         {"model": {"patch_len": 0}},
         {"train": {"schedule": {"max_steps": -1}}},
         {"model": {"architecture": "query_decoder"}},
+        {"train": {"loss": "mae"}},
     ],
 )
 def test_invalid_configuration_is_rejected(override):

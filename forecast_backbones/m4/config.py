@@ -16,7 +16,6 @@ DEFAULT_CFG = {
     "dataset": {
         "pv_col": "observe_power",
         "label_col": "observe_power_future",
-        "label_norm": ["cap_power_on"],
         "ts_col": "timestamp_win",
         "station_id_col": "station_id",
         "station_meta": "pipelines/forecasting/assets/station_meta.csv",
@@ -56,7 +55,7 @@ DEFAULT_CFG = {
         "subtract_last": False,
     },
     "train": {
-        "loss": "mae",
+        "loss": "quantile",
         "ema_decay": None,
         "weights_path": None,
         "schedule": {
@@ -181,14 +180,10 @@ def load_config(config=None):
     for name in names[:-1]:
         if any(c.lower() == ds["label_col"].lower() for c in aliases.get(name, [])):
             raise ValueError("Input aliases must not refer to future labels")
-    if train["loss"] not in ("mae", "mse", "huber"):
-        raise ValueError("train.loss must be mae, mse or huber")
-    label_norm = ds["label_norm"]
-    if label_norm is not None and (
-        not isinstance(label_norm, list)
-        or any(not isinstance(col, str) or not col for col in label_norm)
-    ):
-        raise ValueError("dataset.label_norm must be null or a list of column names")
+    if train["loss"] != "quantile":
+        raise ValueError(
+            "M4 uses train.loss=quantile: sum tau=0.1,...,0.9 on the same point prediction"
+        )
     if train["ema_decay"] is not None and not 0 <= train["ema_decay"] <= 1:
         raise ValueError("ema_decay must be in [0, 1]")
     schedule, early = train["schedule"], train["early_stop"]

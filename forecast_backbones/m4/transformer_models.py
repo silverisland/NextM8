@@ -13,7 +13,7 @@ from .config import load_config
 from .features import FeatureBuilder
 from .layers.PatchTST_backbone import PatchTST_backbone
 from .layers.RevIN import RevIN
-from .losses import M4MainLoss
+from .losses import M4QuantileLoss
 
 
 class TransformersAdaptedM4Model(nn.Module):
@@ -23,7 +23,7 @@ class TransformersAdaptedM4Model(nn.Module):
         ds, m = self.cfg["dataset"], self.cfg["model"]
         self.context_length, self.prediction_length = ds["context_len"], ds["pred_len"]
         self.labels_name = [ds["label_col"]]
-        self.main_loss = M4MainLoss(self.cfg["train"]["loss"])
+        self.main_loss = M4QuantileLoss()
         self.station_meta = load_station_meta(
             ds["station_meta"], ds["station_meta_cols"]
         )
@@ -77,8 +77,8 @@ class TransformersAdaptedM4Model(nn.Module):
     def compute_metrics(eval_pred):
         return {}
 
-    def compute_loss(self, y_pred, y_true, capacity=None):
-        return self.main_loss(y_pred, y_true, capacity)
+    def compute_loss(self, y_pred, y_true):
+        return self.main_loss(y_pred, y_true)
 
     def forward(self, batch_dict, labels=None):
         device = next(self.parameters()).device
@@ -111,9 +111,7 @@ class TransformersAdaptedM4Model(nn.Module):
             ):
                 raise ValueError("Labels must cover [B,192] future positions")
             target = target[:, : self.prediction_length]
-            cap_col = (self.cfg["dataset"]["label_norm"] or [None])[0]
-            capacity = batch_dict.get(cap_col) if cap_col else None
-            loss = self.compute_loss(logits, target, capacity)
+            loss = self.compute_loss(logits, target)
         return TransformersAdaptedModelOutput(
             loss=loss,
             logits=logits,

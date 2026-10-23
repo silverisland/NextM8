@@ -1,59 +1,52 @@
-"""Compare against the original M4 main-loss expression and gradients."""
+"""Freeze the user's original expression as the value/gradient reference."""
 
+import numpy as np
 import pytest
 import torch
 
-from forecast_backbones.m4.losses import M4MainLoss
+from forecast_backbones.m4.losses import M4QuantileLoss, quantile_loss
 
 
-@pytest.mark.parametrize("kind", ["mae", "mse", "huber"])
-@pytest.mark.parametrize("capacity_kind", ["scalar", "row", "time", "fallback"])
-def test_original_expression_and_gradient(kind, capacity_kind):
-    target = torch.tensor([[-2.0, 0.0, 0.5, 40.0], [0.0, 10.0, 80.0, 100.0]])
-    prediction = torch.tensor(
-        [[1.0, 2.0, 3.0, 35.0], [4.0, 15.0, 70.0, 150.0]], requires_grad=True
-    )
-    capacity = {
-        "scalar": 100.0,
-        "row": torch.tensor([50.0, 200.0]),
-        "time": torch.tensor([[10.0, 20.0, 30.0, 40.0], [100.0, 200.0, 300.0, 400.0]]),
-        "fallback": None,
-    }[capacity_kind]
-    # Original compute_loss main branch, before lambda_main and the removed nw term.
-    cap = capacity
-    if cap is None:
-        cap = torch.max(target, torch.ones_like(target))
-        cap_v = cap.unsqueeze(1)
-    elif isinstance(cap, torch.Tensor) and cap.dim() == 1:
-        cap_v = cap.view(-1, 1, 1)
-    else:
-        cap_v = cap
-    cap_row = (
-        cap.view(-1, 1) if isinstance(cap, torch.Tensor) and cap.dim() == 1 else cap
-    )
-    criterion = {
-        "mae": torch.nn.L1Loss,
-        "mse": torch.nn.MSELoss,
-        "huber": torch.nn.HuberLoss,
-    }[kind]()
-    # Per-step capacities use the original [B,1,T] shape for target normalization.
-    if isinstance(cap_v, torch.Tensor) and cap_v.dim() == 2:
-        cap_v = cap_v.unsqueeze(1)
-    expected = criterion(
-        (prediction / cap_row).unsqueeze(1), target.unsqueeze(1) / cap_v
-    )
-    actual = M4MainLoss(kind)(prediction, target, capacity)
+def original_quantile_loss(y_pred, y_true):
+    error = y_true - y_pred
+    loss = 0
+    for quantile in np.arange(0.1, 1, 0.1):
+        loss += torch.mean(torch.max(quantile * error, (quantile - 1) * error))
+    return loss
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("shape", [(1, 192), (3, 192)])
+def test_original_loss_and_gradient(dtype, shape):
+    generator = torch.Generator().manual_seed(42)
+    pred = torch.randn(shape, generator=generator, dtype=dtype).requires_grad_()
+    target = torch.randn(shape, generator=generator, dtype=dtype)
+    target[0, 0] = pred.detach()[0, 0]  # Also cover the zero-error subgradient.
+    expected = original_quantile_loss(pred, target)
+    actual = M4QuantileLoss()(pred, target)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    expected_grad = torch.autograd.grad(expected, prediction, retain_graph=True)[0]
-    actual_grad = torch.autograd.grad(actual, prediction)[0]
-    torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+    grad_expected = torch.autograd.grad(expected, pred, retain_graph=True)[0]
+    grad_actual = torch.autograd.grad(actual, pred)[0]
+    torch.testing.assert_close(grad_actual, grad_expected, rtol=0, atol=0)
 
 
-def test_main_loss_is_not_scaled_or_masked():
-    loss = M4MainLoss()
-    assert (
-        loss(torch.tensor([[0.0, 10.0]]), torch.tensor([[2.0, 6.0]]), 2.0).item() == 1.5
+def test_sum_not_mean_no_normalization_and_no_separate_quantile_heads():
+    pred = torch.tensor([[1.0, 98.0]])
+    target = torch.tensor([[0.0, 100.0]])
+    # Errors 1 and 2 give MAE 1.5; summing the nine levels gives 6.75.
+    assert quantile_loss(pred, target).item() == pytest.approx(6.75)
+    torch.testing.assert_close(
+        quantile_loss(100 * pred, 100 * target), 100 * quantile_loss(pred, target)
     )
-    assert torch.isnan(
-        loss(torch.zeros(1, 2), torch.tensor([[float("nan"), 2.0]]), 100.0)
-    )
+
+
+def test_equal_predictions_and_nan_labels_follow_original():
+    target = torch.tensor([[0.0, 100.0]])
+    assert quantile_loss(target, target).item() == 0
+    target[0, 0] = float("nan")
+    assert torch.isnan(quantile_loss(torch.zeros_like(target), target))
+
+
+def test_reject_accidental_broadcasting():
+    with pytest.raises(ValueError, match="same"):
+        M4QuantileLoss()(torch.zeros(2, 192), torch.zeros(2, 1))

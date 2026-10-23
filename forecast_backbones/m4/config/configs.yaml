@@ -5,11 +5,9 @@ run:
   out_dir: runs/m4/patchtst
 features:
   hint_col: chronos
-dataset:
-  label_norm: [cap_power_on]
 train:
-  # Only the original main loss; no auxiliary term or loss multiplier.
-  loss: mae
+  # Sum nine pinball terms on one point prediction; no capacity division.
+  loss: quantile
   schedule:
     lr: 0.0001
     batch_size: 64
