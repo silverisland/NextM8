@@ -51,6 +51,70 @@ M4 默认端口 29704；同时启动多个 M4 实验时用 `--port` 分开。
 支持 `train.ema_decay` 和 `train.schedule.sampling: station_day`。
 全部默认值仅定义在本模型 `config.py`，YAML 只写覆盖项，未知字段报错。
 
+## 四套训练方案
+
+四套 YAML 均在本模型 `config/` 下，使用相同网络、原始 quantile 主损失、
+默认 seed=2025、每卡 batch64、lr=1e-4、cosine 和 warmup300。
+EMA 只在第三套开启；每套默认输出目录独立，不依赖其他模型。
+
+| 配置文件 | 验证与早停 | 训练上限 | 适用场景 |
+| --- | --- | --- | --- |
+| `epoch_earlystop.yaml` | 每轮验证；连续5轮未改善停止 | 100 epoch | 希望完整遍历训练集后再评估 |
+| `step_earlystop.yaml` | 每250 step验证；连续10次未改善停止 | 6000 step | 数据较大，需要在一轮内检查验证效果 |
+| `step_ema.yaml` | 同上，使用 decay=0.99 的 EMA 权重验证和选优 | 6000 step | 与普通 step 方案对比权重平均效果 |
+| `refit_steps.yaml` | 全量模式不验证、不早停 | 6000 step，可覆盖 | 验证选好训练预算后重训 |
+
+在项目根目录执行，替换解释器及数据路径。前三套必须提供验证数据：
+
+```bash
+# 方案一：按 epoch 早停
+bash train_shell/train_m4.sh --gpus 0 --venv-python /path/to/python \
+  --config forecast_backbones/m4/config/epoch_earlystop.yaml \
+  --train-parquet /path/to/train --valid-parquet /path/to/valid \
+  --out runs/m4/epoch_earlystop_s0
+
+# 方案二：按 step 早停
+bash train_shell/train_m4.sh --gpus 0 --venv-python /path/to/python \
+  --config forecast_backbones/m4/config/step_earlystop.yaml \
+  --train-parquet /path/to/train --valid-parquet /path/to/valid \
+  --out runs/m4/step_earlystop_s0
+
+# 方案三：按 step 早停 + EMA
+bash train_shell/train_m4.sh --gpus 0 --venv-python /path/to/python \
+  --config forecast_backbones/m4/config/step_ema.yaml \
+  --train-parquet /path/to/train --valid-parquet /path/to/valid \
+  --out runs/m4/step_ema_s0
+
+# 方案四：固定步数全量训练；不传 valid，数据路径指向准备好的全量数据
+bash train_shell/train_m4.sh --gpus 0 --venv-python /path/to/python \
+  --config forecast_backbones/m4/config/refit_steps.yaml \
+  --train-parquet /path/to/full_train \
+  --out runs/m4/refit_steps_s0 --max-steps 6000
+```
+
+已有切分目录时，前三套用 `--splits-dir /path/to/splits` 替代 train/valid 参数；
+第四套用 `--splits-dir /path/to/splits --refit` 合并训练集和验证集。
+全量模式由输入参数决定，单独选择 `refit_steps.yaml` 不会自动合并数据。
+全量重训后的最终效果应在独立测试集上评估。
+
+epoch 方案同时设置 `max_steps: null` 和 `eval_every_steps: null`，分别表示
+按 `epochs_max` 限制总轮数、在每轮结束验证。不要再传正数 `--max-steps`，
+否则会覆盖轮数预算。`save_every: 0` 只关闭定期快照，仍会保存最佳权重。
+
+step 是优化器更新次数；`patience` 始终是连续未改善的**验证次数**。
+例如每250步验证、patience=10，通常在最佳点后2500步未改善时停止；
+达到总步数上限也会结束，并在末步验证。每次严格改善才重置 patience，
+`smooth_k: 1` 表示直接比较本次分数。两类早停均按南网 D+1 分数越高越好，
+主目录保存验证最佳权重。可将 `train.early_stop.metric` 改为 `nrmse`，
+此时按越低越好选优，训练损失仍保持原公式。
+
+若想调整 epoch 数或 patience，直接改对应 YAML 的 `epochs_max` 和
+`train.early_stop.patience`；step 验证间隔改 `eval_every_steps`。
+当前每步全局 batch 为每卡 batch × GPU 数，改变卡数会改变每轮 step 数，
+也会改变固定 step 预算内看到的样本量。小数据实验需相应缩短 warmup300。
+全量训练的6000步只是起始值，应结合验证最佳步数、训练集扩充比例和全局 batch
+确定预算；例如保持 batch 不变且希望保持相同数据遍历次数时，按样本数比例放大步数。
+
 ## 推理和评估
 
 ```bash

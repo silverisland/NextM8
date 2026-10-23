@@ -1,0 +1,19 @@
+# 每轮验证一次；连续 5 轮未改善则停止，最多 100 轮。
+run:
+  tag: epoch_earlystop
+  out_dir: runs/m4/epoch_earlystop
+train:
+  loss: quantile
+  schedule:
+    lr: 0.0001
+    batch_size: 64
+    max_steps: null
+    epochs_max: 100
+    eval_every_steps: null
+    warmup_steps: 300
+    save_every: 0
+    precision: fp32
+  early_stop:
+    metric: nanwang_short_D+1
+    patience: 5
+    smooth_k: 1

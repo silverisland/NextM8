@@ -28,6 +28,8 @@ usage() {
 训练/验证路径支持目录、文件或加引号的通配符；只给训练路径时全量训练、不验证。
 同时兼容 --splits_dir、--train_parquet、--valid_parquet、--max_steps 等下划线写法。
 batch_size、precision、lr 等训练超参数在 YAML 的 train.schedule 下配置。
+训练方案见 forecast_backbones/m4/README.md：epoch_earlystop、step_earlystop、step_ema、refit_steps。
+epoch 早停需 max_steps: null、eval_every_steps: null；patience 按验证次数计数。
 CUDA 库路径前缀与 M8 一致，固定为 /usr/local/cuda-12.1/lib64:/usr/lib/x86_64-linux-gnu。
 USAGE
 }

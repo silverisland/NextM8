@@ -1,0 +1,14 @@
+# 配合仅 --train-parquet，或 --splits-dir 加 --refit：全量训练无验证/早停。
+# 6000 是起始预算；正式 refit 请根据验证实验和全量数据规模调整。
+run:
+  tag: refit_steps
+  out_dir: runs/m4/refit_steps
+train:
+  loss: quantile
+  schedule:
+    lr: 0.0001
+    batch_size: 64
+    max_steps: 6000
+    warmup_steps: 300
+    save_every: 500
+    precision: fp32

@@ -1,0 +1,19 @@
+# 与 step_earlystop 相同的预算，使用 EMA 权重验证和保存最优模型。
+run:
+  tag: step_ema
+  out_dir: runs/m4/step_ema
+train:
+  loss: quantile
+  ema_decay: 0.99
+  schedule:
+    lr: 0.0001
+    batch_size: 64
+    max_steps: 6000
+    eval_every_steps: 250
+    warmup_steps: 300
+    save_every: 500
+    precision: fp32
+  early_stop:
+    metric: nanwang_short_D+1
+    patience: 10
+    smooth_k: 1

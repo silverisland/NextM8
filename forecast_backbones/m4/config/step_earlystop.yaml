@@ -1,0 +1,18 @@
+# 每 250 个 optimizer step 验证，连续 10 次未改善则停止。
+run:
+  tag: step_earlystop
+  out_dir: runs/m4/step_earlystop
+train:
+  loss: quantile
+  schedule:
+    lr: 0.0001
+    batch_size: 64
+    max_steps: 6000
+    eval_every_steps: 250
+    warmup_steps: 300
+    save_every: 500
+    precision: fp32
+  early_stop:
+    metric: nanwang_short_D+1
+    patience: 10
+    smooth_k: 1
