@@ -139,7 +139,9 @@ def train_m4_rum(
     cfg["dataset"]["known_stations"] = known
     cfg["train"]["weights_path"] = "${run.out_dir}/model.safetensors"
     model.cfg["dataset"]["known_stations"] = known
-    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    collate = functools.partial(
+        UnifiedDataset.collate_fn, for_hf_trainer=True, drop_str_type=False
+    )
     if main:
         dump_config(cfg, out / "model_config.yaml")
         (out / "split_manifest.json").write_text(
@@ -291,8 +293,30 @@ def main(argv=None):
         ),
     )
     parser.add_argument("--hint-col", help="Override foundation forecast column")
+    parser.add_argument(
+        "--no-station-meta",
+        action="store_true",
+        help="Read per-row capacity from the configured data column",
+    )
+    parser.add_argument(
+        "--capacity-col",
+        help="Scalar/list capacity column; lists use their first value",
+    )
+    parser.add_argument(
+        "--station-key", help="Match station identities using this column, e.g. station"
+    )
     a = parser.parse_args(argv)
     cfg = raw_override(a.config)
+    if a.no_station_meta and a.station_meta:
+        parser.error("--station-meta and --no-station-meta are mutually exclusive")
+    overrides = {}
+    if a.no_station_meta:
+        overrides.update(station_meta=None, station_meta_cols=None)
+    if a.capacity_col:
+        overrides["capacity_col"] = a.capacity_col
+    if a.station_key:
+        overrides["station_key"] = a.station_key
+    cfg = deep_merge(cfg, {"dataset": overrides})
     if a.station_meta:
         cfg = deep_merge(
             cfg,

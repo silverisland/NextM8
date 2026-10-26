@@ -22,6 +22,8 @@ DEFAULT_CFG = {
         "station_id_col": "station_id",
         "station_meta": "pipelines/forecasting/assets/station_meta.csv",
         "station_meta_cols": None,
+        "station_key": None,
+        "capacity_col": "cap_power_on",
         "known_stations": None,
         "context_len": 672,
         "pred_len": 192,
@@ -37,13 +39,6 @@ DEFAULT_CFG = {
         "hint_col": "timesfm3",
         "col_aliases": {"timesfm3": ["tsfm_predict"]},
         "cov_present": None,
-    },
-    "preprocess": {
-        "pv_smoothing": {
-            "history_window": 1,
-            "target_window": 1,
-            "alignment": "centered",
-        },
     },
     "model": {
         "architecture": "legacy",
@@ -131,26 +126,45 @@ def _check_keys(value, template, prefix=""):
 
 
 def load_config(config=None):
-    override = raw_override(config)
+    override = dict(raw_override(config))
+    # Old non-smoothing checkpoints stored this no-op block. Accept and remove
+    # it without retaining any preprocessing in newly saved configurations.
+    retired = override.pop("preprocess", {})
+    if not isinstance(retired, dict) or set(retired) - {"pv_smoothing"}:
+        raise ValueError("Unknown retired preprocess configuration")
+    smoothing = retired.get("pv_smoothing", {})
+    if not isinstance(smoothing, dict) or set(smoothing) - {
+        "history_window",
+        "target_window",
+        "alignment",
+    }:
+        raise ValueError("Unknown retired pv_smoothing configuration")
+    if (
+        any(
+            type(smoothing.get(key, 1)) is not int or smoothing.get(key, 1) != 1
+            for key in ("history_window", "target_window")
+        )
+        or smoothing.get("alignment", "centered") != "centered"
+    ):
+        raise ValueError(
+            "PV smoothing has been removed. Historical smoothing checkpoints "
+            "require the matching historical code version; do not silently disable smoothing."
+        )
     _check_keys(override, DEFAULT_CFG)
     cfg = interpolate(deep_merge(DEFAULT_CFG, override))
     ds, model, fe, train = (cfg[k] for k in ("dataset", "model", "features", "train"))
+    if ds["station_key"] is not None and (
+        not isinstance(ds["station_key"], str) or not ds["station_key"]
+    ):
+        raise ValueError("dataset.station_key must be a column name or null")
+    if not isinstance(ds["capacity_col"], str) or not ds["capacity_col"]:
+        raise ValueError("dataset.capacity_col must be a column name")
+    if ds["station_key"] == ds["station_id_col"]:
+        raise ValueError(
+            "station_key must differ from station_id_col (reserved for internal integer IDs)"
+        )
     if ds["pred_len"] != 192 or ds["step_min"] != 15:
         raise ValueError("M4-Rum uses 192 steps, starting 15 minutes after issue time")
-    smoothing = cfg["preprocess"]["pv_smoothing"]
-    if smoothing["alignment"] != "centered":
-        raise ValueError(
-            "pv_smoothing.alignment must be centered (keep boundary points unchanged)"
-        )
-    for key, limit in (
-        ("history_window", ds["context_len"]),
-        ("target_window", ds["pred_len"]),
-    ):
-        window = smoothing[key]
-        if type(window) is not int or window < 1 or window > limit or window % 2 == 0:
-            raise ValueError(
-                f"pv_smoothing.{key} must be an odd integer in [1, {limit}]"
-            )
     if model["architecture"] not in ("legacy", "query_decoder"):
         raise ValueError("model.architecture must be legacy or query_decoder")
     if type(model["station_embedding"]) is not bool:

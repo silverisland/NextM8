@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Subset
-from tqdm.auto import tqdm
+from torch.utils.data import Subset
 
+from pipelines import pipeline_wrapper_inference
 from pipelines.forecasting.metrics import (
     nrmse_pct,
     score_nanwang_result,
@@ -25,73 +25,68 @@ from .features import as_numpy
 def evaluate_model(model, test_dataset, HF_collate_fn, config):
     cfg = model.cfg
     ds = cfg["dataset"]
-    loader = DataLoader(
-        test_dataset,
-        batch_size=cfg["eval"]["batch_size"],
-        shuffle=False,
-        collate_fn=HF_collate_fn,
-    )
     rows = []
-    was_training = model.training
-    model.eval()
-    try:
-        for batch in tqdm(
-            loader,
-            desc="[m4_rum] inference",
-            disable=not cfg["train"]["schedule"]["progress_bar"],
-        ):
-            bd, labels = (
-                (batch["batch_dict"], batch.get("labels"))
-                if "batch_dict" in batch
-                else (batch, None)
+
+    def collect_batch(batch, out):
+        bd, labels = (
+            (batch["batch_dict"], batch.get("labels"))
+            if "batch_dict" in batch
+            else (batch, None)
+        )
+        prediction, cap = as_numpy(out.logits), as_numpy(out.aux["cap"])
+        truth = (
+            as_numpy(labels[ds["label_col"]])
+            if labels and ds["label_col"] in labels
+            else None
+        )
+        if truth is not None and (truth.ndim != 2 or truth.shape[1] < ds["pred_len"]):
+            raise ValueError("Evaluation labels must cover 192 steps")
+        timestamps = as_numpy(bd[ds["ts_col"]]).reshape(-1)
+        diagnostics = {}
+        if "quantiles" in out.aux:
+            q = as_numpy(out.aux["quantiles"])
+            diagnostics = {
+                name: as_numpy(out.aux[name]) for name in ("median", "p_star")
+            }
+            diagnostics.update(
+                {name: q[..., j] for j, name in enumerate(quantile_cols(model.levels))}
             )
-            bd = {k: v for k, v in bd.items() if k != ds["label_col"]}
-            out = model(bd)
-            prediction, cap = as_numpy(out.logits), as_numpy(out.aux["cap"])
-            truth = as_numpy(labels[ds["label_col"]]) if labels is not None else None
-            if truth is not None and (
-                truth.ndim != 2 or truth.shape[1] < ds["pred_len"]
+        for i, sid in enumerate(out.aux["station_id"]):
+            row = {
+                "timestamp_win": pd.Timestamp(int(timestamps[i]), unit="s"),
+                "station": model.station_meta.name(int(sid)),
+                "station_id": int(sid),
+                "cap": float(cap[i]),
+                "observe_power_predict": prediction[i].astype(np.float32),
+                "observe_power_future": truth[i, : ds["pred_len"]].astype(np.float32)
+                if truth is not None
+                else np.full(ds["pred_len"], np.nan, np.float32),
+            }
+            for key in (
+                "history_unavailable",
+                "hint_unavailable",
+                "future_weather_unavailable",
             ):
-                raise ValueError("Evaluation labels must cover 192 steps")
-            timestamps = as_numpy(bd[ds["ts_col"]]).reshape(-1)
-            diagnostics = {}
-            if "quantiles" in out.aux:
-                q = as_numpy(out.aux["quantiles"])
-                diagnostics = {
-                    name: as_numpy(out.aux[name]) for name in ("median", "p_star")
-                }
-                diagnostics.update(
-                    {
-                        name: q[..., j]
-                        for j, name in enumerate(quantile_cols(model.levels))
-                    }
-                )
-            for i, sid in enumerate(out.aux["station_id"]):
-                row = {
-                    "timestamp_win": pd.Timestamp(int(timestamps[i]), unit="s"),
-                    "station": model.station_meta.name(int(sid)),
-                    "station_id": int(sid),
-                    "cap": float(cap[i]),
-                    "observe_power_predict": prediction[i].astype(np.float32),
-                    "observe_power_future": truth[i, : ds["pred_len"]].astype(
-                        np.float32
-                    )
-                    if truth is not None
-                    else np.full(ds["pred_len"], np.nan, np.float32),
-                }
-                for key in (
-                    "history_unavailable",
-                    "hint_unavailable",
-                    "future_weather_unavailable",
-                ):
-                    row[key] = bool(out.aux[key][i])
-                row.update(
-                    {
-                        key: value[i].astype(np.float32)
-                        for key, value in diagnostics.items()
-                    }
-                )
-                rows.append(row)
+                row[key] = bool(out.aux[key][i])
+            row.update(
+                {key: value[i].astype(np.float32) for key, value in diagnostics.items()}
+            )
+            rows.append(row)
+
+    was_training = model.training
+    try:
+        pipeline_wrapper_inference.unified_inference(
+            pipeline_backbone=model,
+            ds_input=test_dataset,
+            timestamp_cols=[ds["ts_col"]],
+            entity_cols=[ds["ts_col"]],
+            batch_size=cfg["eval"]["batch_size"],
+            collate_fn=HF_collate_fn,
+            exclude_input_cols=[ds["label_col"]],
+            error_policy="raise",
+            progress=cfg["train"]["schedule"]["progress_bar"],
+            on_batch_output=collect_batch,
+        )
     finally:
         model.train(was_training)
     return pd.DataFrame(rows)
@@ -111,7 +106,12 @@ def inference_rows(ds, cfg, full=False):
 def score_result(model, result):
     """Score Rum point predictions with the shared metric implementation."""
     cfg = model.cfg
-    score, table, _ = score_nanwang_result(model, result, cfg)
+    score, table, _ = score_nanwang_result(
+        model,
+        result,
+        cfg,
+        capacity_col="cap" if model.station_meta.from_data else None,
+    )
     seen, unseen, count = seen_unseen_scores(table)
     every = cfg["train"]["early_stop"]["nrmse_issue_every_min"]
     if result.empty:

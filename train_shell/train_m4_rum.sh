@@ -24,6 +24,9 @@ usage() {
   --config <yaml> --splits-dir <dir> --out <dir>
   --train-parquet <path...> --valid-parquet <path...> --out <dir>
   --station-meta <csv>    覆盖站表并自动识别标准 station_meta.csv / 线上 info.csv 表头
+  --no-station-meta       无站表，容量从每行数据读取
+  --capacity-col <name>   数据容量列（默认 cap_power_on），192 点列表取首值
+  --station-key <name>    明确按此列匹配站点，例如 station
   --max-steps <n> --save-every <n>
 训练/验证路径支持目录、文件或加引号的通配符；只给训练路径时全量训练、不验证。
 同时兼容 --splits_dir、--train_parquet、--valid_parquet、--max_steps 等下划线写法。

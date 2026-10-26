@@ -24,6 +24,10 @@ def dataset_with_station_id(
     id_col = str(ds_cfg["station_id_col"])
     import pyarrow.parquet as pq
 
+    # Optional adapter preprocessing, e.g. station-key IDs and scalar/list capacity.
+    prepare = getattr(station_meta, "prepare_parquets", None)
+    if prepare is not None:
+        paths = prepare(paths, cfg, scratch_dir, reuse)
     schemas = [pq.read_schema(p) for p in paths]
     cols = schemas[0].names
     # 数据自带的 station_id 列是文本（站名，或文本存的数字）：collate 会丢掉文本列，所有行会静默落成站 0，所以先转成整数编号
@@ -62,7 +66,8 @@ def dataset_with_station_id(
     return UnifiedDataset(
         paths if len(paths) > 1 else paths[0],
         timestamp_cols=[ds_cfg["ts_col"]],
-        entity_cols=[],
+        # Adapter-generated station IDs must not be cast to float32 features.
+        entity_cols=[id_col] if prepare is not None else [],
         label_cols=[ds_cfg["label_col"]],
         timestamp_output="epoch_s",
         epoch_unit="s",

@@ -11,11 +11,22 @@
 新开关位于 `model.extensions`，默认关闭，旧配置和权重继续兼容；需要重新训练开启新分支的模型。
 
 PV 平滑实验已停止，原配置与结果移至 [平滑实验归档](archived_experiments/smoothing_sweep/README.md)。
+现行代码和配置已删除 `preprocess.pv_smoothing`，历史功率和训练目标直接使用原值。
+旧 checkpoint 中窗口均为 1 的空操作块兼容加载；实际开启平滑的旧权重需用历史代码复现。
 后续训练、推理使用原始功率，推荐从 `config/d1_sweep/q6_ema099.yaml` 继续实验；
 当前训练配置的历史与目标平滑窗口均为 1。旧平滑权重仍按保存的配置加载，以便复现实验。
 
 新增 [a17 按 epoch 验证与早停实验](config/train_sweep/README.md)：每轮验证一次，
 最多 20 个 epoch，连续 8 轮无改善早停；原 a17 按步验证配置保持不变。
+
+## 生产二轮复验
+
+已整理 [35 份保留配置、统一推理与批量对比说明](production/README.md)。
+训练验证、独立评估和无标签推理现均实际调用项目 `unified_inference`；
+批量工具逐方案评分并输出总分/逐站 delta，保留失败状态与配置、权重记录。
+入口为 `train_shell/compare_m4_rum.sh`，无标签推理使用 `eval_shell/infer_m4_rum.sh`。
+生产 Python 接入见 [直接调用 unified_inference 的 demo](demo_unified_inference.py) 和
+[输入格式、模型复用及运行说明](production/README.md#生产-python-接入-demo直接调用-unified_inference)。
 
 ## D+1 优化版：query_decoder
 
@@ -270,10 +281,15 @@ Pinball 模式只将末层从 1 维改为 K 个分位（默认 9 个），原历
 训练用的预测必须在各历史起报时刻生成，且不使用未来标签；微调过的基模应提供样本外预测。
 未来气象也必须使用当次起报时已可得的 NWP 版本。
 
-容量只读配置站表中的固定 `cap_mw`，不使用行内 `cap_power_on`。
+默认仍从配置站表读取固定 `cap_mw`，不使用行内 `cap_power_on`。
+显式设置 `dataset.station_meta: null` 后，改从 `dataset.capacity_col` 指定的数据列读取容量，
+默认列名 `cap_power_on`；浮点数直接使用，192 点列表严格取第一个值，不取均值或首个非空值。
+首值必须为有限正数，功率与容量单位均为 MW。每行的同一容量用于历史/标签/hint 归一化、
+预测还原、p_star 与裁剪；不会按 192 点容量列表逐点缩放。
 默认表位于 `pipelines/forecasting/assets/`，可用 `--station-meta` 指定自己的表。
-站点编号仅用于容量查表和分站报告，不送入网络；`known_stations` 仅区分已见/未见站报告。
-新站需要补充站表名称、编号、固定容量，不要求训练过的站点 embedding。
+站点编号用于查表、分站报告，以及开启 station_embedding 时的槽位选择。
+`known_stations` 由训练集确定；未见站点使用公共 embedding 槽位 0。
+站表模式的新站需补充站表；无站表模式的新站提供站点标识和有效容量即可。
 经纬度不进入模型；标准站表的 lat/lon/alt_m 列可留空。
 省级可将全省视为一个实体配置容量与聚合气象，单独训练权重。
 
@@ -290,8 +306,8 @@ Pinball 模式只将末层从 1 维改为 K 个分位（默认 9 个），原历
 
 ### 站表映射
 
-训练、验证和推理共用 `pipelines.forecasting.stations` 的站表映射，与 M8 的规则一致，
-不调用 M8 私有代码。CSV 支持 UTF-8/BOM、GBK；标准表头为
+默认映射保持公共站表规则，M4-Rum 另支持无站表和显式站名匹配，不调用 M8 私有代码。
+CSV 支持 UTF-8/BOM、GBK；标准表头为
 `station_id,station,lat,lon,alt_m,cap_mw`，坐标和海拔的值可留空。
 线上 `info.csv` 的 `plantid / plant_pointname / LATITUDE / LONGITUDE / GCCAPACITY`
 也可自动识别，分别映射到编号、站名、纬度、经度、固定容量，海拔默认 0。
@@ -321,7 +337,63 @@ dataset:
 自定义映射时直接使用该 YAML，不追加会清空映射的 `--station-meta`。
 训练保存的 `model_config.yaml` 会保留实际站表路径与映射，推理时须保证该路径可访问。
 
+### 无站表或仅按 station 匹配
+
+把以下 `dataset` 字段合入已有 a17 等完整配置，或使用下面的 CLI 覆盖；不要把片段当成完整实验配方。
+
+```yaml
+# 情况一：无 CSV，容量来自每行数据
+dataset:
+  station_meta: null  # CSV 路径或 null；null 时从数据读取容量
+  station_meta_cols: null  # null 自动识别 CSV 列名，或填写字段映射；无 CSV 时不使用
+  station_key: station  # null 或输入列名；null 沿用站号优先，不能与 station_id_col 同名
+  capacity_col: cap_power_on  # 任意实际数据列名；标量直接使用、192 点列表取首值
+```
+
+```yaml
+# 情况二：CSV 和数据均用 station 匹配
+dataset:
+  station_meta: /path/to/stations.csv  # CSV 路径或 null；提供路径时容量取自 CSV
+  station_key: station  # null 或输入列名；station 表示明确按站名匹配
+  station_meta_cols:
+    station: station
+    cap_mw: cap_power_on  # CSV 中的容量列；若列名为 cap_mw 则填 cap_mw
+```
+
+第二种 CSV 可以只有 `station,cap_power_on` 两列，容量为正数标量。
+缺少 `station_id` 时按规范化站名生成稳定内部编号，与 CSV 行序、数据批次及 Python 进程无关；
+已有站号则保留它。`station_key: station` 明确优先按站名查表，即使输入还含其他 station_id。
+CSV 中未匹配的站名报错，不暗中改用数据容量。站名的数字/空格规范化仍遵循上面的规则。
+无 CSV 的不同容量形状文件会先转成每行标量缓存，再进入统一数据加载器。
+
+训练启动参数示例（接在原 a17 训练命令后）：
+
+```bash
+# 无 CSV
+--no-station-meta --station-key station --capacity-col cap_power_on
+# 有 CSV，标准 station/cap_mw 列
+--station-meta /path/to/stations.csv --station-key station
+```
+
+两种覆盖也可用于 `compare_m4_rum.sh --mode train`；评估和推理自动读取 checkpoint 的保存配置。
+非空的站表路径不存在会直接报错，不自动切换容量来源。
+保持原 checkpoint 的站点编号体系：不要删除旧 CSV 的 station_id 后直接复用旧 embedding 权重；
+没有站号的新方案应重新训练。同一批生产对照方案应使用相同来源及站点编号规则。
+
+若各行取出的容量不同：D+1 使用所选起报行的容量；超短期同一目标时刻的 16 个提前量
+统一使用真值来源行（目标前 15 分钟起报）的容量。NRMSE 使用各行容量。
+完整南网月报仍可生成，但旧 ODS/DS 报表要求每站固定容量，此时不输出这部分分数，
+并在站级 summary 中记录 `ods_unavailable_reason`；不使用第一行容量替整站打分。
+各行容量相同时仍生成原完整报表。改变容量来源会改变指标分母，应与历史实验分开比较。
+
 ## 训练
+
+现行 35 份 YAML 已在类别和开关字段后注明可选值；列名、路径属于自由填写项，不是固定枚举。
+修改选项时注意组合限制：站点 embedding 和四个 extensions 分支仅支持 `query_decoder`；
+`p_star` / `p_star_l1`、分段选点及裁剪选项要求 `loss: pinball`。
+若改用 `mse` / `mae`，应同步设置 `decision.point.default: median`、`by_step: []`、
+`clip_negative: false`、`capacity_cap: false`，并重新训练对应输出头。
+早停只支持 `nanwang_short_D+1` 或 `nrmse`，不能直接填报告中的 `station_mean_nanwang_short_D+1`。
 
 在 NextM8 根目录执行。依赖沿用 M8 的 torch / transformers / accelerate / datasets /
 pandas / pyarrow / safetensors / PyYAML；完整报表使用 xlsxwriter。Rum 不需要计算太阳几何。

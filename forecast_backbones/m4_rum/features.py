@@ -10,12 +10,8 @@ import torch
 from torch.nn import functional as F
 
 from pipelines.forecasting.stations import (
-    norm_station_name,
-    station_cap_mw,
     window_timestamps,
 )
-
-from .smoothing import masked_moving_average
 
 
 def as_numpy(value):
@@ -89,29 +85,11 @@ class FeatureBuilder:
         if ((raw_ts < 946684800) | (raw_ts >= 4102444800)).any():
             raise ValueError("timestamp_win must use seconds (2000–2099), not ms/ns")
         size, length, horizon = len(raw_ts), ds["context_len"], ds["pred_len"]
-        if ds["station_id_col"] in batch:
-            raw_id = as_numpy(batch[ds["station_id_col"]]).reshape(-1)
-            ids = raw_id.astype(np.int64)
-            if not np.array_equal(raw_id.astype(float), ids):
-                raise ValueError("station_id must contain integers")
-        elif "station" in batch:
-            names = as_numpy(batch["station"]).reshape(-1)
-            mapping, unknown, conflicts = self.meta.resolve(names)
-            if unknown or conflicts:
-                raise ValueError(
-                    f"Unknown/conflicting station names: {unknown}, {conflicts}"
-                )
-            ids = np.array(
-                [mapping[norm_station_name(n)] for n in names], dtype=np.int64
-            )
-        else:
-            raise ValueError(
-                "station_id or station is required to look up fixed capacity"
-            )
+        ids = self.meta.identity(batch)
         if len(ids) != size:
             raise ValueError("Station and timestamp batch sizes differ")
         cap = torch.tensor(
-            [station_cap_mw(self.meta, sid) for sid in ids],
+            self.meta.capacities(batch, ids),
             device=device,
             dtype=torch.float32,
         )[:, None]
@@ -137,13 +115,6 @@ class FeatureBuilder:
             return F.pad(x, (length - x.shape[1], 0), value=float("nan"))
 
         pv = window(ds["pv_col"]) / cap
-        smoothing = self.cfg["preprocess"]["pv_smoothing"]
-        if smoothing["history_window"] > 1:
-            valid_pv = torch.isfinite(pv)
-            pv = masked_moving_average(
-                pv, valid_pv, smoothing["history_window"], smoothing["alignment"]
-            )
-            pv = torch.where(valid_pv, pv, float("nan"))
         past, future = [pv], []
         for pair, offset, scale in zip(
             self.fe["past_future"],

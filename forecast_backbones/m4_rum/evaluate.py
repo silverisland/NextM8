@@ -20,14 +20,26 @@ from .transformer_models import TransformersAdaptedM4RumModel
 from .transformer_trainer import score_result, validate
 
 
-def load_member(run, device="cpu", point=None):
-    run = Path(run)
+def load_member(run, device="cpu", point=None, station_meta=None):
+    run = Path(run).resolve()
     config, weights = run / "model_config.yaml", run / "model.safetensors"
     if not config.is_file() or not weights.is_file():
         raise FileNotFoundError(
             f"{run} must contain model_config.yaml and model.safetensors"
         )
     cfg = deep_merge(raw_override(config), {"train": {"weights_path": str(weights)}})
+    if cfg.get("run", {}).get("model_name", "m4_rum") != "m4_rum":
+        raise ValueError("Expected an M4-Rum checkpoint")
+    if station_meta is not None:
+        cfg = deep_merge(
+            cfg,
+            {
+                "dataset": {
+                    "station_meta": str(Path(station_meta).resolve()),
+                    "station_meta_cols": None,
+                }
+            },
+        )
     if point is not None:
         if cfg.get("train", {}).get("loss", "mse") != "pinball":
             raise ValueError("--point requires a checkpoint trained with pinball loss")
@@ -49,6 +61,7 @@ def evaluate(
     device=None,
     progress=True,
     point=None,
+    station_meta=None,
 ):
     if not runs:
         raise ValueError("At least one run is required")
@@ -60,11 +73,13 @@ def evaluate(
     paths = expand_parquets(test_paths)
     if not paths:
         raise ValueError("No test parquet files")
-    collate = functools.partial(UnifiedDataset.collate_fn, for_hf_trainer=True)
+    collate = functools.partial(
+        UnifiedDataset.collate_fn, for_hf_trainer=True, drop_str_type=False
+    )
     result, first, member_rows, predictions = None, None, [], []
     quantile_sum = None
     for run in runs:
-        model = load_member(run, device, point)
+        model = load_member(run, device, point, station_meta)
         if first is not None:
             if first.core.is_quantile != model.core.is_quantile:
                 raise ValueError(
@@ -175,14 +190,21 @@ def evaluate(
                 raise ValueError(
                     f"Station name cannot be used as a report filename: {station!r}"
                 )
-            _, row = write_station_report(
-                group,
-                station,
-                float(group.cap.iloc[0]),
-                out / "metrics_ens",
-                extract,
-                encoder,
-            )
+            if first.station_meta.from_data and group.cap.nunique() > 1:
+                from .capacity_reports import write_variable_capacity_report
+
+                row = write_variable_capacity_report(
+                    group, station, out / "metrics_ens"
+                )
+            else:
+                _, row = write_station_report(
+                    group,
+                    station,
+                    float(group.cap.iloc[0]),
+                    out / "metrics_ens",
+                    extract,
+                    encoder,
+                )
             rows.append(
                 {**row, "station_id": int(sid), "seen": not known or int(sid) in known}
             )
@@ -238,6 +260,11 @@ def main(argv=None):
     parser.add_argument("--device")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument(
+        "--station-meta",
+        "--station_meta",
+        help="Deployment station table; detect standard/info.csv columns",
+    )
+    parser.add_argument(
         "--point",
         choices=("median", "p_star", "p_star_l1"),
         help="Override pinball checkpoint point selection",
@@ -252,6 +279,7 @@ def main(argv=None):
         a.device,
         not a.no_progress,
         a.point,
+        a.station_meta,
     )
 
 

@@ -9,14 +9,13 @@ from torch import nn
 
 from interfaces.modeloutput import TransformersAdaptedModelOutput
 from pipelines.forecasting.checkpoints import load_weights
-from pipelines.forecasting.stations import load_station_meta
 
 from . import model as architecture
 from .config import load_config
 from .decision import decide
 from .features import FeatureBuilder
 from .query_model import QueryRum
-from .smoothing import masked_moving_average
+from .stations import RumStationMeta
 
 
 class TransformersAdaptedM4RumModel(nn.Module):
@@ -25,9 +24,7 @@ class TransformersAdaptedM4RumModel(nn.Module):
         self.cfg = load_config(model_config)
         ds = self.cfg["dataset"]
         self.context_len, self.pred_len = ds["context_len"], ds["pred_len"]
-        self.station_meta = load_station_meta(
-            ds["station_meta"], ds["station_meta_cols"]
-        )
+        self.station_meta = RumStationMeta(ds)
         self.fe = FeatureBuilder(self.cfg, self.station_meta)
         core = (
             QueryRum
@@ -85,11 +82,6 @@ class TransformersAdaptedM4RumModel(nn.Module):
             rows = valid.any(dim=1)
             if not rows.any():
                 raise ValueError("Batch contains no finite future labels")
-            smoothing = self.cfg["preprocess"]["pv_smoothing"]
-            if self.training and smoothing["target_window"] > 1:
-                target = masked_moving_average(
-                    target, valid, smoothing["target_window"], smoothing["alignment"]
-                )
             target = torch.where(valid, target, 0)
             if self.core.is_quantile:
                 # Train raw quantiles; sorting and p_star belong only to reporting.

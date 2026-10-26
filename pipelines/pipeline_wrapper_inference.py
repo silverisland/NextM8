@@ -1,9 +1,8 @@
 import warnings
 
 import torch
-from typing import List, Optional, Sequence, Union
 import pandas as pd
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from functools import partial
 
@@ -62,6 +61,12 @@ def unified_inference(
     num_workers: int = 0,
     timestamp_output: str = 'epoch_s',
     prediction_to_numpy: bool = True,
+    *,
+    error_policy: str = 'fallback',
+    progress: bool = True,
+    collate_fn=None,
+    exclude_input_cols=(),
+    on_batch_output=None,
 ) -> pd.DataFrame:
     """基于pipeline的核心模块的通用预测函数
 
@@ -83,6 +88,12 @@ def unified_inference(
             仅支持 'epoch_s' / 'epoch_ns'
         prediction_to_numpy: True 时预测列单元格存 np.ndarray，
             False 时存 torch.Tensor
+        error_policy: 默认 fallback 保持逐样本兜底；raise 遇异常、无效形状或非有限预测立即报错。
+        progress: 是否显示推理进度条。
+        collate_fn: 已构造的 torch Dataset / Subset 可复用原 collate；不会重新物化整个数据集。
+        exclude_input_cols: 从送入模型的 batch_dict 中移除这些列（例如真实标签）。
+        on_batch_output: 严格模式下调用 callback(original_batch, model_output)，可收集
+            分位数、诊断及原始标签；不重复 forward，回调异常直接上抛。
 
     Return:
         ds_output: pd.DataFrame，行序与 ds_input 的读入顺序一致（shuffle=False），
@@ -96,6 +107,12 @@ def unified_inference(
 
     timestamp_cols = list(timestamp_cols)
     entity_cols = list(entity_cols)
+    if not entity_cols:
+        raise ValueError("entity_cols must contain at least one column")
+    if error_policy not in ('fallback', 'raise'):
+        raise ValueError("error_policy must be fallback or raise")
+    if on_batch_output is not None and error_policy != 'raise':
+        raise ValueError("on_batch_output requires error_policy='raise'")
     if timestamp_output not in ('epoch_s', 'epoch_ns'):
         raise ValueError(
             f"timestamp_output 仅支持 'epoch_s'/'epoch_ns'，收到: {timestamp_output!r}"
@@ -104,7 +121,7 @@ def unified_inference(
     # ---- 1. 构建 UnifiedDataset 与 DataLoader -----------------------------
     # for_hf_trainer=True 是必要的: 模型与训练侧共用 "batch_dict"/"labels" 约定。
     # 推理不需要 label，故不指定 label_cols；batch_dict 里只会包含所需的输入列。
-    input_dataset = UnifiedDataset(
+    input_dataset = ds_input if isinstance(ds_input, Dataset) else UnifiedDataset(
         ds_input,
         timestamp_cols=timestamp_cols,
         entity_cols=entity_cols,
@@ -112,7 +129,7 @@ def unified_inference(
         for_hf_trainer=True,
     )
 
-    custom_collate_fn = partial(
+    custom_collate_fn = collate_fn or partial(
         UnifiedDataset.collate_fn,
         timestamp_output=timestamp_output,
         drop_str_type=False,   # 保留实体列(如 station), 便于回填
@@ -139,19 +156,36 @@ def unified_inference(
     pred_records: list = []
 
     with torch.no_grad():
-        for batch_dict in tqdm(dataloader, desc="Predict"):
-            bd = batch_dict["batch_dict"]
+        for batch_dict in tqdm(dataloader, desc="Predict", disable=not progress):
+            original_bd = batch_dict.get("batch_dict", batch_dict)
+            bd = {k: v for k, v in original_bd.items() if k not in exclude_input_cols}
             bs = len(bd[entity_cols[0]])
 
             # ---- 批量优先 ----
             try:
-                logits = _run_model_logits(pipeline_backbone, bd)  # [bs, w] tensor
+                output = pipeline_backbone(bd)
+                logits = output.logits
+                if logits is None:
+                    raise ValueError("ModelOutput.logits 为 None")
+                if error_policy == 'raise':
+                    if not isinstance(logits, torch.Tensor) or logits.ndim != 2 or logits.shape[0] != bs:
+                        raise ValueError("Expected logits shaped [batch, horizon]")
+                    horizon = getattr(pipeline_backbone, 'prediction_length', None)
+                    if horizon is not None and logits.shape[1] != horizon:
+                        raise ValueError("Prediction horizon does not match model.prediction_length")
+                    if not torch.isfinite(logits).all():
+                        raise ValueError("Model returned non-finite predictions")
                 fallback = None
             except Exception as e:
+                if error_policy == 'raise':
+                    raise
                 # ---- 失败逐条兜底 ----（把原因打出来：否则特征/配置错误会被静默吞掉、全部行变 None）
                 warnings.warn(f"批量推理失败，逐样本兜底：{type(e).__name__}: {e}")
                 logits = None
                 fallback = _fallback_per_sample(pipeline_backbone, bd, bs)
+
+            if on_batch_output is not None:
+                on_batch_output(batch_dict, output)
 
             # bd 中实体列是 int64 tensor(station) / epoch(int64)(timestamp_win)
             # 实体列始终从整批 extend，保证行对齐 (bs 行)

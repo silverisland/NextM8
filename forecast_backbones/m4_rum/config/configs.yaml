@@ -1,7 +1,7 @@
 # 192 steps after issue time; at 10:00, D+1 is [55:151].
 run: {model_name: m4_rum, tag: rum, out_dir: runs/m4_rum/rum, seeds: [0]}
 dataset:
-  station_meta: forecast_backbones/m8/station_meta.csv
+  station_meta: forecast_backbones/m8/station_meta.csv  # CSV 路径或 null；null 时使用 capacity_col 指定的数据容量列
   station_meta_cols:
     station_id: station_id
     station: station
@@ -15,5 +15,5 @@ features:
 train:
   schedule:
     batch_size: 64  # Per GPU; two GPUs give a global batch size of 128.
-    precision: fp32  # fp32 / fp16 / bf16 (requires hardware support)
+    precision: fp32  # 可选 fp32 / fp16 / bf16；fp16 需 CUDA，bf16 需支持该精度的 CUDA 设备
 # Other defaults are defined in config.py. No residual / gate / station embedding.

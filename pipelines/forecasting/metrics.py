@@ -38,15 +38,15 @@ def seen_unseen_scores(table: pd.DataFrame) -> tuple[float, float, int]:
     return wmean(seen), wmean(unseen), int(len(unseen))
 
 
-def score_nanwang_result(model, res: pd.DataFrame, cfg):
+def score_nanwang_result(model, res: pd.DataFrame, cfg, *, capacity_col=None):
     """Score prepared point forecasts using the shared Nanwang metric."""
     if res.empty:
         return float("nan"), pd.DataFrame(columns=TABLE_COLS), res
-    gccap = {
+    gccap = 1.0 if capacity_col else {
         model.station_meta.name(int(s)): station_cap_mw(model.station_meta, int(s))
         for s in res["station_id"].unique()
     }  # 每站固定容量
-    sd = NanwangMetric().short_d1_daily(res, gccap)
+    sd = NanwangMetric(capacity_col=capacity_col).short_d1_daily(res, gccap)
     name_to_id = {
         model.station_meta.name(int(s)): int(s) for s in res["station_id"].unique()
     }

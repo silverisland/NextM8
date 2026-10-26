@@ -345,8 +345,9 @@ class SolarMetricCalculator:
         # resample to get monthly metrics
         metric_df[groupby] = pd.to_datetime(metric_df[groupby])
         metric_df.set_index(groupby, inplace=True)
-        mean_df = metric_df.resample('M').mean()
-        mean_df['day_count'] = metric_df.iloc[:, 0].resample('M').count()
+        # 使用显式月末偏移，兼容已移除 'M' 重采样别名的 pandas 3。
+        mean_df = metric_df.resample(pd.offsets.MonthEnd()).mean()
+        mean_df['day_count'] = metric_df.iloc[:, 0].resample(pd.offsets.MonthEnd()).count()
         mean_df = mean_df.round(4)
         mean_df.index = mean_df.index.to_period('M')
         mean_df.index = mean_df.index.astype(str)

@@ -11,7 +11,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 
 
-@pytest.fixture(params=["train_shell/train_m4_rum.sh", "eval_shell/eval_m4_rum.sh"])
+@pytest.fixture(
+    params=[
+        "train_shell/train_m4_rum.sh",
+        "eval_shell/eval_m4_rum.sh",
+        "train_shell/compare_m4_rum.sh",
+        "eval_shell/infer_m4_rum.sh",
+    ]
+)
 def launcher(request, tmp_path):
     script = tmp_path / "checkout" / request.param
     script.parent.mkdir(parents=True)
@@ -41,6 +48,7 @@ def launcher(request, tmp_path):
         "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
         "PYTHON_SELECTION_RECORD": str(record),
         "OMP_NUM_THREADS": "1",
+        "HF_DATASETS_CACHE": str(tmp_path / "hf_cache"),
     }
     env.pop("PYTHON", None)
     return script, fake, record, env
@@ -84,7 +92,12 @@ def test_explicit_interpreter_precedence_arguments_and_exit_status(launcher, sel
         check=False,
     )
     assert result.returncode == 7, result.stderr
-    mode = "train" if script.name.startswith("train_") else "evaluate"
+    mode = {
+        "train_m4_rum.sh": "train",
+        "eval_m4_rum.sh": "evaluate",
+        "compare_m4_rum.sh": "production",
+        "infer_m4_rum.sh": "infer",
+    }[script.name]
     assert json.loads(record.read_text()) == [
         "-m",
         "forecast_backbones.m4_rum." + mode,

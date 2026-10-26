@@ -1,0 +1,12 @@
+# Copy to your deployment workspace and replace every path.
+# One seed: ID -> run directory. The saved run.seeds must match --seeds.
+q6: /path/to/q6_ema099
+#a0 is equivalent to q6; there is no need to evaluate both identical checkpoints.
+a16: /path/to/a16_large_station_ema
+a17: /path/to/a17_all_large_station
+a17_epoch: /path/to/a17_epoch_earlystop
+# For --seeds 0 1 2 use per-seed mappings instead, e.g.:
+# q6:
+#   0: /path/to/q6_s0
+#   1: /path/to/q6_s1
+#   2: /path/to/q6_s2

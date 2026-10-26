@@ -191,6 +191,49 @@ for quantile in np.arange(0.1, 1.0, 0.1):
 
 训练请使用 `train_m4.sh`，不使用旧 `train_shell/train_script.py`。
 
+## 生产 unified_inference demo
+
+可运行示例：[demo_unified_inference.py](demo_unified_inference.py)。
+直接调用 `pipelines.pipeline_wrapper_inference.unified_inference`，支持无标签 DataFrame。
+
+```python
+from forecast_backbones.m4.evaluate import load_member
+from forecast_backbones.m4.demo_unified_inference import predict_dataframe
+
+# 初始化一次；训练目录包含 model_config.yaml 和 model.safetensors。
+model = load_member('/path/to/m4_run', device='cuda:0')
+# CSV 跨机器迁移时可加 station_meta='/path/to/stations.csv'，保留保存的列名映射。
+
+# 每次请求复用模型。input_df 是业务侧已准备好的窗口表。
+result = predict_dataframe(model, input_df, batch_size=32)
+curves = result['observe_power_predict']  # 每行 192 点，已恢复功率单位。
+```
+
+在仓库根目录执行命令行示例：
+
+```bash
+/home/ma-user/ts3/bin/python -m forecast_backbones.m4.demo_unified_inference \
+  --run runs/m4/production_round2/step_earlystop \
+  --input '/path/to/live_inputs/*.parquet' \
+  --station-meta /path/to/stations.csv \
+  --device cuda:0 --batch-size 32 \
+  --out /path/to/new_predictions.parquet
+```
+
+输入包含起报时间 `timestamp_win`，以及 `station_id` 或 `station`；两者同时存在时
+沿用模型的站号优先规则。默认历史功率/气象长 672，未来气象/hint 长 192，每点 15 分钟。
+历史末点为起报时刻 S，未来首点为 S+15 分钟。
+天气字段支持 `general_GHI` / `general_TEMP` 及其 `_predict` 形式。
+hint 按 checkpoint 的 `features.hint_col` 和别名读取：默认 `chronos`；
+若训练时用了 `--hint-col tsfm_predict`，生产也提供 `tsfm_predict`。
+无需 `observe_power_future`，存在时会在进入 Dataset 前去掉；无关业务附加列不参与特征转换。
+
+M4 仍需有效站表，容量来自 CSV，不读取数据中的 `cap_power_on`。
+demo 不增加 p_star 或裁剪，预测与当前 M4 评估逻辑一致。输出保持输入行序，
+保留起报时间及输入中存在的站点实体列，预测列统一命名 `observe_power_predict`。
+异常直接抛出，命令行拒绝覆盖输出文件；默认 CPU，GPU 需显式指定。
+CLI 将输入文件读入内存，大数据可由业务端分批读入 DataFrame 并复用模型调用。
+
 ## 验证
 
 ```bash

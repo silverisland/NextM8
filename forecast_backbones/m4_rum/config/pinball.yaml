@@ -1,7 +1,7 @@
 # Independent quantile head; use p_star for validation and inference.
 run: {model_name: m4_rum, tag: rum_pinball, out_dir: runs/m4_rum/rum_pinball, seeds: [0]}
 dataset:
-  station_meta: forecast_backbones/m8/station_meta.csv
+  station_meta: forecast_backbones/m8/station_meta.csv  # CSV 路径或 null；null 时使用 capacity_col 指定的数据容量列
   station_meta_cols:
     station_id: station_id
     station: station
@@ -12,7 +12,7 @@ dataset:
 model:
   quantiles: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 train:
-  loss: pinball
-  schedule: {batch_size: 64, precision: fp32}
+  loss: pinball  # 可选 mse / mae / pinball；p_star 及分位数决策需 pinball；点输出与分位输出互换需重训
+  schedule: {batch_size: 64, precision: fp32}  # 可选 fp32 / fp16 / bf16；fp16 需 CUDA，bf16 需支持该精度的 CUDA 设备
 decision:
-  point: {default: p_star, floor_ratio: 0.2, tau_grid_step: 0.005, tail: flat}
+  point: {default: p_star, floor_ratio: 0.2, tau_grid_step: 0.005, tail: flat}  # default：可选 median / p_star / p_star_l1；后两者需 pinball，by_step 可覆盖局部区间；tail：当前仅支持 flat（端点分位数外保持常值）

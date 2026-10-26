@@ -57,16 +57,25 @@ class NanwangMetric:
     def __init__(self, step: pd.Timedelta = STEP, n_leads: int = N_LEADS,
                  day_start: str = "06:15", day_end: str = "20:00",
                  ts_col: str = "timestamp_win", station_col: str = "station",
-                 pred_col: str = "observe_power_predict", true_col: str = "observe_power_future"):
+                 pred_col: str = "observe_power_predict", true_col: str = "observe_power_future",
+                 capacity_col: str | None = None):
         self.step, self.n_leads = step, n_leads
         self.day_start = dt.time.fromisoformat(day_start)
         self.day_end = dt.time.fromisoformat(day_end)
         self.ts_col, self.station_col = ts_col, station_col
         self.pred_col, self.true_col = pred_col, true_col
+        # Opt-in row capacities: D+1 uses the selected issue row; ultra-short
+        # uses the truth-source row (target minus one step) for all 16 leads.
+        self.capacity_col = capacity_col
 
     # ------------------------------------------------ 公共
     def _prep(self, result_df: pd.DataFrame) -> pd.DataFrame:
         df = result_df.copy()
+        if self.capacity_col is not None:
+            caps = pd.to_numeric(df[self.capacity_col], errors="coerce")
+            if not (np.isfinite(caps) & (caps > 0)).all():
+                raise ValueError("Row capacities must be finite positive scalars")
+            df[self.capacity_col] = caps
         if self.station_col not in df.columns:
             print(f"  [info] no '{self.station_col}' column -> treating all rows as one station 'all'")
             df[self.station_col] = "all"
@@ -74,6 +83,8 @@ class NanwangMetric:
         return df.sort_values(self.ts_col).drop_duplicates([self.station_col, self.ts_col], keep="first")
 
     def _gc(self, gccap, st):
+        if self.capacity_col is not None:
+            return 1.0  # Actual denominators are taken from each scored row below.
         gc = gccap.get(st, gccap.get(str(st))) if isinstance(gccap, dict) else gccap
         if gc is None or not (gc > 0):
             print(f"  [warn] station {st}: gccap missing/non-positive -> skipped")
@@ -125,6 +136,9 @@ class NanwangMetric:
         P = leads.to_numpy(float)
         if t.size == 0:
             return pd.Series(dtype=float)
+        if self.capacity_col is not None:
+            caps = df_station.set_index(self.ts_col)[self.capacity_col]
+            gccap = caps.reindex(truth.index - self.step).to_numpy(float)
         r = np.abs(t[:, None] - P) / np.maximum(t, 0.2 * gccap)[:, None]
         ok = np.isfinite(r)
         valid = np.flatnonzero(ok.any(axis=1))
@@ -146,7 +160,7 @@ class NanwangMetric:
                 continue
             rows.append({"station": st,
                          "accuracy_pct": round(max(0.0, (1.0 - float(per_t.sum())/(96*per_t.index.normalize().nunique())) * 100.0), 2),
-                         "n_targets": int(len(per_t)), "gccap": gc})
+                         "n_targets": int(len(per_t)), "gccap": np.nan if self.capacity_col else gc})
         return pd.DataFrame(rows, columns=["station", "accuracy_pct", "n_targets", "gccap"])
 
     def ultra_short_daily(self, result_df: pd.DataFrame, gccap,
@@ -215,7 +229,8 @@ class NanwangMetric:
                 stamps = pd.date_range(S + self.step, periods=n, freq=self.step)
                 win = (stamps >= D + pd.Timedelta(days=horizon_days)) & (stamps < D + pd.Timedelta(days=horizon_days+1))
                 fin = win & np.isfinite(p[:n]) & np.isfinite(a[:n])
-                acc = self.nanwang_official(a[:n][fin], p[:n][fin], gc)
+                row_cap = float(row[self.capacity_col]) if self.capacity_col else gc
+                acc = self.nanwang_official(a[:n][fin], p[:n][fin], row_cap)
                 if acc is None:
                     print(f"  [warn] station {st} {D.date()}: no valid D+1 point -> day skipped")
                     continue

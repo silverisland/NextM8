@@ -18,14 +18,19 @@ from .transformer_models import TransformersAdaptedM4Model
 from .transformer_trainer import score_result, validate
 
 
-def load_member(run, device="cpu"):
-    run = Path(run)
+def load_member(run, device="cpu", *, station_meta=None):
+    run = Path(run).resolve()
     config, weights = run / "model_config.yaml", run / "model.safetensors"
     if not config.is_file() or not weights.is_file():
         raise FileNotFoundError(
             f"{run} must contain model_config.yaml and model.safetensors"
         )
     cfg = deep_merge(raw_override(config), {"train": {"weights_path": str(weights)}})
+    if station_meta is not None:
+        # 跨机器只迁移 CSV 路径，保留 checkpoint 的列名映射和固定容量口径。
+        cfg = deep_merge(
+            cfg, {"dataset": {"station_meta": str(Path(station_meta).resolve())}}
+        )
     model = TransformersAdaptedM4Model(cfg).to(device)
     if not model.weights_loaded:
         raise RuntimeError(f"Failed to load {weights}")

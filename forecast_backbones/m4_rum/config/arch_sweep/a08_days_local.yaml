@@ -10,7 +10,7 @@ dataset:
   label_col: observe_power_future
   ts_col: timestamp_win
   station_id_col: station_id
-  station_meta: forecast_backbones/m8/station_meta.csv
+  station_meta: forecast_backbones/m8/station_meta.csv  # CSV 路径或 null；null 时使用 capacity_col 指定的数据容量列
   station_meta_cols:
     station_id: station_id
     station: station
@@ -40,19 +40,19 @@ features:
     - tsfm_predict
   cov_present: null
 model:
-  architecture: query_decoder
+  architecture: query_decoder  # 可选 legacy / query_decoder；站点 embedding 和 extensions 仅支持 query_decoder
   decoder_layers: 2
-  station_embedding: false
+  station_embedding: false  # 可选 true / false；仅 query_decoder 支持开启
   n_station_slots: 4096
   extensions:
-    residual_head: false
-    weather_day_reference: true
+    residual_head: false  # 可选 true / false；线性输出跳接，仅 query_decoder
+    weather_day_reference: true  # 可选 true / false；天气相似日参考，仅 query_decoder
     day_hidden: 32
-    local_weather: true
+    local_weather: true  # 可选 true / false；局部天气卷积，仅 query_decoder
     local_kernels:
     - 3
     - 9
-    hint_gate: false
+    hint_gate: false  # 可选 true / false；hint 门控，仅 query_decoder
     hint_gate_hidden: 32
   patch_len: 16
   d_model: 128
@@ -78,7 +78,7 @@ train:
   history_dropout: 0.0
   hint_dropout: 0.0
   slot_dropout: 0.3
-  loss: pinball
+  loss: pinball  # 可选 mse / mae / pinball；p_star 及分位数决策需 pinball；点输出与分位输出互换需重训
   ema_decay: 0.99
   weights_path: ${run.out_dir}/model.safetensors
   schedule:
@@ -89,30 +89,30 @@ train:
     epochs_max: 20
     warmup_steps: 300
     grad_clip: 1.0
-    precision: fp32
+    precision: fp32  # 可选 fp32 / fp16 / bf16；fp16 需 CUDA，bf16 需支持该精度的 CUDA 设备
     logging_steps: 50
-    eval_every_steps: 250
+    eval_every_steps: 250  # 正整数：每 N 步验证；null：每个 epoch 结束验证（需提供验证集）
     save_every: 500
-    sampling: random
-    progress_bar: true
+    sampling: random  # 可选 random（随机样本）/ station_day（站日均衡、有放回）
+    progress_bar: true  # 可选 true / false；显示或隐藏进度条
     num_workers: 0
   early_stop:
-    metric: nanwang_short_D+1
+    metric: nanwang_short_D+1  # 可选 nanwang_short_D+1（站日均值，越大越好）/ nrmse（越小越好）
     patience: 8
     nrmse_issue_every_min: 60
     smooth_k: 1
 decision:
   point:
-    default: p_star
+    default: p_star  # 可选 median / p_star / p_star_l1；后两者需 pinball，by_step 可覆盖局部区间
     by_step:
     - steps:
       - 0
       - 16
-      method: p_star_l1
-    clip_negative: true
-    capacity_cap: true
+      method: p_star_l1  # 可选 median / p_star / p_star_l1；by_step 规则需 pinball
+    clip_negative: true  # 可选 true / false；裁剪负预测，开启需 pinball
+    capacity_cap: true  # 可选 true / false；按容量裁剪上限，开启需 pinball
     floor_ratio: 0.2
     tau_grid_step: 0.005
-    tail: flat
+    tail: flat  # 当前仅支持 flat（端点分位数外保持常值）
 eval:
   batch_size: 32
